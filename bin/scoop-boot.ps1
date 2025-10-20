@@ -857,8 +857,8 @@ function Get-EnvironmentFiles {
     $username = $env:USERNAME.ToLower()
     
     $files = @(
-        @{Path = Join-Path $global:ENV_DIR "system.default.env"; Scope = "System"; Order = 1},
-        @{Path = Join-Path $global:ENV_DIR "system.$hostname.$username.env"; Scope = "System"; Order = 2},
+		@{Path = Join-Path $global:ENV_DIR "system.default.env"; Scope = "Machine"; Order = 1},
+		@{Path = Join-Path $global:ENV_DIR "system.$hostname.$username.env"; Scope = "Machine"; Order = 2},
         @{Path = Join-Path $global:ENV_DIR "user.default.env"; Scope = "User"; Order = 3},
         @{Path = Join-Path $global:ENV_DIR "user.$hostname.$username.env"; Scope = "User"; Order = 4}
     )
@@ -877,19 +877,20 @@ function Parse-EnvironmentLine {
     # Remove leading/trailing whitespace
     $Line = $Line.Trim()
     
-    # Parse different syntax patterns
-    if ($Line -match '^PATH\s*\+=\s*(.+)$') {
-        # PATH += value or PATH+=value (prepend)
-        return @{Type = "PathPrepend"; Value = $Matches[1].Trim()}
+    # Parse different syntax patterns for ANY variable
+    if ($Line -match '^([A-Z_][A-Z0-9_]*)\s*\+=\s*(.+)$') {
+        # VAR += value or VAR+=value (prepend for any variable)
+        return @{Type = "ListPrepend"; Name = $Matches[1]; Value = $Matches[2].Trim()}
     }
-    elseif ($Line -match '^PATH\s*=\s*\+(.+)$') {
-        # PATH =+ value or PATH=+value (append)
-        return @{Type = "PathAppend"; Value = $Matches[1].Trim()}
+    elseif ($Line -match '^([A-Z_][A-Z0-9_]*)\s*=\s*\+(.+)$') {
+        # VAR =+ value or VAR=+value (append for any variable)
+        return @{Type = "ListAppend"; Name = $Matches[1]; Value = $Matches[2].Trim()}
     }
-    elseif ($Line -match '^PATH\s*-=\s*(.+)$|^PATH-=(.+)$') {
-        # PATH -= value or PATH-=value (remove)
-        $value = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
-        return @{Type = "PathRemove"; Value = $value.Trim()}
+    elseif ($Line -match '^([A-Z_][A-Z0-9_]*)\s*-=\s*(.+)$|^([A-Z_][A-Z0-9_]*)-=(.+)$') {
+        # VAR -= value or VAR-=value (remove for any variable)
+        $name = if ($Matches[1]) { $Matches[1] } else { $Matches[3] }
+        $value = if ($Matches[2]) { $Matches[2] } else { $Matches[4] }
+        return @{Type = "ListRemove"; Name = $name; Value = $value.Trim()}
     }
     elseif ($Line -match '^-([A-Z_][A-Z0-9_]*)$') {
         # -VARIABLE (unset)
@@ -986,7 +987,7 @@ function Invoke-EnvStatus {
     $found = $false
     foreach ($file in $envFiles) {
         $path = Join-Path $global:ENV_DIR $file
-        $scope = if ($file.StartsWith("system")) { "System" } else { "User" }
+		$scope = if ($file.StartsWith("system")) { "Machine" } else { "User" }        
         $type = if ($file -like "*.default.env") { "Default" } else { "Host-specific" }
         
         if (Test-Path $path) {
@@ -1064,7 +1065,7 @@ function Invoke-ApplyEnv {
                 File = Split-Path $fileInfo.Path -Leaf
             }
             
-            if ($fileInfo.Scope -eq "System") {
+            if ($fileInfo.Scope -eq "Machine") {
                 $systemChanges += $change
             }
             else {
@@ -1079,7 +1080,7 @@ function Invoke-ApplyEnv {
     }
     
     # Check for admin rights if system changes are needed
-    if ($systemChanges.Count -gt 0) {
+	if ($fileInfo.Scope -eq "Machine") {
         $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
         if (!$isAdmin -and !$DryRun) {
             Write-ErrorMsg "Administrator rights required for system environment changes"
@@ -1127,89 +1128,93 @@ function Apply-EnvironmentChange {
     $action = $Change.Action
     $scope = $Change.Scope
     $file = $Change.File
+    $varName = $action.Name
     
     switch ($action.Type) {
         "Set" {
-            $current = [Environment]::GetEnvironmentVariable($action.Name, $scope)
+            $current = [Environment]::GetEnvironmentVariable($varName, $scope)
             if ($current -ne $action.Value) {
                 if ($DryRun) {
-                    Write-Host "  [DRY] Set $($action.Name) = $($action.Value) [$scope from $file]" -ForegroundColor Yellow
+                    Write-Host "  [DRY] Set $varName = $($action.Value) [$scope from $file]" -ForegroundColor Yellow
                 }
                 else {
                     if ($current) {
-                        Backup-EnvironmentVariable -Name $action.Name -Scope $scope
+                        Backup-EnvironmentVariable -Name $varName -Scope $scope
                     }
-                    [Environment]::SetEnvironmentVariable($action.Name, $action.Value, $scope)
-                    Write-Success "Set $($action.Name) [$scope]"
+                    [Environment]::SetEnvironmentVariable($varName, $action.Value, $scope)
+                    Write-Success "Set $varName [$scope]"
                 }
                 return $true
             }
         }
         
         "Unset" {
-            $current = [Environment]::GetEnvironmentVariable($action.Name, $scope)
+            $current = [Environment]::GetEnvironmentVariable($varName, $scope)
             if ($current) {
                 if ($DryRun) {
-                    Write-Host "  [DRY] Unset $($action.Name) [$scope from $file]" -ForegroundColor Yellow
+                    Write-Host "  [DRY] Unset $varName [$scope from $file]" -ForegroundColor Yellow
                 }
                 else {
-                    Backup-EnvironmentVariable -Name $action.Name -Scope $scope
-                    [Environment]::SetEnvironmentVariable($action.Name, $null, $scope)
-                    Write-Success "Unset $($action.Name) [$scope]"
+                    Backup-EnvironmentVariable -Name $varName -Scope $scope
+                    [Environment]::SetEnvironmentVariable($varName, $null, $scope)
+                    Write-Success "Unset $varName [$scope]"
                 }
                 return $true
             }
         }
         
-        "PathPrepend" {
-            $currentPath = [Environment]::GetEnvironmentVariable("PATH", $scope)
-            $pathArray = $currentPath -split ';' | Where-Object { $_ }
+        "ListPrepend" {
+            $currentValue = [Environment]::GetEnvironmentVariable($varName, $scope)
+            $separator = if ($varName -eq "PATH") { ";" } else { ";" }  # Könnte für andere Vars angepasst werden
+            $valueArray = if ($currentValue) { $currentValue -split $separator | Where-Object { $_ } } else { @() }
             
-            if ($action.Value -notin $pathArray) {
+            if ($action.Value -notin $valueArray) {
                 if ($DryRun) {
-                    Write-Host "  [DRY] Prepend to PATH: $($action.Value) [$scope from $file]" -ForegroundColor Yellow
+                    Write-Host "  [DRY] Prepend to $varName`: $($action.Value) [$scope from $file]" -ForegroundColor Yellow
                 }
                 else {
-                    Backup-EnvironmentVariable -Name "PATH" -Scope $scope
-                    $newPath = @($action.Value) + $pathArray
-                    [Environment]::SetEnvironmentVariable("PATH", ($newPath -join ';'), $scope)
-                    Write-Success "Prepended to PATH: $($action.Value) [$scope]"
+                    Backup-EnvironmentVariable -Name $varName -Scope $scope
+                    $newValue = @($action.Value) + $valueArray
+                    [Environment]::SetEnvironmentVariable($varName, ($newValue -join $separator), $scope)
+                    Write-Success "Prepended to $varName`: $($action.Value) [$scope]"
                 }
                 return $true
             }
         }
         
-        "PathAppend" {
-            $currentPath = [Environment]::GetEnvironmentVariable("PATH", $scope)
-            $pathArray = $currentPath -split ';' | Where-Object { $_ }
+        "ListAppend" {
+            $currentValue = [Environment]::GetEnvironmentVariable($varName, $scope)
+            $separator = if ($varName -eq "PATH") { ";" } else { ";" }
+            $valueArray = if ($currentValue) { $currentValue -split $separator | Where-Object { $_ } } else { @() }
             
-            if ($action.Value -notin $pathArray) {
+            if ($action.Value -notin $valueArray) {
                 if ($DryRun) {
-                    Write-Host "  [DRY] Append to PATH: $($action.Value) [$scope from $file]" -ForegroundColor Yellow
+                    Write-Host "  [DRY] Append to $varName`: $($action.Value) [$scope from $file]" -ForegroundColor Yellow
                 }
                 else {
-                    Backup-EnvironmentVariable -Name "PATH" -Scope $scope
-                    $newPath = $pathArray + @($action.Value)
-                    [Environment]::SetEnvironmentVariable("PATH", ($newPath -join ';'), $scope)
-                    Write-Success "Appended to PATH: $($action.Value) [$scope]"
+                    Backup-EnvironmentVariable -Name $varName -Scope $scope
+                    $newValue = $valueArray + @($action.Value)
+                    [Environment]::SetEnvironmentVariable($varName, ($newValue -join $separator), $scope)
+                    Write-Success "Appended to $varName`: $($action.Value) [$scope]"
                 }
                 return $true
             }
         }
         
-        "PathRemove" {
-            $currentPath = [Environment]::GetEnvironmentVariable("PATH", $scope)
-            $pathArray = $currentPath -split ';' | Where-Object { $_ }
+        "ListRemove" {
+            $currentValue = [Environment]::GetEnvironmentVariable($varName, $scope)
+            $separator = if ($varName -eq "PATH") { ";" } else { ";" }
+            $valueArray = if ($currentValue) { $currentValue -split $separator | Where-Object { $_ } } else { @() }
             
-            if ($action.Value -in $pathArray) {
+            if ($action.Value -in $valueArray) {
                 if ($DryRun) {
-                    Write-Host "  [DRY] Remove from PATH: $($action.Value) [$scope from $file]" -ForegroundColor Yellow
+                    Write-Host "  [DRY] Remove from $varName`: $($action.Value) [$scope from $file]" -ForegroundColor Yellow
                 }
                 else {
-                    Backup-EnvironmentVariable -Name "PATH" -Scope $scope
-                    $newPath = $pathArray | Where-Object { $_ -ne $action.Value }
-                    [Environment]::SetEnvironmentVariable("PATH", ($newPath -join ';'), $scope)
-                    Write-Success "Removed from PATH: $($action.Value) [$scope]"
+                    Backup-EnvironmentVariable -Name $varName -Scope $scope
+                    $newValue = $valueArray | Where-Object { $_ -ne $action.Value }
+                    [Environment]::SetEnvironmentVariable($varName, ($newValue -join $separator), $scope)
+                    Write-Success "Removed from $varName`: $($action.Value) [$scope]"
                 }
                 return $true
             }
