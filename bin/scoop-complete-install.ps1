@@ -1,23 +1,22 @@
 <#
 .SYNOPSIS
-    Complete installation of Scoop development environment based on all chats
+    Complete installation of Scoop development environment
     
 .DESCRIPTION
-    This script installs all tools and configurations from the chats.
-    Part 1: Set environment variables as admin
-    Part 2: Install tools as regular user
+    This script installs all tools and configurations.
+    Phase 1: Set environment variables as admin (Machine scope)
+    Phase 2: Install tools as regular user via scoop-boot.ps1 --bootstrap
     
 .NOTES
-    Version: 1.0.0
+    Version: 2.0.0
     Author: System Configuration
     Date: 2025-10-21
     
 .EXAMPLE
-    # Part 1 - As Administrator PowerShell:
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+    # Phase 1 - As Administrator PowerShell:
     .\scoop-complete-install.ps1 -SetEnvironment
     
-    # Part 2 - As regular user:
+    # Phase 2 - As regular user:
     .\scoop-complete-install.ps1 -InstallTools
 #>
 
@@ -38,7 +37,9 @@ $Username = [Environment]::UserName.ToLower()
 # PART 1: ENVIRONMENT SETUP (RUN AS ADMIN)
 # ============================================================================
 function Set-DevelopmentEnvironment {
-    Write-Host "=== Setting Development Environment (Admin Required) ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "=== Phase 1: Environment Setup (Admin Required) ===" -ForegroundColor Cyan
+    Write-Host ""
     
     # Check admin rights
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
@@ -51,6 +52,16 @@ function Set-DevelopmentEnvironment {
     
     Write-Host "[OK] Running with administrator privileges" -ForegroundColor Green
     
+    # Ensure scoop-boot.ps1 exists
+    if (-not (Test-Path "$ScoopDir\bin\scoop-boot.ps1")) {
+        Write-Host "[ERROR] scoop-boot.ps1 not found at $ScoopDir\bin\scoop-boot.ps1" -ForegroundColor Red
+        Write-Host "Please download it first from:" -ForegroundColor Yellow
+        Write-Host "https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1" -ForegroundColor White
+        exit 1
+    }
+    
+    Write-Host "[OK] Found scoop-boot.ps1" -ForegroundColor Green
+    
     # Create environment file content
     $envContent = @"
 # ============================================================================
@@ -58,11 +69,17 @@ function Set-DevelopmentEnvironment {
 # File: system.$Hostname.$Username.env
 # Created: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 # ============================================================================
-# Scope: Machine (requires admin)
+# Scope: Machine (system-wide, applied by admin via scoop-boot.ps1 --apply-env)
 # SCOOP: $ScoopDir
 # Hostname: $Hostname
 # Username: $Username
 # ============================================================================
+
+# ============================================================================
+# SCOOP CORE VARIABLES
+# ============================================================================
+SCOOP=$ScoopDir
+SCOOP_GLOBAL=$ScoopDir\global
 
 # ============================================================================
 # CLEANUP - Remove old/duplicate PATH entries
@@ -90,14 +107,13 @@ PATH+=`$MSYS2_HOME\mingw64\bin
 # ============================================================================
 # VERSION CONTROL
 # ============================================================================
-SVN_HOME=$ScoopDir\apps\svn\current
+SVN_HOME=$ScoopDir\apps\tortoisesvn\current
 PATH+=`$SVN_HOME\bin
 
 GIT_HOME=$ScoopDir\apps\git\current
 PATH+=`$GIT_HOME\mingw64\bin
 PATH+=`$GIT_HOME\usr\bin
 PATH+=`$GIT_HOME\cmd
-GIT_SSH=$ScoopDir\apps\openssh\current\ssh.exe
 
 # ============================================================================
 # C/C++ DEVELOPMENT
@@ -187,8 +203,30 @@ LANGUAGE=en_US:en
     Write-Host "[OK] Created environment file: $envFile" -ForegroundColor Green
     
     Write-Host ""
-    Write-Host "=== Environment Setup Complete ===" -ForegroundColor Green
-    Write-Host "Next: Run this script as normal user with -InstallTools parameter" -ForegroundColor Yellow
+    Write-Host ">>> Applying environment configuration to Machine scope..." -ForegroundColor Magenta
+    Write-Host "[INFO] Running: scoop-boot.ps1 --apply-env (as Administrator)" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Apply environment as admin (Machine scope)
+    try {
+        & "$ScoopDir\bin\scoop-boot.ps1" --apply-env
+        Write-Host ""
+        Write-Host "[OK] Environment variables set in Machine scope" -ForegroundColor Green
+    } catch {
+        Write-Host "[ERROR] Failed to apply environment: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[INFO] You can manually apply later with: scoop-boot.ps1 --apply-env" -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
+    Write-Host "=== Phase 1 Complete ===" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Environment variables have been set system-wide (Machine scope)." -ForegroundColor Cyan
+    Write-Host "All users on this system will have access to these settings." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Next steps:" -ForegroundColor Yellow
+    Write-Host "1. Close this Administrator PowerShell" -ForegroundColor White
+    Write-Host "2. Open a NEW PowerShell/CMD as REGULAR USER" -ForegroundColor White
+    Write-Host "3. Run: .\scoop-complete-install.ps1 -InstallTools" -ForegroundColor White
     Write-Host ""
 }
 
@@ -196,191 +234,157 @@ LANGUAGE=en_US:en
 # PART 2: TOOLS INSTALLATION (RUN AS USER)
 # ============================================================================
 function Install-ScoopTools {
-    Write-Host "=== Installing Scoop and Development Tools ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "=== Phase 2: Tools Installation (User) ===" -ForegroundColor Cyan
     Write-Host ""
     
     # Check if running as admin (should NOT be for Scoop)
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
     if ($isAdmin) {
-        Write-Host "[WARN] Running as Administrator - Scoop works better as normal user!" -ForegroundColor Yellow
+        Write-Host "[WARN] Running as Administrator - Scoop should be run as normal user!" -ForegroundColor Yellow
         Write-Host "Continue anyway? (y/N): " -NoNewline
         $response = Read-Host
         if ($response -ne 'y') { exit 0 }
     }
     
+    Write-Host "[OK] Running as normal user" -ForegroundColor Green
+    Write-Host ""
+    
     # ============================================================================
     # BOOTSTRAP SCOOP
     # ============================================================================
-    Write-Host ">>> Bootstrapping Scoop..." -ForegroundColor White
+    Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor Magenta
+    Write-Host ""
     
-    # Download and save scoop-boot.ps1
-    if (-not (Test-Path "$ScoopDir\bin")) {
-        New-Item -ItemType Directory -Path "$ScoopDir\bin" -Force | Out-Null
-    }
-    
+    # Ensure scoop-boot.ps1 exists
     if (-not (Test-Path "$ScoopDir\bin\scoop-boot.ps1")) {
-        Write-Host "Downloading scoop-boot.ps1..." -ForegroundColor Gray
+        Write-Host "[INFO] Downloading scoop-boot.ps1..." -ForegroundColor Cyan
+        
+        if (-not (Test-Path "$ScoopDir\bin")) {
+            New-Item -ItemType Directory -Path "$ScoopDir\bin" -Force | Out-Null
+        }
+        
         $scoopBootUrl = "https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1"
         try {
             Invoke-WebRequest -Uri $scoopBootUrl -OutFile "$ScoopDir\bin\scoop-boot.ps1"
             Write-Host "[OK] Downloaded scoop-boot.ps1" -ForegroundColor Green
         } catch {
-            Write-Host "[WARN] Could not download scoop-boot.ps1, using manual bootstrap" -ForegroundColor Yellow
+            Write-Host "[ERROR] Could not download scoop-boot.ps1" -ForegroundColor Red
+            Write-Host "Please download manually from: $scoopBootUrl" -ForegroundColor Yellow
+            exit 1
         }
     }
     
-    # Bootstrap Scoop
-    if (Test-Path "$ScoopDir\bin\scoop-boot.ps1") {
-        & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap
-    } else {
-        # Manual bootstrap
-        $env:SCOOP = $ScoopDir
-        $env:SCOOP_GLOBAL = "$ScoopDir\global"
-        [Environment]::SetEnvironmentVariable('SCOOP', $ScoopDir, 'User')
-        [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$ScoopDir\global", 'User')
-        
-        Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile "$env:TEMP\install.ps1"
-        & "$env:TEMP\install.ps1" -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
-        Remove-Item "$env:TEMP\install.ps1" -Force
-    }
+    # Bootstrap Scoop via scoop-boot.ps1
+    Write-Host "[INFO] Running: scoop-boot.ps1 --bootstrap" -ForegroundColor Cyan
+    & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap
     
     # Update PATH for current session
     $env:Path = "$ScoopDir\shims;$ScoopDir\bin;$env:Path"
     
-    Write-Host "[OK] Scoop bootstrapped" -ForegroundColor Green
     Write-Host ""
+    Write-Host "[OK] Scoop bootstrapped successfully" -ForegroundColor Green
+    Write-Host ""
+    
+    # Disable aria2 warnings (now that scoop exists)
+    scoop config aria2-warning-enabled false 2>$null
     
     # ============================================================================
     # ADD BUCKETS
     # ============================================================================
-    Write-Host ">>> Adding Scoop buckets..." -ForegroundColor White
+    Write-Host ">>> Step 2: Adding Scoop buckets..." -ForegroundColor Magenta
+    Write-Host ""
     
     $buckets = @('main', 'extras', 'java', 'versions')
     foreach ($bucket in $buckets) {
         Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
-        scoop bucket add $bucket 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] Bucket added: $bucket" -ForegroundColor Green
-        }
-    }
-    Write-Host ""
-    
-    # ============================================================================
-    # INSTALL ESSENTIAL TOOLS
-    # ============================================================================
-    Write-Host ">>> Installing essential tools..." -ForegroundColor White
-    
-    $essentialTools = @(
-        '7zip',
-        'git',
-        'aria2',
-        'sudo',
-        'innounp',
-        'dark',
-        'lessmsi',
-        'wget',
-        'cacert'
-    )
-    
-    foreach ($tool in $essentialTools) {
-        Write-Host "Installing: $tool" -ForegroundColor Gray
-        scoop install $tool 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "[OK] Installed: $tool" -ForegroundColor Green
+        $bucketExists = scoop bucket list 2>$null | Select-String -Pattern "^$bucket"
+        if (-not $bucketExists) {
+            scoop bucket add $bucket 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] Could not add bucket: $bucket" -ForegroundColor Yellow
+            }
         } else {
-            Write-Host "[WARN] Failed to install: $tool" -ForegroundColor Yellow
+            Write-Host "[INFO] Bucket already exists: $bucket" -ForegroundColor Gray
         }
     }
     Write-Host ""
     
     # ============================================================================
-    # INSTALL JAVA VERSIONS
+    # INSTALL TOOLS
     # ============================================================================
-    Write-Host ">>> Installing Java versions..." -ForegroundColor White
+    Write-Host ">>> Step 3: Installing development tools..." -ForegroundColor Magenta
+    Write-Host ""
+    Write-Host "This will take 15-30 minutes depending on your internet connection." -ForegroundColor Gray
+    Write-Host ""
     
-    $javaVersions = @(
-        'temurin8-jdk',
-        'temurin11-jdk',
-        'temurin17-jdk',
-        'temurin21-jdk',
-        'temurin23-jdk'
-        # 'temurin25-jdk'  # Early access, optional
-    )
+    # Essential tools (already installed by bootstrap, but ensure they're there)
+    Write-Host "[Category] Essential tools" -ForegroundColor Cyan
+    $essentialTools = @('7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
+    foreach ($tool in $essentialTools) {
+        if (-not (scoop list $tool 2>$null | Select-String $tool)) {
+            Write-Host "Installing: $tool" -ForegroundColor Gray
+            scoop install $tool 2>$null
+        } else {
+            Write-Host "[INFO] Already installed: $tool" -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
     
+    # Java versions
+    Write-Host "[Category] Java Development Kits" -ForegroundColor Cyan
+    $javaVersions = @('temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk')
     foreach ($java in $javaVersions) {
         Write-Host "Installing: $java" -ForegroundColor Gray
         scoop install $java 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Installed: $java" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] Failed to install: $java" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed: $java" -ForegroundColor Yellow
         }
     }
     
-    # Set default Java version
     Write-Host "Setting default Java to temurin21-jdk..." -ForegroundColor Gray
-    scoop reset temurin21-jdk
+    scoop reset temurin21-jdk 2>$null
     Write-Host ""
     
-    # ============================================================================
-    # INSTALL BUILD TOOLS
-    # ============================================================================
-    Write-Host ">>> Installing build tools..." -ForegroundColor White
-    
-    $buildTools = @(
-        'maven',
-        'gradle',
-        'ant',
-        'kotlin',
-        'cmake',
-        'make',
-        'ninja'
-    )
-    
+    # Build tools
+    Write-Host "[Category] Build Tools" -ForegroundColor Cyan
+    $buildTools = @('maven', 'gradle', 'ant', 'kotlin', 'cmake', 'make', 'ninja')
     foreach ($tool in $buildTools) {
         Write-Host "Installing: $tool" -ForegroundColor Gray
         scoop install $tool 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Installed: $tool" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] Failed to install: $tool" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed: $tool" -ForegroundColor Yellow
         }
     }
     Write-Host ""
     
-    # ============================================================================
-    # INSTALL PROGRAMMING LANGUAGES
-    # ============================================================================
-    Write-Host ">>> Installing programming languages..." -ForegroundColor White
+    # Programming languages
+    Write-Host "[Category] Programming Languages" -ForegroundColor Cyan
     
-    # Python 3.13
     Write-Host "Installing: python313" -ForegroundColor Gray
     scoop install python313 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Installed: python313" -ForegroundColor Green
-        # Register Python
-        $regFile = "$ScoopDir\apps\python313\current\install-pep-514.reg"
-        if (Test-Path $regFile) {
-            reg import $regFile 2>$null
-            Write-Host "[OK] Registered Python 3.13 in registry" -ForegroundColor Green
-        }
     }
     
-    # Perl
     Write-Host "Installing: perl" -ForegroundColor Gray
     scoop install perl 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Installed: perl" -ForegroundColor Green
     }
     
-    # Node.js
     Write-Host "Installing: nodejs" -ForegroundColor Gray
     scoop install nodejs 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Installed: nodejs" -ForegroundColor Green
     }
     
-    # MSYS2 (for Unix tools)
     Write-Host "Installing: msys2" -ForegroundColor Gray
     scoop install msys2 2>$null
     if ($LASTEXITCODE -eq 0) {
@@ -388,238 +392,177 @@ function Install-ScoopTools {
     }
     Write-Host ""
     
-    # ============================================================================
-    # INSTALL VERSION CONTROL
-    # ============================================================================
-    Write-Host ">>> Installing version control tools..." -ForegroundColor White
-    
-    $vcsTools = @(
-        'svn',
-        'gh',        # GitHub CLI
-        'lazygit'    # Git TUI
-    )
-    
+    # Version control
+    Write-Host "[Category] Version Control" -ForegroundColor Cyan
+    $vcsTools = @('tortoisesvn', 'gh', 'lazygit')
     foreach ($tool in $vcsTools) {
         Write-Host "Installing: $tool" -ForegroundColor Gray
         scoop install $tool 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Installed: $tool" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] Failed to install: $tool" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed: $tool" -ForegroundColor Yellow
         }
     }
     Write-Host ""
     
-    # ============================================================================
-    # INSTALL EDITORS & IDES
-    # ============================================================================
-    Write-Host ">>> Installing editors and IDEs..." -ForegroundColor White
-    
-    $editors = @(
-        'vscode',
-        'neovim',
-        'notepadplusplus'
-    )
-    
+    # Editors
+    Write-Host "[Category] Editors & IDEs" -ForegroundColor Cyan
+    $editors = @('vscode', 'neovim', 'notepadplusplus')
     foreach ($editor in $editors) {
         Write-Host "Installing: $editor" -ForegroundColor Gray
         scoop install $editor 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Installed: $editor" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] Failed to install: $editor" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed: $editor" -ForegroundColor Yellow
         }
     }
     Write-Host ""
     
-    # ============================================================================
-    # INSTALL GUI TOOLS
-    # ============================================================================
-    Write-Host ">>> Installing GUI tools..." -ForegroundColor White
-    
+    # GUI tools
+    Write-Host "[Category] GUI Applications" -ForegroundColor Cyan
     $guiTools = @(
-        'windows-terminal',
-        'hxd',              # Hex editor
-        'winmerge',         # Diff tool
-        'freecommander',    # File manager
-        'greenshot',        # Screenshot tool
-        'mousejiggler',     # Keep system awake
-        'processhacker',    # Task manager++
-        'everything',       # File search
-        'postman',          # API testing
-        'dbeaver'           # Database client
+        'windows-terminal', 'hxd', 'winmerge', 'freecommander', 
+        'greenshot', 'mousejiggler', 'processhacker', 'everything',
+        'postman', 'dbeaver'
     )
-    
     foreach ($tool in $guiTools) {
         Write-Host "Installing: $tool" -ForegroundColor Gray
         scoop install $tool 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Installed: $tool" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] Failed to install: $tool" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed: $tool" -ForegroundColor Yellow
         }
     }
     Write-Host ""
     
-    # ============================================================================
-    # INSTALL UTILITIES
-    # ============================================================================
-    Write-Host ">>> Installing utilities..." -ForegroundColor White
-    
-    $utilities = @(
-        'jq',               # JSON processor
-        'openssh',          # SSH client
-        'putty',            # SSH client GUI
-        'winscp',           # SFTP client
-        'filezilla',        # FTP client
-        'curl',             # HTTP client
-        'htop',             # Process viewer
-        'ripgrep',          # Fast grep
-        'fd',               # Fast find
-        'bat'               # Better cat
-    )
-    
+    # Utilities
+    Write-Host "[Category] Command-Line Utilities" -ForegroundColor Cyan
+    $utilities = @('jq', 'openssh', 'putty', 'winscp', 'filezilla', 'curl', 'ripgrep', 'fd', 'bat')
+    # Note: htop is Linux-only, use ProcessHacker or Windows Task Manager instead
     foreach ($tool in $utilities) {
         Write-Host "Installing: $tool" -ForegroundColor Gray
         scoop install $tool 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[OK] Installed: $tool" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] Failed to install: $tool" -ForegroundColor Yellow
+            Write-Host "[WARN] Failed: $tool" -ForegroundColor Yellow
         }
     }
     Write-Host ""
     
     # ============================================================================
-    # REGISTER CONTEXT MENUS
+    # REGISTRY IMPORTS
     # ============================================================================
-    Write-Host ">>> Registering context menus..." -ForegroundColor White
+    Write-Host ">>> Step 4: Importing registry files..." -ForegroundColor Magenta
+    Write-Host ""
     
-    # These apps provide context menu registry files
-    $contextMenus = @(
-        @{App='7zip'; RegFile='install-context.reg'},
-        @{App='notepadplusplus'; RegFile='install-context.reg'},
-        @{App='vscode'; RegFile='install-context.reg'},
-        @{App='windows-terminal'; RegFile='install-context.reg'},
-        @{App='git'; RegFile='install-context.reg'}
+    # Context menu registrations
+    $appsWithContextMenu = @(
+        @{App='7zip'; Files=@('install-context.reg')},
+        @{App='notepadplusplus'; Files=@('install-context.reg')},
+        @{App='vscode'; Files=@('install-context.reg', 'install-associations.reg')},
+        @{App='windows-terminal'; Files=@('install-context.reg')},
+        @{App='git'; Files=@('install-context.reg')},
+        @{App='tortoisesvn'; Files=@('tortoisesvn-install.reg', 'tortoisesvn-install-tools.reg')}
     )
     
-    foreach ($item in $contextMenus) {
-        $regPath = "$ScoopDir\apps\$($item.App)\current\$($item.RegFile)"
-        if (Test-Path $regPath) {
-            reg import $regPath 2>$null
-            Write-Host "[OK] Registered context menu for $($item.App)" -ForegroundColor Green
-        } else {
-            Write-Host "[INFO] No context menu registry file for $($item.App)" -ForegroundColor Gray
+    foreach ($item in $appsWithContextMenu) {
+        $appDir = "$ScoopDir\apps\$($item.App)\current"
+        if (Test-Path $appDir) {
+            foreach ($regFileName in $item.Files) {
+                $regPath = "$appDir\$regFileName"
+                if (Test-Path $regPath) {
+                    try {
+                        reg import $regPath 2>$null
+                        Write-Host "[OK] Imported registry: $($item.App) - $regFileName" -ForegroundColor Green
+                    } catch {
+                        Write-Host "[WARN] Could not import: $($item.App) - $regFileName" -ForegroundColor Yellow
+                    }
+                }
+            }
         }
     }
-    
-    # Special registry imports
-    Write-Host ">>> Checking for special registry imports..." -ForegroundColor White
     
     # Python PEP-514 registration
     $pythonReg = "$ScoopDir\apps\python313\current\install-pep-514.reg"
-    if ((Test-Path $pythonReg) -and -not (Test-Path "HKCU:\Software\Python\PythonCore\3.13")) {
+    if (Test-Path $pythonReg) {
         reg import $pythonReg 2>$null
-        Write-Host "[OK] Python 3.13 registered in registry" -ForegroundColor Green
+        Write-Host "[OK] Imported registry: Python 3.13 PEP-514" -ForegroundColor Green
     }
     Write-Host ""
     
     # ============================================================================
-    # USAGE INSTRUCTIONS FOR INSTALLED TOOLS
+    # FINAL STATUS & MANUAL CONFIGURATION NEEDED
     # ============================================================================
-    Write-Host ">>> Usage instructions for installed applications..." -ForegroundColor White
+    Write-Host "=== Phase 2 Complete ===" -ForegroundColor Green
     Write-Host ""
-    
-    Write-Host "=== Applications with context menus registered ===" -ForegroundColor Cyan
-    Write-Host "  7-Zip:            Right-click any file -> 7-Zip menu" -ForegroundColor Gray
-    Write-Host "  Notepad++:        Right-click any file -> Edit with Notepad++" -ForegroundColor Gray
-    Write-Host "  VS Code:          Right-click folder -> Open with Code" -ForegroundColor Gray
-    Write-Host "  Windows Terminal: Right-click folder -> Open in Windows Terminal" -ForegroundColor Gray
-    Write-Host "  Git:              Right-click folder -> Git Bash Here" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "=== Applications requiring manual configuration ===" -ForegroundColor Cyan
-    Write-Host ""
-    
-    Write-Host "HxD (Hex Editor):" -ForegroundColor Yellow
-    Write-Host "  Start:     hxd                    (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Or:        Start Menu -> HxD" -ForegroundColor Gray
-    Write-Host "  Context:   In HxD -> Tools -> Options -> Context Menu (optional)" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "WinMerge (Diff Tool):" -ForegroundColor Yellow
-    Write-Host "  Start:     winmerge               (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Context:   In WinMerge -> Edit -> Options -> Shell Integration" -ForegroundColor Gray
-    Write-Host "             Enable 'Add WinMerge to explorer context menu'" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "FreeCommander (File Manager):" -ForegroundColor Yellow
-    Write-Host "  Start:     freecommander          (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Replace:   Settings -> Windows -> Replace Windows Explorer (optional)" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "Greenshot (Screenshot Tool):" -ForegroundColor Yellow
-    Write-Host "  Start:     greenshot              (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Autostart: Will run in system tray automatically" -ForegroundColor Gray
-    Write-Host "  Hotkeys:   PrintScreen = Region, Alt+PrintScreen = Window" -ForegroundColor Gray
-    Write-Host "  Config:    Right-click tray icon -> Preferences" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "MouseJiggler (Keep Awake):" -ForegroundColor Yellow
-    Write-Host "  Start:     mousejiggler           (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Usage:     Enable 'Zen Jiggle' for invisible mouse movement" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "ProcessHacker (Task Manager):" -ForegroundColor Yellow
-    Write-Host "  Start:     processhacker          (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Replace:   Options -> Advanced -> Replace Task Manager (requires admin)" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "Everything (File Search):" -ForegroundColor Yellow
-    Write-Host "  Start:     everything             (from any terminal)" -ForegroundColor Gray
-    Write-Host "  Autostart: Tools -> Options -> General -> Start Everything on system startup" -ForegroundColor Gray
-    Write-Host "  Service:   Tools -> Options -> General -> Install Everything service (for NTFS indexing)" -ForegroundColor Gray
-    Write-Host ""
-    
-    Write-Host "=== Development tools (command line) ===" -ForegroundColor Cyan
-    Write-Host "  Java:      java -version          (switch versions: scoop reset temurin21-jdk)" -ForegroundColor Gray
-    Write-Host "  Python:    python --version       (package manager: pip install <package>)" -ForegroundColor Gray
-    Write-Host "  Node.js:   node --version         (package manager: npm install <package>)" -ForegroundColor Gray
-    Write-Host "  Perl:      perl --version         (package manager: cpan install <module>)" -ForegroundColor Gray
-    Write-Host "  Maven:     mvn --version          (build: mvn clean install)" -ForegroundColor Gray
-    Write-Host "  Gradle:    gradle --version       (build: gradle build)" -ForegroundColor Gray
-    Write-Host ""
-    
-    # ============================================================================
-    # APPLY ENVIRONMENT CONFIGURATION
-    # ============================================================================
-    Write-Host ">>> Applying environment configuration..." -ForegroundColor White
-    
-    if (Test-Path "$ScoopDir\bin\scoop-boot.ps1") {
-        & "$ScoopDir\bin\scoop-boot.ps1" --apply-env
-        Write-Host "[OK] Environment configuration applied" -ForegroundColor Green
-    } else {
-        Write-Host "[WARN] scoop-boot.ps1 not found, skipping environment configuration" -ForegroundColor Yellow
-    }
-    Write-Host ""
-    
-    # ============================================================================
-    # FINAL STATUS
-    # ============================================================================
-    Write-Host "=== Installation Complete ===" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Installed apps:" -ForegroundColor Cyan
+    Write-Host "Installed applications:" -ForegroundColor Cyan
     scoop list
     Write-Host ""
     
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  MANUAL CONFIGURATION REQUIRED" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "The following applications require manual configuration:" -ForegroundColor White
+    Write-Host ""
+    
+    # WinMerge
+    Write-Host "1. WinMerge (Diff/Merge Tool)" -ForegroundColor Yellow
+    Write-Host "   Start: winmerge" -ForegroundColor Gray
+    Write-Host "   Configure: Edit > Options > Shell Integration" -ForegroundColor White
+    Write-Host "   Enable: 'Add WinMerge to Windows Explorer context menu'" -ForegroundColor White
+    Write-Host ""
+    
+    # HxD
+    Write-Host "2. HxD (Hex Editor)" -ForegroundColor Yellow
+    Write-Host "   Start: hxd" -ForegroundColor Gray
+    Write-Host "   Configure: Tools > Options > Context Menu (optional)" -ForegroundColor White
+    Write-Host "   Enable: 'Integrate into Explorer context menu'" -ForegroundColor White
+    Write-Host ""
+    
+    # Greenshot
+    Write-Host "3. Greenshot (Screenshot Tool)" -ForegroundColor Yellow
+    Write-Host "   Start: greenshot" -ForegroundColor Gray
+    Write-Host "   Autostart: Right-click tray icon > Preferences > General" -ForegroundColor White
+    Write-Host "   Enable: 'Launch Greenshot on startup'" -ForegroundColor White
+    Write-Host "   Hotkeys: PrintScreen = Region, Alt+PrintScreen = Window" -ForegroundColor Gray
+    Write-Host ""
+    
+    # FreeCommander
+    Write-Host "4. FreeCommander (File Manager)" -ForegroundColor Yellow
+    Write-Host "   Start: freecommander" -ForegroundColor Gray
+    Write-Host "   Configure: Settings > Integration (optional)" -ForegroundColor White
+    Write-Host "   Enable: 'Replace Windows Explorer' or add to context menu" -ForegroundColor White
+    Write-Host ""
+    
+    # Everything
+    Write-Host "5. Everything (File Search)" -ForegroundColor Yellow
+    Write-Host "   Start: everything" -ForegroundColor Gray
+    Write-Host "   Configure: Tools > Options > General" -ForegroundColor White
+    Write-Host "   Enable: 'Start Everything on system startup'" -ForegroundColor White
+    Write-Host "   Enable: 'Install Everything service' (requires admin, for NTFS indexing)" -ForegroundColor White
+    Write-Host ""
+    
+    # ProcessHacker
+    Write-Host "6. ProcessHacker (Task Manager)" -ForegroundColor Yellow
+    Write-Host "   Start: processhacker" -ForegroundColor Gray
+    Write-Host "   Configure: Options > Advanced (optional)" -ForegroundColor White
+    Write-Host "   Enable: 'Replace Task Manager' (requires admin)" -ForegroundColor White
+    Write-Host ""
+    
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
     Write-Host "IMPORTANT: Restart your shell for all changes to take effect!" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "1. Close this terminal and open a new one"
-    Write-Host "2. Verify installation: scoop --version"
-    Write-Host "3. Set default Java: scoop reset temurin21-jdk"
-    Write-Host "4. Update Python pip: python -m pip install --upgrade pip"
+    Write-Host "Quick verification:" -ForegroundColor Cyan
+    Write-Host "  scoop --version" -ForegroundColor Gray
+    Write-Host "  java -version" -ForegroundColor Gray
+    Write-Host "  python --version" -ForegroundColor Gray
+    Write-Host "  node --version" -ForegroundColor Gray
     Write-Host ""
 }
 
@@ -628,7 +571,7 @@ function Install-ScoopTools {
 # ============================================================================
 Write-Host ""
 Write-Host "=== Scoop Complete Installation Script ===" -ForegroundColor Cyan
-Write-Host "Based on all configurations from the chats" -ForegroundColor Gray
+Write-Host "Two-phase installation for complete development environment" -ForegroundColor Gray
 Write-Host ""
 
 if ($All) {
@@ -646,13 +589,13 @@ if ($SetEnvironment) {
 } else {
     Write-Host "Usage:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Step 1 - Run as Administrator:" -ForegroundColor Cyan
+    Write-Host "Phase 1 - Run as Administrator (sets environment in Machine scope):" -ForegroundColor Cyan
     Write-Host "  .\scoop-complete-install.ps1 -SetEnvironment" -ForegroundColor White
     Write-Host ""
-    Write-Host "Step 2 - Run as normal user:" -ForegroundColor Cyan
+    Write-Host "Phase 2 - Run as normal user (installs all tools):" -ForegroundColor Cyan
     Write-Host "  .\scoop-complete-install.ps1 -InstallTools" -ForegroundColor White
     Write-Host ""
-    Write-Host "Or run both (starts with admin part):" -ForegroundColor Cyan
+    Write-Host "Or run both in sequence (requires admin, then restart as user):" -ForegroundColor Cyan
     Write-Host "  .\scoop-complete-install.ps1 -All" -ForegroundColor White
     Write-Host ""
 }

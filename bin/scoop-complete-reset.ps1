@@ -1,28 +1,25 @@
 <#
 .SYNOPSIS
-    Complete reset and cleanup of Scoop installation for testing
+    Complete Scoop installation reset and cleanup
     
 .DESCRIPTION
-    This script performs a complete cleanup:
+    Performs complete cleanup:
     - Removes all environment variables
     - Cleans PATH entries
-    - Deletes Scoop directories
+    - Takes ownership and fixes permissions
+    - Removes file attributes
+    - Deletes all Scoop directories including junctions
     - Creates backups before deletion
     
 .PARAMETER Force
     Skip confirmation prompts
     
 .PARAMETER KeepPersist
-    Keep persist directory (contains app data/settings)
+    Keep persist directory (app data/settings)
     
 .EXAMPLE
-    # Full cleanup with confirmation
     .\scoop-complete-reset.ps1
-    
-    # Full cleanup without prompts
     .\scoop-complete-reset.ps1 -Force
-    
-    # Cleanup but keep app settings
     .\scoop-complete-reset.ps1 -KeepPersist
 #>
 
@@ -35,7 +32,7 @@ $ScoopDir = "C:\usr"
 $BackupDir = "C:\usr_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 
 Write-Host ""
-Write-Host "=== Scoop Complete Reset and Cleanup ===" -ForegroundColor Red
+Write-Host "=== Scoop Complete Reset ===" -ForegroundColor Red
 Write-Host ""
 Write-Host "WARNING: This will remove:" -ForegroundColor Yellow
 Write-Host "  - All installed Scoop applications" -ForegroundColor White
@@ -48,307 +45,364 @@ Write-Host "  - Scoop itself" -ForegroundColor White
 Write-Host ""
 
 if (-not $Force) {
-    Write-Host "Continue? (type 'yes' to confirm): " -ForegroundColor Red -NoNewline
-    $confirmation = Read-Host
-    if ($confirmation -ne 'yes') {
-        Write-Host "Cancelled." -ForegroundColor Yellow
+    Write-Host "Continue? [y/N]: " -ForegroundColor Yellow -NoNewline
+    $confirm = Read-Host
+    if ($confirm -ne 'y' -and $confirm -ne 'Y') {
+        Write-Host "Cancelled." -ForegroundColor Gray
         exit 0
     }
 }
 
-# ============================================================================
-# PART 1: BACKUP IMPORTANT DATA
-# ============================================================================
 Write-Host ""
-Write-Host ">>> Creating backup..." -ForegroundColor Cyan
+Write-Host "=== Starting Cleanup ===" -ForegroundColor Cyan
+Write-Host ""
 
-if (Test-Path $ScoopDir) {
-    # Backup persist and environment configs
-    $backupItems = @(
-        @{Source="$ScoopDir\persist"; Name="persist"},
-        @{Source="$ScoopDir\etc"; Name="etc"},
-        @{Source="$ScoopDir\bin\scoop-boot.ps1"; Name="scoop-boot.ps1"}
+# Helper function for aggressive directory deletion
+function Remove-DirectoryAggressively {
+    param(
+        [string]$Path,
+        [string]$Description
     )
     
-    foreach ($item in $backupItems) {
-        if (Test-Path $item.Source) {
-            $destPath = Join-Path $BackupDir $item.Name
-            $destDir = Split-Path $destPath -Parent
-            if (-not (Test-Path $destDir)) {
-                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    if (-not (Test-Path $Path)) {
+        Write-Host "[SKIP] Not found: $Description" -ForegroundColor Gray
+        return
+    }
+    
+    Write-Host "[WORK] Removing: $Description" -ForegroundColor Yellow
+    
+    # Step 1: Remove all file attributes
+    Write-Host "  -> Removing file attributes..." -ForegroundColor Gray
+    try {
+        Get-ChildItem $Path -Recurse -Force -ErrorAction SilentlyContinue | 
+            ForEach-Object { 
+                try { $_.Attributes = 'Normal' } catch {}
             }
-            Copy-Item -Path $item.Source -Destination $destPath -Recurse -Force
-            Write-Host "[OK] Backed up: $($item.Name)" -ForegroundColor Green
+        Write-Host "  -> Attributes cleared" -ForegroundColor Green
+    } catch {
+        Write-Host "  -> Warning: Could not clear all attributes" -ForegroundColor Yellow
+    }
+    
+    # Step 2: Check if we have permissions (skip takeown if we do)
+    Write-Host "  -> Checking permissions..." -ForegroundColor Gray
+    $needsPermissionFix = $false
+    try {
+        $acl = Get-Acl $Path -ErrorAction Stop
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $hasFullControl = $acl.Access | Where-Object {
+            ($_.IdentityReference -eq $currentUser -or 
+             $_.IdentityReference -eq "BUILTIN\Administrators") -and 
+            $_.FileSystemRights -match "FullControl"
+        }
+        if (-not $hasFullControl) {
+            $needsPermissionFix = $true
+        }
+    } catch {
+        $needsPermissionFix = $true
+    }
+    
+    if ($needsPermissionFix) {
+        Write-Host "  -> Taking ownership (this may take a while)..." -ForegroundColor Gray
+        try {
+            $null = & takeown /f "$Path" /r /d y 2>&1
+            Write-Host "  -> Ownership taken" -ForegroundColor Green
+        } catch {
+            Write-Host "  -> Warning: Takeown had issues" -ForegroundColor Yellow
+        }
+        
+        Write-Host "  -> Setting permissions..." -ForegroundColor Gray
+        try {
+            $null = & icacls "$Path" /grant "Administrators:(OI)(CI)F" /t /c /q 2>&1
+            Write-Host "  -> Permissions granted" -ForegroundColor Green
+        } catch {
+            Write-Host "  -> Warning: icacls had issues" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  -> Permissions OK, skipping takeown" -ForegroundColor Green
+    }
+    
+    # Step 3: Delete junctions first (they can block deletion)
+    Write-Host "  -> Removing junctions..." -ForegroundColor Gray
+    try {
+        $junctions = Get-ChildItem $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
+            Where-Object { $_.Attributes -match "ReparsePoint" }
+        
+        foreach ($junction in $junctions) {
+            try {
+                [System.IO.Directory]::Delete($junction.FullName, $false)
+            } catch {
+                # Try cmd rmdir for stubborn junctions
+                & cmd /c "rmdir `"$($junction.FullName)`"" 2>$null
+            }
+        }
+        Write-Host "  -> Junctions removed" -ForegroundColor Green
+    } catch {
+        Write-Host "  -> Warning: Some junctions may remain" -ForegroundColor Yellow
+    }
+    
+    # Step 4: Multiple deletion attempts with different methods
+    Write-Host "  -> Deleting directory..." -ForegroundColor Gray
+    
+    $deleted = $false
+    
+    # Method 1: PowerShell Remove-Item with UNC path
+    try {
+        Remove-Item -Path "\\?\$Path" -Recurse -Force -ErrorAction Stop
+        $deleted = $true
+        Write-Host "  -> Deleted with Remove-Item" -ForegroundColor Green
+    } catch {
+        Write-Host "  -> Remove-Item failed, trying alternatives..." -ForegroundColor Yellow
+    }
+    
+    # Method 2: cmd rd with UNC path
+    if (-not $deleted -and (Test-Path $Path)) {
+        try {
+            $rdOutput = & cmd /c "rd /s /q `"\\?\$Path`" 2>&1"
+            if (-not (Test-Path $Path)) {
+                $deleted = $true
+                Write-Host "  -> Deleted with cmd rd" -ForegroundColor Green
+            } elseif ($rdOutput -match "Access is denied") {
+                Write-Host "  -> Access denied (likely Shell Extensions)" -ForegroundColor Yellow
+            }
+        } catch {}
+    }
+    
+    # Method 3: Restart Explorer if DLLs are locked
+    if (-not $deleted -and (Test-Path $Path)) {
+        Write-Host "  -> Files locked, restarting Explorer..." -ForegroundColor Yellow
+        try {
+            # Stop Explorer
+            taskkill /f /im explorer.exe 2>$null | Out-Null
+            Start-Sleep -Seconds 2
+            
+            # Start Explorer
+            Start-Process explorer
+            Start-Sleep -Seconds 2
+            
+            # Try deletion again with cmd rd
+            & cmd /c "rd /s /q `"\\?\$Path`"" 2>$null
+            if (-not (Test-Path $Path)) {
+                $deleted = $true
+                Write-Host "  -> Deleted after Explorer restart" -ForegroundColor Green
+            }
+        } catch {
+            Write-Host "  -> Explorer restart failed" -ForegroundColor Yellow
         }
     }
-    Write-Host "[INFO] Backup saved to: $BackupDir" -ForegroundColor Gray
-}
-
-# ============================================================================
-# PART 2: REMOVE ENVIRONMENT VARIABLES (RUN AS ADMIN FOR SYSTEM VARS)
-# ============================================================================
-Write-Host ""
-Write-Host ">>> Cleaning environment variables..." -ForegroundColor Cyan
-
-# Check if running as admin
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
-
-# Variables to remove
-$varsToRemove = @(
-    'SCOOP', 'SCOOP_GLOBAL',
-    'JAVA_HOME', 'JAVA_OPTS',
-    'PYTHON_HOME', 'PYTHONPATH',
-    'PERL_HOME', 'PERL5LIB',
-    'NODE_HOME', 'NODE_PATH', 'NPM_CONFIG_PREFIX',
-    'MAVEN_HOME', 'M2_HOME', 'M2_REPO', 'MAVEN_OPTS',
-    'GRADLE_HOME', 'GRADLE_USER_HOME', 'GRADLE_OPTS',
-    'ANT_HOME', 'KOTLIN_HOME',
-    'CMAKE_HOME', 'MAKE_HOME',
-    'MSYS2_HOME',
-    'SVN_HOME', 'GIT_HOME', 'GIT_SSH',
-    'LANG', 'LC_ALL', 'LANGUAGE'
-)
-
-foreach ($var in $varsToRemove) {
-    # Remove from User scope
-    [Environment]::SetEnvironmentVariable($var, $null, 'User')
-    Write-Host "[OK] Removed $var from User environment" -ForegroundColor Green
     
-    # Remove from System scope if admin
-    if ($isAdmin) {
-        [Environment]::SetEnvironmentVariable($var, $null, 'Machine')
-        Write-Host "[OK] Removed $var from System environment" -ForegroundColor Green
+    # Method 4: .NET Directory.Delete
+    if (-not $deleted -and (Test-Path $Path)) {
+        try {
+            [System.IO.Directory]::Delete($Path, $true)
+            $deleted = $true
+            Write-Host "  -> Deleted with .NET method" -ForegroundColor Green
+        } catch {}
     }
     
-    # Remove from current session
-    Remove-Item "Env:\$var" -ErrorAction SilentlyContinue
+    # Check if truly deleted
+    if (Test-Path $Path) {
+        Write-Host "[FAIL] Could not delete: $Description" -ForegroundColor Red
+        Write-Host "       Manual deletion required!" -ForegroundColor Red
+        Write-Host "       Try: rd /s /q `"\\?\$Path`"" -ForegroundColor Gray
+        return $false
+    } else {
+        Write-Host "[OK] Removed: $Description" -ForegroundColor Green
+        return $true
+    }
 }
 
-if (-not $isAdmin) {
-    Write-Host "[WARN] Not running as admin - System variables not cleaned" -ForegroundColor Yellow
-    Write-Host "      Run as administrator to clean System environment" -ForegroundColor Yellow
-}
+# 1. Stop running Scoop processes
+Write-Host ">>> Checking for running Scoop applications..." -ForegroundColor Cyan
+$runningApps = Get-Process | Where-Object { 
+    $_.Path -and $_.Path -like "$ScoopDir\apps\*" 
+} | Select-Object Name, Id, Path
 
-# ============================================================================
-# PART 3: CLEAN PATH VARIABLE
-# ============================================================================
-Write-Host ""
-Write-Host ">>> Cleaning PATH entries..." -ForegroundColor Cyan
-
-# PATH entries to remove (patterns)
-$pathPatternsToRemove = @(
-    "$ScoopDir\*",
-    "*\apps\*\current*",
-    "*\shims",
-    "*\bin",
-    "*perl*",
-    "*python*",
-    "*nodejs*",
-    "*java*",
-    "*temurin*",
-    "*gradle*",
-    "*maven*",
-    "*msys2*"
-)
-
-function Clean-PathVariable {
-    param(
-        [string]$Scope,
-        [string[]]$Patterns
-    )
+if ($runningApps) {
+    Write-Host "[WARN] Running Scoop applications detected:" -ForegroundColor Yellow
+    $runningApps | Format-Table -AutoSize
     
-    $currentPath = [Environment]::GetEnvironmentVariable('Path', $Scope)
-    if ($currentPath) {
-        $paths = $currentPath -split ';' | Where-Object { $_ }
-        $cleanPaths = @()
-        $removedCount = 0
-        
-        foreach ($path in $paths) {
-            $shouldRemove = $false
-            foreach ($pattern in $Patterns) {
-                if ($path -like $pattern) {
-                    $shouldRemove = $true
-                    $removedCount++
-                    Write-Host "  [-] Removing: $path" -ForegroundColor Red
-                    break
+    if ($Force) {
+        Write-Host "[INFO] Force mode: Stopping processes..." -ForegroundColor Yellow
+        $runningApps | ForEach-Object {
+            try {
+                Stop-Process -Id $_.Id -Force -ErrorAction Stop
+                Write-Host "[OK] Stopped: $($_.Name)" -ForegroundColor Green
+            } catch {
+                Write-Host "[WARN] Could not stop: $($_.Name)" -ForegroundColor Yellow
+            }
+        }
+        Start-Sleep -Seconds 2
+    } else {
+        Write-Host "Stop them? [y/N]: " -NoNewline -ForegroundColor Yellow
+        $stopConfirm = Read-Host
+        if ($stopConfirm -eq 'y' -or $stopConfirm -eq 'Y') {
+            $runningApps | ForEach-Object {
+                try {
+                    Stop-Process -Id $_.Id -Force
+                    Write-Host "[OK] Stopped: $($_.Name)" -ForegroundColor Green
+                } catch {
+                    Write-Host "[WARN] Could not stop: $($_.Name)" -ForegroundColor Yellow
                 }
             }
-            if (-not $shouldRemove) {
-                $cleanPaths += $path
-            }
+            Start-Sleep -Seconds 2
         }
-        
-        $newPath = $cleanPaths -join ';'
-        [Environment]::SetEnvironmentVariable('Path', $newPath, $Scope)
-        Write-Host "[OK] Removed $removedCount PATH entries from $Scope scope" -ForegroundColor Green
     }
 }
 
-# Clean User PATH
-Clean-PathVariable -Scope 'User' -Patterns $pathPatternsToRemove
-
-# Clean System PATH if admin
-if ($isAdmin) {
-    Clean-PathVariable -Scope 'Machine' -Patterns $pathPatternsToRemove
-} else {
-    Write-Host "[WARN] Not running as admin - System PATH not cleaned" -ForegroundColor Yellow
+# 2. Backup environment variables
+Write-Host ""
+Write-Host ">>> Creating backup..." -ForegroundColor Cyan
+if (-not (Test-Path $BackupDir)) {
+    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 }
 
-# ============================================================================
-# PART 4: DELETE SCOOP DIRECTORIES (PRESERVING bin AND etc)
-# ============================================================================
+$envVars = @{}
+[System.Environment]::GetEnvironmentVariables("User").Keys | ForEach-Object {
+    $envVars[$_] = [System.Environment]::GetEnvironmentVariable($_, "User")
+}
+$envVars | ConvertTo-Json | Out-File "$BackupDir\user_env_backup.json"
+
+$machineEnvVars = @{}
+[System.Environment]::GetEnvironmentVariables("Machine").Keys | ForEach-Object {
+    $machineEnvVars[$_] = [System.Environment]::GetEnvironmentVariable($_, "Machine")
+}
+$machineEnvVars | ConvertTo-Json | Out-File "$BackupDir\machine_env_backup.json"
+
+Write-Host "[OK] Backup created: $BackupDir" -ForegroundColor Green
+
+# 3. Clean User environment variables
+Write-Host ""
+Write-Host ">>> Cleaning User environment variables..." -ForegroundColor Cyan
+
+$userVarsToRemove = @(
+    'SCOOP', 'SCOOP_GLOBAL', 'SCOOP_CACHE',
+    'JAVA_HOME', 'GRADLE_HOME', 'GRADLE_USER_HOME', 'MAVEN_HOME',
+    'PYTHON_HOME', 'PYTHONPATH', 'PERL_HOME', 'PERL5LIB',
+    'NODE_HOME', 'MSYS2_ROOT', 'GIT_HOME'
+)
+
+foreach ($var in $userVarsToRemove) {
+    $currentValue = [System.Environment]::GetEnvironmentVariable($var, "User")
+    if ($currentValue) {
+        [System.Environment]::SetEnvironmentVariable($var, $null, "User")
+        Write-Host "[OK] Removed User variable: $var" -ForegroundColor Green
+    }
+}
+
+# 4. Clean Machine environment variables
+Write-Host ""
+Write-Host ">>> Cleaning Machine environment variables..." -ForegroundColor Cyan
+
+foreach ($var in $userVarsToRemove) {
+    $currentValue = [System.Environment]::GetEnvironmentVariable($var, "Machine")
+    if ($currentValue) {
+        [System.Environment]::SetEnvironmentVariable($var, $null, "Machine")
+        Write-Host "[OK] Removed Machine variable: $var" -ForegroundColor Green
+    }
+}
+
+# 5. Clean User PATH
+Write-Host ""
+Write-Host ">>> Cleaning User PATH..." -ForegroundColor Cyan
+$userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath) {
+    $pathArray = $userPath -split ';' | Where-Object { $_ -notlike "*$ScoopDir*" -and $_ -ne '' }
+    $newPath = $pathArray -join ';'
+    [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Host "[OK] User PATH cleaned" -ForegroundColor Green
+}
+
+# 6. Clean Machine PATH
+Write-Host ""
+Write-Host ">>> Cleaning Machine PATH..." -ForegroundColor Cyan
+$machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+if ($machinePath) {
+    $pathArray = $machinePath -split ';' | Where-Object { $_ -notlike "*$ScoopDir*" -and $_ -ne '' }
+    $newPath = $pathArray -join ';'
+    [System.Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+    Write-Host "[OK] Machine PATH cleaned" -ForegroundColor Green
+}
+
+# 7. Remove directories with aggressive deletion
 Write-Host ""
 Write-Host ">>> Removing Scoop directories..." -ForegroundColor Cyan
-Write-Host "[INFO] Preserving: $ScoopDir\bin" -ForegroundColor Gray
-Write-Host "[INFO] Preserving: $ScoopDir\etc" -ForegroundColor Gray
 
-if (Test-Path $ScoopDir) {
-    # Directories to delete (NOT including bin and etc!)
-    $dirsToDelete = @('apps', 'buckets', 'cache', 'shims')
-    
-    if (-not $KeepPersist) {
-        $dirsToDelete += 'persist'
-    } else {
-        Write-Host "[INFO] Preserving: $ScoopDir\persist (KeepPersist flag set)" -ForegroundColor Gray
-    }
-    
-    Write-Host ""
-    foreach ($dir in $dirsToDelete) {
-        $fullPath = Join-Path $ScoopDir $dir
-        if (Test-Path $fullPath) {
-            try {
-                # Count items before deletion for info
-                $itemCount = (Get-ChildItem $fullPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
-                Remove-Item -Path $fullPath -Recurse -Force -ErrorAction Stop
-                Write-Host "[OK] Deleted: $dir ($itemCount items removed)" -ForegroundColor Green
-            } catch {
-                Write-Host "[ERROR] Failed to delete $dir : $_" -ForegroundColor Red
-                Write-Host "       Try closing all applications and run again" -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "[INFO] Not found: $dir (already clean)" -ForegroundColor Gray
-        }
-    }
-    
-    # Clean up ONLY Scoop core files from bin, but keep user scripts
-    Write-Host ""
-    Write-Host ">>> Cleaning Scoop core files from bin..." -ForegroundColor Cyan
-    $scoopCoreFiles = @(
-        "$ScoopDir\bin\scoop.ps1",
-        "$ScoopDir\bin\scoop.cmd",
-        "$ScoopDir\bin\scoop",
-        "$ScoopDir\bin\checkver.ps1",
-        "$ScoopDir\bin\formatjson.ps1",
-        "$ScoopDir\bin\getopt.ps1",
-        "$ScoopDir\bin\missing-checkver.ps1"
-    )
-    
-    foreach ($file in $scoopCoreFiles) {
-        if (Test-Path $file) {
-            Remove-Item -Path $file -Force -ErrorAction SilentlyContinue
-            Write-Host "[OK] Deleted Scoop file: $(Split-Path -Leaf $file)" -ForegroundColor Green
-        }
-    }
-    
-    # Keep scoop-boot.ps1 and other user scripts
-    if (Test-Path "$ScoopDir\bin\scoop-boot.ps1") {
-        Write-Host "[INFO] Preserved: scoop-boot.ps1" -ForegroundColor Gray
-    }
-    
-    # Show what remains in the Scoop directory
-    Write-Host ""
-    Write-Host ">>> Remaining structure in $ScoopDir :" -ForegroundColor Cyan
-    $remaining = Get-ChildItem $ScoopDir -Force | Select-Object Name, @{N='Type';E={if($_.PSIsContainer){'Directory'}else{'File'}}}
-    if ($remaining) {
-        $remaining | ForEach-Object {
-            $icon = if ($_.Type -eq 'Directory') { "[D]" } else { "[F]" }
-            Write-Host "  $icon $($_.Name)" -ForegroundColor $(if ($_.Name -in @('bin','etc','persist')) { 'Green' } else { 'Gray' })
-        }
-    }
+$dirsToRemove = @(
+    @{ Path = "$ScoopDir\apps"; Desc = "Applications" },
+    @{ Path = "$ScoopDir\buckets"; Desc = "Buckets" },
+    @{ Path = "$ScoopDir\cache"; Desc = "Cache" },
+    @{ Path = "$ScoopDir\shims"; Desc = "Shims" }
+)
+
+if (-not $KeepPersist) {
+    $dirsToRemove += @{ Path = "$ScoopDir\persist"; Desc = "Persist (app data)" }
 }
 
-# ============================================================================
-# PART 5: CLEAN REGISTRY ENTRIES
-# ============================================================================
+foreach ($dir in $dirsToRemove) {
+    Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
+}
+
+# 8. Clean registry
 Write-Host ""
 Write-Host ">>> Cleaning registry entries..." -ForegroundColor Cyan
 
-# Registry keys to check and remove
-$regKeys = @(
-    "HKCU:\Software\Classes\Directory\shell\git_shell",
-    "HKCU:\Software\Classes\Directory\shell\git_gui",
-    "HKCU:\Software\Classes\Directory\Background\shell\git_shell",
-    "HKCU:\Software\Classes\Directory\Background\shell\git_gui",
-    "HKCU:\Software\Classes\*\shell\Open with Notepad++",
-    "HKCU:\Software\Classes\*\shell\VSCode",
-    "HKCU:\Software\Classes\Directory\shell\VSCode",
-    "HKCU:\Software\Classes\Directory\Background\shell\VSCode",
-    "HKCU:\Software\Python\PythonCore\3.13",
-    "HKLM:\SOFTWARE\Classes\Directory\shell\git_shell",
-    "HKLM:\SOFTWARE\Classes\*\shell\Open with Notepad++"
-)
+$registryPaths = @{
+    "HKCU:\Software\Classes\*\shell\Scoop" = "Context menu"
+    "HKCU:\Software\Classes\Directory\shell\Scoop" = "Directory context"
+    "HKCU:\Software\Classes\Directory\Background\shell\Scoop" = "Background context"
+}
 
-foreach ($key in $regKeys) {
-    if (Test-Path $key) {
+foreach ($regPath in $registryPaths.Keys) {
+    if (Test-Path $regPath -ErrorAction SilentlyContinue) {
         try {
-            Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "[OK] Removed registry key: $key" -ForegroundColor Green
+            Remove-Item -Path $regPath -Recurse -Force -ErrorAction Stop
+            Write-Host "[OK] Removed: $($registryPaths[$regPath])" -ForegroundColor Green
         } catch {
-            Write-Host "[WARN] Could not remove: $key" -ForegroundColor Yellow
+            Write-Host "[INFO] Skipped: $($registryPaths[$regPath])" -ForegroundColor Gray
         }
     }
 }
 
-# ============================================================================
-# PART 6: CLEAN START MENU SHORTCUTS
-# ============================================================================
+# 9. Remove shortcuts
 Write-Host ""
-Write-Host ">>> Cleaning Start Menu shortcuts..." -ForegroundColor Cyan
+Write-Host ">>> Removing shortcuts..." -ForegroundColor Cyan
+$startMenuPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Scoop Apps"
+if (Test-Path $startMenuPath) {
+    Remove-Item -Path $startMenuPath -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "[OK] Removed Start Menu shortcuts" -ForegroundColor Green
+}
 
-$shortcutDirs = @(
-    "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Scoop Apps",
-    "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Scoop Apps"
-)
+# 10. Final check
+Write-Host ""
+Write-Host "=== Cleanup Complete! ===" -ForegroundColor Green
+Write-Host ""
+Write-Host "Remaining items to check:" -ForegroundColor Cyan
 
-foreach ($dir in $shortcutDirs) {
-    if (Test-Path $dir) {
-        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "[OK] Removed shortcuts: $dir" -ForegroundColor Green
+$remainingDirs = @()
+if (Test-Path "$ScoopDir\apps") { $remainingDirs += "apps" }
+if (Test-Path "$ScoopDir\buckets") { $remainingDirs += "buckets" }
+if (Test-Path "$ScoopDir\cache") { $remainingDirs += "cache" }
+if (Test-Path "$ScoopDir\shims") { $remainingDirs += "shims" }
+if (-not $KeepPersist -and (Test-Path "$ScoopDir\persist")) { $remainingDirs += "persist" }
+
+if ($remainingDirs.Count -gt 0) {
+    Write-Host "[WARN] Some directories could not be deleted:" -ForegroundColor Yellow
+    $remainingDirs | ForEach-Object {
+        Write-Host "  - $ScoopDir\$_" -ForegroundColor Yellow
     }
-}
-
-# ============================================================================
-# FINAL STATUS
-# ============================================================================
-Write-Host ""
-Write-Host "=== Cleanup Complete ===" -ForegroundColor Green
-Write-Host ""
-Write-Host "Backup saved to: $BackupDir" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "System has been reset. You can now:" -ForegroundColor Yellow
-Write-Host "1. Restart PowerShell/CMD for clean environment" -ForegroundColor White
-Write-Host "2. Run installation script to start fresh:" -ForegroundColor White
-Write-Host "   .\scoop-complete-install.ps1 -SetEnvironment  (as admin)" -ForegroundColor Gray
-Write-Host "   .\scoop-complete-install.ps1 -InstallTools    (as user)" -ForegroundColor Gray
-Write-Host ""
-Write-Host "To restore backup data:" -ForegroundColor Yellow
-Write-Host "   Copy from: $BackupDir" -ForegroundColor Gray
-Write-Host "   To: $ScoopDir" -ForegroundColor Gray
-Write-Host ""
-
-# Show remaining environment variables for verification
-Write-Host "Remaining Scoop-related environment variables:" -ForegroundColor Cyan
-$allVars = [System.Environment]::GetEnvironmentVariables()
-$scoopRelated = $allVars.Keys | Where-Object { 
-    $allVars[$_] -like "*scoop*" -or 
-    $allVars[$_] -like "*$ScoopDir*" -or
-    $_ -in $varsToRemove
-}
-
-if ($scoopRelated) {
-    foreach ($var in $scoopRelated) {
-        Write-Host "  $var = $($allVars[$var])" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Manual cleanup commands:" -ForegroundColor Cyan
+    $remainingDirs | ForEach-Object {
+        Write-Host "  rd /s /q `"\\?\$ScoopDir\$_`"" -ForegroundColor Gray
     }
 } else {
-    Write-Host "  None found - system is clean!" -ForegroundColor Green
+    Write-Host "[OK] All directories successfully removed!" -ForegroundColor Green
 }
+
+Write-Host ""
+Write-Host "Next steps:" -ForegroundColor Cyan
+Write-Host "  1. Restart PowerShell for clean environment" -ForegroundColor White
+Write-Host "  2. Check: gci env: | ? { `$_.Value -like '*usr*' }" -ForegroundColor White
+Write-Host "  3. Reinstall Scoop if needed" -ForegroundColor White
+Write-Host ""
+Write-Host "Backup location: $BackupDir" -ForegroundColor Gray
