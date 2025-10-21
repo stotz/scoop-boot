@@ -10,6 +10,7 @@
     - Removes file attributes
     - Deletes all Scoop directories including junctions
     - Creates backups before deletion
+    - PRESERVES: C:\usr\bin\ and C:\usr\etc\
     
 .PARAMETER Force
     Skip confirmation prompts
