@@ -169,14 +169,29 @@ function Remove-DirectoryAggressively {
     
     # Method 3: Restart Explorer if DLLs are locked
     if (-not $deleted -and (Test-Path $Path)) {
-        Write-Host "  -> Files locked, restarting Explorer..." -ForegroundColor Yellow
+        Write-Host "  -> Files locked, restarting Explorer and Shell components..." -ForegroundColor Yellow
         try {
-            # Stop Explorer
-            taskkill /f /im explorer.exe 2>$null | Out-Null
+            # Stop all relevant processes
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name ShellExperienceHost -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name StartMenuExperienceHost -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
             
-            # Start Explorer
-            Start-Process explorer
+            # Restart Explorer
+            Start-Process "C:\Windows\explorer.exe"
+            Start-Sleep -Seconds 2
+            
+            # Restart Taskbar and Start Menu components
+            $shellExperienceHost = "C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"
+            $startMenuHost = "C:\Windows\SystemApps\StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe"
+            
+            if (Test-Path $shellExperienceHost) {
+                Start-Process $shellExperienceHost -ErrorAction SilentlyContinue
+            }
+            if (Test-Path $startMenuHost) {
+                Start-Process $startMenuHost -ErrorAction SilentlyContinue
+            }
+            
             Start-Sleep -Seconds 2
             
             # Try deletion again with cmd rd
@@ -274,14 +289,27 @@ Write-Host "[OK] Backup created: $BackupDir" -ForegroundColor Green
 Write-Host ""
 Write-Host ">>> Cleaning User environment variables..." -ForegroundColor Cyan
 
-$userVarsToRemove = @(
+$varsToRemove = @(
     'SCOOP', 'SCOOP_GLOBAL', 'SCOOP_CACHE',
-    'JAVA_HOME', 'GRADLE_HOME', 'GRADLE_USER_HOME', 'MAVEN_HOME',
-    'PYTHON_HOME', 'PYTHONPATH', 'PERL_HOME', 'PERL5LIB',
-    'NODE_HOME', 'MSYS2_ROOT', 'GIT_HOME'
+    'JAVA_HOME', 'JAVA_OPTS',
+    'GRADLE_HOME', 'GRADLE_USER_HOME', 'GRADLE_OPTS',
+    'MAVEN_HOME', 'M2_HOME', 'M2_REPO', 'MAVEN_OPTS',
+    'ANT_HOME',
+    'KOTLIN_HOME',
+    'PYTHON_HOME', 'PYTHONPATH',
+    'PERL_HOME', 'PERL5LIB',
+    'NODE_HOME', 'NODE_PATH', 'NPM_CONFIG_PREFIX',
+    'MSYS2_HOME', 'MSYS2_ROOT',
+    'GIT_HOME', 'GIT_INSTALL_ROOT',
+    'SVN_HOME',
+    'MAKE_HOME',
+    'CMAKE_HOME',
+    'VCPKG_ROOT',
+    'BAT_CONFIG_DIR',
+    'LANG', 'LC_ALL', 'LANGUAGE'
 )
 
-foreach ($var in $userVarsToRemove) {
+foreach ($var in $varsToRemove) {
     $currentValue = [System.Environment]::GetEnvironmentVariable($var, "User")
     if ($currentValue) {
         [System.Environment]::SetEnvironmentVariable($var, $null, "User")
@@ -293,7 +321,7 @@ foreach ($var in $userVarsToRemove) {
 Write-Host ""
 Write-Host ">>> Cleaning Machine environment variables..." -ForegroundColor Cyan
 
-foreach ($var in $userVarsToRemove) {
+foreach ($var in $varsToRemove) {
     $currentValue = [System.Environment]::GetEnvironmentVariable($var, "Machine")
     if ($currentValue) {
         [System.Environment]::SetEnvironmentVariable($var, $null, "Machine")
