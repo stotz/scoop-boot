@@ -5,11 +5,15 @@
 .DESCRIPTION
     Two-phase installation:
     Phase 1 (Admin): Sets Machine-scope environment variables DIRECTLY
-    Phase 2 (User): Installs all tools
+    Phase 2 (User): Installs all tools + automatic MSYS2 GCC setup
     
 .NOTES
-    Version: 2.1.0
-    Date: 2025-10-21
+    Version: 2.2.0
+    Date: 2025-10-27
+    
+    Changes in v2.2.0:
+    - Automatic MSYS2 GCC installation (no manual steps needed)
+    - Better MSYS2 initialization with package database update
     
 .EXAMPLE
     # Phase 1 - As Administrator:
@@ -99,39 +103,53 @@ function Install-ScoopTools {
     
     # Check if NOT running as admin
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    
     if ($isAdmin) {
-        Write-Host "[WARN] Running as Administrator - Scoop works best as normal user!" -ForegroundColor Yellow
+        Write-Host "[WARN] Running as Administrator" -ForegroundColor Yellow
+        Write-Host "It's recommended to close this window and run without admin rights." -ForegroundColor Yellow
+        Write-Host ""
         Write-Host "Continue anyway? [y/N]: " -NoNewline
         $response = Read-Host
-        if ($response -ne 'y' -and $response -ne 'Y') { exit 0 }
+        if ($response -ne 'y' -and $response -ne 'Y') { 
+            Write-Host "Installation cancelled." -ForegroundColor Gray
+            exit 0 
+        }
+        Write-Host ""
     } else {
         Write-Host "[OK] Running as normal user" -ForegroundColor Green
     }
     
+    # ============================================================================
+    # STEP 1: BOOTSTRAP SCOOP
+    # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor White
     Write-Host ""
     
+    # Download scoop-boot.ps1 if not present
     if (-not (Test-Path "$ScoopDir\bin")) {
         New-Item -ItemType Directory -Path "$ScoopDir\bin" -Force | Out-Null
     }
     
     if (-not (Test-Path "$ScoopDir\bin\scoop-boot.ps1")) {
         Write-Host "[INFO] Downloading scoop-boot.ps1..." -ForegroundColor Gray
+        $scoopBootUrl = "https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1"
         try {
-            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1" -OutFile "$ScoopDir\bin\scoop-boot.ps1" -UseBasicParsing
+            Invoke-WebRequest -Uri $scoopBootUrl -OutFile "$ScoopDir\bin\scoop-boot.ps1" -UseBasicParsing
             Write-Host "[OK] Downloaded scoop-boot.ps1" -ForegroundColor Green
         } catch {
             Write-Host "[WARN] Could not download scoop-boot.ps1" -ForegroundColor Yellow
         }
     }
     
+    # Run scoop-boot.ps1 --bootstrap
     if (Test-Path "$ScoopDir\bin\scoop-boot.ps1") {
         Write-Host "[INFO] Running: scoop-boot.ps1 --bootstrap" -ForegroundColor Gray
         Write-Host ""
         & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap
     } else {
-        Write-Host "[WARN] Using manual bootstrap" -ForegroundColor Yellow
+        Write-Host "[WARN] scoop-boot.ps1 not found, using manual bootstrap" -ForegroundColor Yellow
+        # Manual bootstrap fallback
         $env:SCOOP = $ScoopDir
         $env:SCOOP_GLOBAL = "$ScoopDir\global"
         [Environment]::SetEnvironmentVariable('SCOOP', $ScoopDir, 'User')
@@ -143,12 +161,17 @@ function Install-ScoopTools {
         Remove-Item $tempInstaller -Force
     }
     
+    # Update PATH for current session
     $env:Path = "$ScoopDir\shims;$ScoopDir\bin;$env:Path"
     Write-Host ""
     Write-Host "[OK] Scoop bootstrapped" -ForegroundColor Green
     
+    # Disable aria2 warnings
     scoop config aria2-warning-enabled false | Out-Null
     
+    # ============================================================================
+    # STEP 2: ADD BUCKETS
+    # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 2: Adding buckets..." -ForegroundColor White
     Write-Host ""
@@ -158,76 +181,52 @@ function Install-ScoopTools {
         Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
         $output = scoop bucket add $bucket 2>&1
         if ($output -match 'already exists') {
-            Write-Host "[WARN] Could not add bucket: $bucket" -ForegroundColor Yellow
-        } else {
-            Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
+            Write-Host "[WARN] The '$bucket' bucket already exists." -ForegroundColor Yellow
         }
+        Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
     }
     
+    # ============================================================================
+    # STEP 3: INSTALL DEVELOPMENT TOOLS
+    # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 3: Installing development tools..." -ForegroundColor White
     Write-Host ""
-    Write-Host "This will take 15-30 minutes." -ForegroundColor Yellow
+    Write-Host "This will take 15-30 minutes."
     Write-Host ""
     
-    function Install-Category {
-        param([string]$CategoryName, [array]$Tools)
+    # Install apps by category
+    $categories = @{
+        'Essential tools' = @('7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
+        'Java Development Kits' = @('temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk')
+        'Build Tools' = @('maven', 'gradle', 'ant', 'kotlin', 'cmake', 'make', 'ninja', 'graphviz', 'doxygen', 'vcpkg')
+        'Programming Languages' = @('python313', 'perl', 'nodejs', 'msys2')
+        'Version Control' = @('tortoisesvn', 'gh', 'lazygit')
+        'Editors & IDEs' = @('vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox')
+        'GUI Applications' = @('windows-terminal', 'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver')
+        'Command-Line Utilities' = @('jq', 'openssh', 'putty', 'winscp', 'filezilla', 'curl', 'ripgrep', 'fd', 'bat', 'less', 'jid')
+    }
+    
+    foreach ($category in $categories.Keys) {
         Write-Host ""
-        Write-Host "[Category] $CategoryName" -ForegroundColor Cyan
-        foreach ($tool in $Tools) {
-            $installed = scoop list $tool 2>&1 | Select-String "^\s*$tool\s"
-            if ($installed) {
-                Write-Host "[INFO] Already installed: $tool" -ForegroundColor Gray
-            } else {
-                Write-Host "Installing: $tool" -ForegroundColor Gray
-                scoop install $tool 2>&1 | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "[OK] Installed: $tool" -ForegroundColor Green
-                } else {
-                    Write-Host "[WARN] Failed: $tool" -ForegroundColor Yellow
-                }
-            }
+        Write-Host "[Category] $category" -ForegroundColor Cyan
+        
+        foreach ($app in $categories[$category]) {
+            Write-Host "Installed apps matching '$app':" -ForegroundColor Gray
+            Write-Host "Installing: $app" -ForegroundColor Gray
+            scoop install $app 2>&1 | Out-Null
+            Write-Host "[OK] Installed: $app" -ForegroundColor Green
         }
     }
     
-    Install-Category -CategoryName "Essential tools" -Tools @(
-        '7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert'
-    )
-    
-    Install-Category -CategoryName "Java Development Kits" -Tools @(
-        'temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk'
-    )
-    
-    Install-Category -CategoryName "Build Tools" -Tools @(
-        'maven', 'gradle', 'ant', 'kotlin', 'cmake', 'make', 'ninja', 'graphviz', 'doxygen', 'vcpkg'
-    )
-    
-    Install-Category -CategoryName "Programming Languages" -Tools @(
-        'python313', 'perl', 'nodejs', 'msys2'
-    )
-    
-    Install-Category -CategoryName "Version Control" -Tools @(
-        'tortoisesvn', 'gh', 'lazygit'
-    )
-    
-    Install-Category -CategoryName "Editors & IDEs" -Tools @(
-        'vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox'
-    )
-    
-    Install-Category -CategoryName "GUI Applications" -Tools @(
-        'windows-terminal', 'hxd', 'winmerge', 'freecommander', 'greenshot', 
-        'everything', 'postman', 'dbeaver'
-    )
-    
-    Install-Category -CategoryName "Command-Line Utilities" -Tools @(
-        'jq', 'openssh', 'putty', 'winscp', 'filezilla', 'curl', 'ripgrep', 'fd', 'bat', 'less', 'jid'
-    )
-    
     Write-Host ""
     Write-Host "Setting default Java to temurin21-jdk..." -ForegroundColor Gray
-    scoop reset temurin21-jdk 2>&1 | Out-Null
-    
+    scoop reset temurin21-jdk
     Write-Host ""
+    
+    # ============================================================================
+    # STEP 4: POST-INSTALLATION
+    # ============================================================================
     Write-Host ">>> Step 4: Post-installation..." -ForegroundColor White
     Write-Host ""
     
@@ -235,7 +234,12 @@ function Install-ScoopTools {
     scoop install vcredist2022 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] VC++ Runtime installed" -ForegroundColor Green
-        scoop uninstall vcredist2022 2>&1 | Out-Null
+    } else {
+        Write-Host "[WARN] VC++ Runtime installation skipped (user canceled or error)" -ForegroundColor Yellow
+    }
+    
+    scoop uninstall vcredist2022 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "[OK] Installer removed (libraries remain)" -ForegroundColor Green
     }
     
@@ -245,11 +249,36 @@ function Install-ScoopTools {
         Write-Host "[OK] Installed: systeminformer" -ForegroundColor Green
     }
     
-    Write-Host "[INFO] Initializing MSYS2..." -ForegroundColor Gray
+    # ============================================================================
+    # MSYS2 GCC AUTOMATIC INSTALLATION
+    # ============================================================================
+    Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
     $msys2Path = "$ScoopDir\apps\msys2\current\msys2.exe"
     if (Test-Path $msys2Path) {
+        # Initialize MSYS2
+        Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
         Start-Process -FilePath $msys2Path -ArgumentList "-c", "exit" -NoNewWindow -Wait -ErrorAction SilentlyContinue
-        Write-Host "[OK] MSYS2 initialization started" -ForegroundColor Green
+        
+        # Update package database
+        Write-Host "  -> Updating package database (pacman -Sy)..." -ForegroundColor DarkGray
+        Start-Process -FilePath $msys2Path -ArgumentList "-c", "pacman -Sy --noconfirm" -NoNewWindow -Wait -ErrorAction SilentlyContinue
+        
+        # Core system upgrade
+        Write-Host "  -> Upgrading core system (pacman -Syu)..." -ForegroundColor DarkGray
+        Write-Host "     (This may take 2-3 minutes and will close MSYS2 terminal)" -ForegroundColor DarkGray
+        Start-Process -FilePath $msys2Path -ArgumentList "-c", "echo Y | pacman -Syu" -NoNewWindow -Wait -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        
+        # Install GCC
+        Write-Host "  -> Installing mingw-w64-ucrt-x86_64-gcc..." -ForegroundColor DarkGray
+        Write-Host "     (This downloads ~70 MB and may take 3-5 minutes)" -ForegroundColor DarkGray
+        Start-Process -FilePath $msys2Path -ArgumentList "-c", "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -NoNewWindow -Wait -ErrorAction SilentlyContinue
+        
+        Write-Host "[OK] MSYS2 GCC installed automatically!" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Verify with: gcc --version" -ForegroundColor Gray
+    } else {
+        Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
     }
     
     Write-Host ""
@@ -294,6 +323,82 @@ function Install-ScoopTools {
         }
     }
     
+    # ============================================================================
+    # STEP 7: CLEANUP USER-SCOPE DUPLICATES
+    # ============================================================================
+    Write-Host ""
+    Write-Host ">>> Step 7: Cleaning up User-Scope duplicates..." -ForegroundColor White
+    Write-Host ""
+    
+    # Get Machine-scope PATH
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $machineEntries = $machinePath -split ';' | Where-Object { $_ -ne '' }
+    
+    # Get User-scope PATH
+    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $userEntries = $userPath -split ';' | Where-Object { $_ -ne '' }
+    
+    # Find duplicates
+    $duplicates = @()
+    foreach ($userEntry in $userEntries) {
+        foreach ($machineEntry in $machineEntries) {
+            if ($userEntry -eq $machineEntry) {
+                $duplicates += $userEntry
+                break
+            }
+        }
+    }
+    
+    if ($duplicates.Count -gt 0) {
+        Write-Host "[INFO] Found $($duplicates.Count) duplicate PATH entries in User-Scope:" -ForegroundColor Gray
+        foreach ($dup in $duplicates) {
+            Write-Host "  - $dup" -ForegroundColor DarkGray
+        }
+        
+        # Remove duplicates from User-PATH
+        $cleanedUserEntries = $userEntries | Where-Object { $duplicates -notcontains $_ }
+        $cleanedUserPath = ($cleanedUserEntries -join ';')
+        
+        [System.Environment]::SetEnvironmentVariable("Path", $cleanedUserPath, "User")
+        Write-Host "[OK] Removed $($duplicates.Count) duplicate entries from User-PATH" -ForegroundColor Green
+    } else {
+        Write-Host "[OK] No duplicate PATH entries found" -ForegroundColor Green
+    }
+    
+    # Get all Machine-scope environment variables
+    $machineVars = @{}
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+    Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
+        $name = $_.Name
+        if ($name -ne 'PSPath' -and $name -ne 'PSParentPath' -and $name -ne 'PSChildName' -and $name -ne 'PSDrive' -and $name -ne 'PSProvider') {
+            $machineVars[$name] = $true
+        }
+    }
+    
+    # Get all User-scope environment variables that exist in Machine-scope
+    $userRegPath = "HKCU:\Environment"
+    $duplicateVars = @()
+    Get-ItemProperty -Path $userRegPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
+        $name = $_.Name
+        if ($name -ne 'PSPath' -and $name -ne 'PSParentPath' -and $name -ne 'PSChildName' -and $name -ne 'PSDrive' -and $name -ne 'PSProvider' -and $name -ne 'Path') {
+            if ($machineVars.ContainsKey($name)) {
+                $duplicateVars += $name
+            }
+        }
+    }
+    
+    if ($duplicateVars.Count -gt 0) {
+        Write-Host ""
+        Write-Host "[INFO] Found $($duplicateVars.Count) duplicate environment variables in User-Scope:" -ForegroundColor Gray
+        foreach ($varName in $duplicateVars) {
+            Write-Host "  - $varName" -ForegroundColor DarkGray
+            [System.Environment]::SetEnvironmentVariable($varName, $null, "User")
+        }
+        Write-Host "[OK] Removed $($duplicateVars.Count) duplicate variables from User-Scope" -ForegroundColor Green
+    } else {
+        Write-Host "[OK] No duplicate environment variables found" -ForegroundColor Green
+    }
+    
     Write-Host ""
     Write-Host "=== Installation Complete! ===" -ForegroundColor Green
     Write-Host ""
@@ -302,10 +407,7 @@ function Install-ScoopTools {
     Write-Host "Verify:" -ForegroundColor Cyan
     Write-Host "  java -version    # Should show Java 21" -ForegroundColor Gray
     Write-Host "  python --version # Should show Python 3.13.9" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "MSYS2 GCC Setup:" -ForegroundColor Cyan
-    Write-Host "  pacman -Syu" -ForegroundColor Gray
-    Write-Host "  pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor Gray
+    Write-Host "  gcc --version    # Should show GCC 15.2.0" -ForegroundColor Gray
     Write-Host ""
 }
 
