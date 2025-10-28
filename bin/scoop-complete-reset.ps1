@@ -12,6 +12,15 @@
     - Creates backups before deletion
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
     
+.NOTES
+    Version: 2.1.0
+    Date: 2025-10-28
+    
+    Changes in v2.1.0:
+    - CRITICAL FIX: Always kill system tray apps (greenshot, jetbrains-toolbox)
+    - No more user prompts for stopping processes
+    - Automatic process termination to prevent deletion failures
+    
 .PARAMETER Force
     Skip confirmation prompts
     
@@ -23,6 +32,7 @@
     .\scoop-complete-reset.ps1 -Force
     .\scoop-complete-reset.ps1 -KeepPersist
 #>
+
 
 param(
     [switch]$Force,
@@ -227,42 +237,44 @@ function Remove-DirectoryAggressively {
     }
 }
 
-# 1. Stop running Scoop processes
+# 1. Stop running Scoop processes - ALWAYS kill system tray apps
 Write-Host ">>> Checking for running Scoop applications..." -ForegroundColor Cyan
+
+# First, kill known system tray apps (they block deletion)
+$systemTrayApps = @('greenshot', 'jetbrains-toolbox', 'everything', 'mousejiggler')
+foreach ($appName in $systemTrayApps) {
+    $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue
+    if ($proc) {
+        try {
+            Stop-Process -Name $appName -Force -ErrorAction Stop
+            Write-Host "[OK] Stopped system tray app: $appName" -ForegroundColor Green
+        } catch {
+            Write-Host "[WARN] Could not stop: $appName" -ForegroundColor Yellow
+        }
+    }
+}
+
+# Then check for any other Scoop apps
 $runningApps = Get-Process | Where-Object { 
     $_.Path -and $_.Path -like "$ScoopDir\apps\*" 
 } | Select-Object Name, Id, Path
 
 if ($runningApps) {
-    Write-Host "[WARN] Running Scoop applications detected:" -ForegroundColor Yellow
+    Write-Host "[INFO] Other Scoop applications detected:" -ForegroundColor Yellow
     $runningApps | Format-Table -AutoSize
     
-    if ($Force) {
-        Write-Host "[INFO] Force mode: Stopping processes..." -ForegroundColor Yellow
-        $runningApps | ForEach-Object {
-            try {
-                Stop-Process -Id $_.Id -Force -ErrorAction Stop
-                Write-Host "[OK] Stopped: $($_.Name)" -ForegroundColor Green
-            } catch {
-                Write-Host "[WARN] Could not stop: $($_.Name)" -ForegroundColor Yellow
-            }
-        }
-        Start-Sleep -Seconds 2
-    } else {
-        Write-Host "Stop them? [y/N]: " -NoNewline -ForegroundColor Yellow
-        $stopConfirm = Read-Host
-        if ($stopConfirm -eq 'y' -or $stopConfirm -eq 'Y') {
-            $runningApps | ForEach-Object {
-                try {
-                    Stop-Process -Id $_.Id -Force
-                    Write-Host "[OK] Stopped: $($_.Name)" -ForegroundColor Green
-                } catch {
-                    Write-Host "[WARN] Could not stop: $($_.Name)" -ForegroundColor Yellow
-                }
-            }
-            Start-Sleep -Seconds 2
+    Write-Host "[INFO] Stopping all Scoop processes..." -ForegroundColor Yellow
+    $runningApps | ForEach-Object {
+        try {
+            Stop-Process -Id $_.Id -Force -ErrorAction Stop
+            Write-Host "[OK] Stopped: $($_.Name)" -ForegroundColor Green
+        } catch {
+            Write-Host "[WARN] Could not stop: $($_.Name)" -ForegroundColor Yellow
         }
     }
+    Start-Sleep -Seconds 2
+} else {
+    Write-Host "[OK] No Scoop processes running" -ForegroundColor Green
 }
 
 # 2. Backup environment variables
