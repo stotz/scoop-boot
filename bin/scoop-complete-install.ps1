@@ -5,15 +5,17 @@
 .DESCRIPTION
     Two-phase installation:
     Phase 1 (Admin): Sets Machine-scope environment variables DIRECTLY
-    Phase 2 (User): Installs all tools + automatic MSYS2 GCC setup
+    Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
     
 .NOTES
-    Version: 2.2.0
+    Version: 2.4.0
     Date: 2025-10-27
     
-    Changes in v2.2.0:
-    - Automatic MSYS2 GCC installation (no manual steps needed)
-    - Better MSYS2 initialization with package database update
+    Changes in v2.4.0:
+    - Improved User-Scope cleanup: Removes ALL unwanted JDK versions
+    - Pattern-based removal for scoop-added paths (JDKs, VS Code, nodejs/bin)
+    - GCC installation verification (checks if gcc.exe exists)
+    - Shows manual installation steps if GCC install fails
     
 .EXAMPLE
     # Phase 1 - As Administrator:
@@ -274,9 +276,19 @@ function Install-ScoopTools {
         Write-Host "     (This downloads ~70 MB and may take 3-5 minutes)" -ForegroundColor DarkGray
         Start-Process -FilePath $msys2Path -ArgumentList "-c", "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -NoNewWindow -Wait -ErrorAction SilentlyContinue
         
-        Write-Host "[OK] MSYS2 GCC installed automatically!" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "Verify with: gcc --version" -ForegroundColor Gray
+        # Verify GCC installation
+        $gccPath = "$ScoopDir\apps\msys2\current\mingw64\bin\gcc.exe"
+        if (Test-Path $gccPath) {
+            Write-Host "[OK] MSYS2 GCC installed successfully!" -ForegroundColor Green
+            Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
+        } else {
+            Write-Host "[WARN] GCC installation may have failed (gcc.exe not found)" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "Manual installation steps:" -ForegroundColor Yellow
+            Write-Host "  1. Open MSYS2 terminal" -ForegroundColor White
+            Write-Host "  2. Run: pacman -Syu" -ForegroundColor White
+            Write-Host "  3. Run: pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor White
+        }
     } else {
         Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
     }
@@ -338,31 +350,52 @@ function Install-ScoopTools {
     $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = $userPath -split ';' | Where-Object { $_ -ne '' }
     
-    # Find duplicates
-    $duplicates = @()
+    # Find entries to remove
+    $toRemove = @()
+    
+    # 1. Remove exact duplicates (same in Machine and User)
     foreach ($userEntry in $userEntries) {
         foreach ($machineEntry in $machineEntries) {
             if ($userEntry -eq $machineEntry) {
-                $duplicates += $userEntry
+                $toRemove += $userEntry
                 break
             }
         }
     }
     
-    if ($duplicates.Count -gt 0) {
-        Write-Host "[INFO] Found $($duplicates.Count) duplicate PATH entries in User-Scope:" -ForegroundColor Gray
-        foreach ($dup in $duplicates) {
-            Write-Host "  - $dup" -ForegroundColor DarkGray
+    # 2. Remove Scoop-added paths that should not be in User-PATH
+    $unwantedPatterns = @(
+        'C:\usr\apps\temurin.*-jdk\current\bin',  # All JDK versions (Machine has the correct one)
+        'C:\usr\apps\vscode\current\bin',          # VS Code adds itself
+        'C:\usr\apps\nodejs\current\bin',          # npm bin path (Machine has nodejs\current)
+        'C:\usr\shims'                              # Shims are in Machine-PATH
+    )
+    
+    foreach ($userEntry in $userEntries) {
+        foreach ($pattern in $unwantedPatterns) {
+            if ($userEntry -match [regex]::Escape($pattern).Replace('\\.\*', '.*')) {
+                if ($toRemove -notcontains $userEntry) {
+                    $toRemove += $userEntry
+                }
+                break
+            }
+        }
+    }
+    
+    if ($toRemove.Count -gt 0) {
+        Write-Host "[INFO] Found $($toRemove.Count) entries to remove from User-PATH:" -ForegroundColor Gray
+        foreach ($entry in $toRemove) {
+            Write-Host "  - $entry" -ForegroundColor DarkGray
         }
         
-        # Remove duplicates from User-PATH
-        $cleanedUserEntries = $userEntries | Where-Object { $duplicates -notcontains $_ }
+        # Remove unwanted entries from User-PATH
+        $cleanedUserEntries = $userEntries | Where-Object { $toRemove -notcontains $_ }
         $cleanedUserPath = ($cleanedUserEntries -join ';')
         
         [System.Environment]::SetEnvironmentVariable("Path", $cleanedUserPath, "User")
-        Write-Host "[OK] Removed $($duplicates.Count) duplicate entries from User-PATH" -ForegroundColor Green
+        Write-Host "[OK] Removed $($toRemove.Count) entries from User-PATH" -ForegroundColor Green
     } else {
-        Write-Host "[OK] No duplicate PATH entries found" -ForegroundColor Green
+        Write-Host "[OK] No entries to remove from User-PATH" -ForegroundColor Green
     }
     
     # Get all Machine-scope environment variables
