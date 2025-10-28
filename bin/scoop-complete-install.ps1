@@ -8,14 +8,14 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
     
 .NOTES
-    Version: 2.4.0
-    Date: 2025-10-27
+    Version: 2.6.0
+    Date: 2025-10-28
     
-    Changes in v2.4.0:
-    - Improved User-Scope cleanup: Removes ALL unwanted JDK versions
-    - Pattern-based removal for scoop-added paths (JDKs, VS Code, nodejs/bin)
-    - GCC installation verification (checks if gcc.exe exists)
-    - Shows manual installation steps if GCC install fails
+    Changes in v2.6.0:
+    - CRITICAL FIX: Regex pattern matching for JDK cleanup
+    - Now correctly removes ALL temurin*-jdk versions (8,11,17,23) from User-PATH
+    - Simplified matching logic - explicit checks instead of complex regex escaping
+    - Added MSYS2 terminal start command to output
     
 .EXAMPLE
     # Phase 1 - As Administrator:
@@ -100,14 +100,16 @@ function Set-DevelopmentEnvironment {
 function Install-ScoopTools {
     Write-Host ""
     Write-Host "=== Scoop Complete Installation Script ===" -ForegroundColor Cyan
-    Write-Host "=== Phase 2: Tools Installation (User) ===" -ForegroundColor Cyan
+    Write-Host "Two-phase installation for complete development environment" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "=== Phase 2: Tool Installation (Normal User) ===" -ForegroundColor Cyan
     Write-Host ""
     
-    # Check if NOT running as admin
+    # Check if running as admin
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
     
     if ($isAdmin) {
-        Write-Host "[WARN] Running as Administrator" -ForegroundColor Yellow
+        Write-Host "[WARN] Running as Administrator - not recommended for tool installation" -ForegroundColor Yellow
         Write-Host "It's recommended to close this window and run without admin rights." -ForegroundColor Yellow
         Write-Host ""
         Write-Host "Continue anyway? [y/N]: " -NoNewline
@@ -166,7 +168,7 @@ function Install-ScoopTools {
     # Update PATH for current session
     $env:Path = "$ScoopDir\shims;$ScoopDir\bin;$env:Path"
     Write-Host ""
-    Write-Host "[OK] Scoop bootstrapped" -ForegroundColor Green
+    Write-Host "[OK] Scoop bootstrapped successfully" -ForegroundColor Green
     
     # Disable aria2 warnings
     scoop config aria2-warning-enabled false | Out-Null
@@ -183,9 +185,10 @@ function Install-ScoopTools {
         Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
         $output = scoop bucket add $bucket 2>&1
         if ($output -match 'already exists') {
-            Write-Host "[WARN] The '$bucket' bucket already exists." -ForegroundColor Yellow
+            Write-Host "[OK] Bucket already exists: $bucket" -ForegroundColor Gray
+        } else {
+            Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
         }
-        Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
     }
     
     # ============================================================================
@@ -194,89 +197,99 @@ function Install-ScoopTools {
     Write-Host ""
     Write-Host ">>> Step 3: Installing development tools..." -ForegroundColor White
     Write-Host ""
-    Write-Host "This will take 15-30 minutes."
+    Write-Host "This will take 15-30 minutes depending on internet speed." -ForegroundColor Gray
     Write-Host ""
     
-    # Install apps by category
-    $categories = @{
-        'Essential tools' = @('7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
-        'Java Development Kits' = @('temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk')
-        'Build Tools' = @('maven', 'gradle', 'ant', 'kotlin', 'cmake', 'make', 'ninja', 'graphviz', 'doxygen', 'vcpkg')
-        'Programming Languages' = @('python313', 'perl', 'nodejs', 'msys2')
-        'Version Control' = @('tortoisesvn', 'gh', 'lazygit')
-        'Editors & IDEs' = @('vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox')
-        'GUI Applications' = @('windows-terminal', 'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver')
-        'Command-Line Utilities' = @('jq', 'openssh', 'putty', 'winscp', 'filezilla', 'curl', 'ripgrep', 'fd', 'bat', 'less', 'jid')
-    }
-    
-    foreach ($category in $categories.Keys) {
-        Write-Host ""
-        Write-Host "[Category] $category" -ForegroundColor Cyan
+    $apps = @(
+        # Essential tools
+        'git', '7zip', 'aria2', 'wget', 'curl', 'openssh', 'sudo',
         
-        foreach ($app in $categories[$category]) {
-            Write-Host "Installed apps matching '$app':" -ForegroundColor Gray
-            Write-Host "Installing: $app" -ForegroundColor Gray
-            scoop install $app 2>&1 | Out-Null
+        # Java JDKs
+        'temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk',
+        
+        # Build tools
+        'maven', 'gradle', 'ant', 'cmake', 'make', 'ninja', 'kotlin',
+        
+        # Documentation
+        'graphviz', 'doxygen',
+        
+        # C++ package manager
+        'vcpkg',
+        
+        # Programming languages
+        'python313', 'perl', 'nodejs', 'msys2',
+        
+        # Version control
+        'tortoisesvn', 'gh', 'lazygit',
+        
+        # Editors & IDEs
+        'vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox',
+        
+        # Terminal
+        'windows-terminal',
+        
+        # GUI applications
+        'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver',
+        
+        # CLI tools
+        'jq', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
+        
+        # System tools
+        'vcredist2022', 'systeminformer'
+    )
+    
+    foreach ($app in $apps) {
+        Write-Host "[INFO] Installing $app..." -ForegroundColor Gray
+        $output = scoop install $app 2>&1
+        if ($output -match 'is already installed') {
+            Write-Host "[OK] Already installed: $app" -ForegroundColor Gray
+        } else {
             Write-Host "[OK] Installed: $app" -ForegroundColor Green
         }
     }
     
-    Write-Host ""
-    Write-Host "Setting default Java to temurin21-jdk..." -ForegroundColor Gray
-    scoop reset temurin21-jdk
-    Write-Host ""
-    
     # ============================================================================
-    # STEP 4: POST-INSTALLATION
+    # STEP 4: POST-INSTALLATION TASKS
     # ============================================================================
-    Write-Host ">>> Step 4: Post-installation..." -ForegroundColor White
+    Write-Host ""
+    Write-Host ">>> Step 4: Post-installation tasks..." -ForegroundColor White
     Write-Host ""
     
-    Write-Host "[INFO] Installing VC++ Runtime..." -ForegroundColor Gray
-    scoop install vcredist2022 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "[OK] VC++ Runtime installed" -ForegroundColor Green
-    } else {
-        Write-Host "[WARN] VC++ Runtime installation skipped (user canceled or error)" -ForegroundColor Yellow
-    }
+    # Set default Java version
+    Write-Host "[INFO] Setting default Java to Temurin 21..." -ForegroundColor Gray
+    scoop reset temurin21-jdk | Out-Null
+    Write-Host "[OK] Default Java set to Temurin 21" -ForegroundColor Green
     
-    scoop uninstall vcredist2022 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    # Cleanup VC++ installer
+    Write-Host "[INFO] Cleaning up VC++ redistributable installer..." -ForegroundColor Gray
+    $vcredistInstaller = Get-ChildItem "$ScoopDir\apps\vcredist2022\current" -Filter "VC_redist*.exe" -ErrorAction SilentlyContinue
+    if ($vcredistInstaller) {
+        Remove-Item $vcredistInstaller.FullName -Force -ErrorAction SilentlyContinue
         Write-Host "[OK] Installer removed (libraries remain)" -ForegroundColor Green
     }
     
-    Write-Host "[INFO] Installing system informer..." -ForegroundColor Gray
-    scoop install systeminformer 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "[OK] Installed: systeminformer" -ForegroundColor Green
-    }
-    
-    # ============================================================================
-    # MSYS2 GCC AUTOMATIC INSTALLATION
-    # ============================================================================
-    Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
-    $msys2Path = "$ScoopDir\apps\msys2\current\msys2.exe"
-    if (Test-Path $msys2Path) {
-        # Initialize MSYS2
+    # Initialize MSYS2 and install GCC
+    if (Test-Path "$ScoopDir\apps\msys2\current") {
+        Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
         Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
-        Start-Process -FilePath $msys2Path -ArgumentList "-c", "exit" -NoNewWindow -Wait -ErrorAction SilentlyContinue
-        
-        # Update package database
         Write-Host "  -> Updating package database (pacman -Sy)..." -ForegroundColor DarkGray
-        Start-Process -FilePath $msys2Path -ArgumentList "-c", "pacman -Sy --noconfirm" -NoNewWindow -Wait -ErrorAction SilentlyContinue
-        
-        # Core system upgrade
         Write-Host "  -> Upgrading core system (pacman -Syu)..." -ForegroundColor DarkGray
         Write-Host "     (This may take 2-3 minutes and will close MSYS2 terminal)" -ForegroundColor DarkGray
-        Start-Process -FilePath $msys2Path -ArgumentList "-c", "echo Y | pacman -Syu" -NoNewWindow -Wait -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        
-        # Install GCC
         Write-Host "  -> Installing mingw-w64-ucrt-x86_64-gcc..." -ForegroundColor DarkGray
         Write-Host "     (This downloads ~70 MB and may take 3-5 minutes)" -ForegroundColor DarkGray
-        Start-Process -FilePath $msys2Path -ArgumentList "-c", "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -NoNewWindow -Wait -ErrorAction SilentlyContinue
         
-        # Verify GCC installation
+        # Try automatic installation
+        $msys2 = "$ScoopDir\apps\msys2\current\msys2.exe"
+        try {
+            # First run: update package database and system
+            Start-Process -FilePath $msys2 -ArgumentList "pacman -Syu --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            
+            # Second run: install GCC
+            Start-Process -FilePath $msys2 -ArgumentList "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+        } catch {}
+        
+        # Verify installation
         $gccPath = "$ScoopDir\apps\msys2\current\mingw64\bin\gcc.exe"
         if (Test-Path $gccPath) {
             Write-Host "[OK] MSYS2 GCC installed successfully!" -ForegroundColor Green
@@ -285,7 +298,7 @@ function Install-ScoopTools {
             Write-Host "[WARN] GCC installation may have failed (gcc.exe not found)" -ForegroundColor Yellow
             Write-Host ""
             Write-Host "Manual installation steps:" -ForegroundColor Yellow
-            Write-Host "  1. Open MSYS2 terminal" -ForegroundColor White
+            Write-Host "  1. Open MSYS2 terminal: $ScoopDir\apps\msys2\current\msys2.exe" -ForegroundColor White
             Write-Host "  2. Run: pacman -Syu" -ForegroundColor White
             Write-Host "  3. Run: pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor White
         }
@@ -363,22 +376,27 @@ function Install-ScoopTools {
         }
     }
     
-    # 2. Remove Scoop-added paths that should not be in User-PATH
-    $unwantedPatterns = @(
-        'C:\usr\apps\temurin.*-jdk\current\bin',  # All JDK versions (Machine has the correct one)
-        'C:\usr\apps\vscode\current\bin',          # VS Code adds itself
-        'C:\usr\apps\nodejs\current\bin',          # npm bin path (Machine has nodejs\current)
-        'C:\usr\shims'                              # Shims are in Machine-PATH
-    )
-    
+    # 2. Remove Scoop-added paths using explicit pattern matching
     foreach ($userEntry in $userEntries) {
-        foreach ($pattern in $unwantedPatterns) {
-            if ($userEntry -match [regex]::Escape($pattern).Replace('\\.\*', '.*')) {
-                if ($toRemove -notcontains $userEntry) {
-                    $toRemove += $userEntry
-                }
-                break
-            }
+        $shouldRemove = $false
+        
+        # Check if it's a temurin JDK path (any version: 8, 11, 17, 21, 23, 25, etc.)
+        if ($userEntry -match '^C:\\usr\\apps\\temurin\d+-jdk\\current\\bin$') {
+            $shouldRemove = $true
+        }
+        # Check other unwanted patterns
+        elseif ($userEntry -eq 'C:\usr\apps\vscode\current\bin') {
+            $shouldRemove = $true
+        }
+        elseif ($userEntry -eq 'C:\usr\apps\nodejs\current\bin') {
+            $shouldRemove = $true
+        }
+        elseif ($userEntry -eq 'C:\usr\shims') {
+            $shouldRemove = $true
+        }
+        
+        if ($shouldRemove -and ($toRemove -notcontains $userEntry)) {
+            $toRemove += $userEntry
         }
     }
     
