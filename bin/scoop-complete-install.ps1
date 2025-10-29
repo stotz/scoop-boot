@@ -664,9 +664,7 @@ function Install-ScoopTools {
 
     if ($wsl2Installed) {
         Write-Host "WSL2 is ready for:" -ForegroundColor Cyan
-        Write-Host "  - Docker Desktop (download: https://www.docker.com/products/docker-desktop)" -ForegroundColor Gray
         Write-Host "  - Rancher Desktop (download: https://rancherdesktop.io)" -ForegroundColor Gray
-        Write-Host "  - Linux development (wsl)" -ForegroundColor Gray
         Write-Host ""
     }
 }
