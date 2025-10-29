@@ -4,18 +4,19 @@
 
 .DESCRIPTION
     Two-phase installation:
-    Phase 1 (Admin): Sets Machine-scope environment variables DIRECTLY + Creates TEMP/TMP directories
-    Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
+    Phase 1 (Admin): WSL2 check + TEMP/TMP setup + Sets Machine-scope environment variables
+    Phase 2 (User): Installs all tools including Rancher Desktop + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.2
+    Version: 2.7.3
     Date: 2025-10-29
 
-    Changes in v2.7.2:
-    - NEW: Automatic TEMP/TMP directory creation from .env files
-    - NEW: Validates and creates custom TEMP/TMP paths before applying
-    - IMPROVED: Better error handling for directory creation
-    - IMPROVED: Clearer status messages during environment setup
+    Changes in v2.7.3:
+    - NEW: Automatic TEMP/TMP directory creation from .env files (Phase 1)
+    - NEW: WSL2 prerequisite check before tool installation (Phase 2)
+    - NEW: Rancher Desktop installation with automatic resources fix (Phase 2)
+    - NEW: WSL2 installation instructions if missing
+    - IMPROVED: Better prerequisite validation and error messages
 
 .EXAMPLE
     # Phase 1 - As Administrator:
@@ -31,6 +32,245 @@ param(
 )
 
 $ScoopDir = "C:\usr"
+
+# ============================================================================
+# WSL2 CHECK FUNCTION
+# ============================================================================
+function Test-WSL2 {
+    Write-Host ">>> Checking WSL2 prerequisite..." -ForegroundColor White
+    Write-Host ""
+
+    # Check if WSL command exists
+    $wslCommand = Get-Command wsl -ErrorAction SilentlyContinue
+    if (-not $wslCommand) {
+        Write-Host "[ERROR] WSL is not installed!" -ForegroundColor Red
+        Write-Host ""
+        Show-WSL2InstallInstructions
+        return $false
+    }
+
+    # Check WSL version
+    try {
+        $wslStatus = wsl --status 2>&1
+
+        if ($wslStatus -match "Default Version: 2") {
+            Write-Host "[OK] WSL2 is installed and configured" -ForegroundColor Green
+
+            # Show WSL info
+            $wslInfo = $wslStatus | Select-String "Default Distribution:", "Default Version:"
+            foreach ($line in $wslInfo) {
+                Write-Host "     $($line.Line.Trim())" -ForegroundColor Gray
+            }
+
+            return $true
+        }
+        elseif ($wslStatus -match "Default Version: 1") {
+            Write-Host "[ERROR] WSL1 is installed, but WSL2 is required!" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "Upgrade to WSL2:" -ForegroundColor Yellow
+            Write-Host "  wsl --set-default-version 2" -ForegroundColor White
+            Write-Host ""
+            Write-Host "Then convert existing distributions:" -ForegroundColor Yellow
+            Write-Host "  wsl --list --verbose" -ForegroundColor White
+            Write-Host "  wsl --set-version <distro-name> 2" -ForegroundColor White
+            Write-Host ""
+            return $false
+        }
+        else {
+            # WSL might be installed but not configured
+            Write-Host "[WARN] WSL status unclear, attempting version check..." -ForegroundColor Yellow
+
+            # Try to get version directly
+            $wslVersion = wsl --version 2>&1
+            if ($wslVersion -match "WSL version: 2" -or $wslVersion -match "Kernel version:") {
+                Write-Host "[OK] WSL2 appears to be available" -ForegroundColor Green
+                return $true
+            }
+            else {
+                Write-Host "[ERROR] Unable to verify WSL2!" -ForegroundColor Red
+                Write-Host ""
+                Show-WSL2InstallInstructions
+                return $false
+            }
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Failed to check WSL status: $_" -ForegroundColor Red
+        Write-Host ""
+        Show-WSL2InstallInstructions
+        return $false
+    }
+}
+
+function Show-WSL2InstallInstructions {
+    Write-Host "=== WSL2 Installation Required ===" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Rancher Desktop requires WSL2 to function." -ForegroundColor White
+    Write-Host ""
+    Write-Host "STEP 1: Install WSL2" -ForegroundColor Cyan
+    Write-Host "  Run as Administrator:" -ForegroundColor White
+    Write-Host "    wsl --install" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  This will:" -ForegroundColor White
+    Write-Host "    - Enable WSL feature" -ForegroundColor Gray
+    Write-Host "    - Install WSL2 kernel" -ForegroundColor Gray
+    Write-Host "    - Install Ubuntu (default distribution)" -ForegroundColor Gray
+    Write-Host "    - Require a system reboot" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "STEP 2: After reboot" -ForegroundColor Cyan
+    Write-Host "  Set WSL2 as default:" -ForegroundColor White
+    Write-Host "    wsl --set-default-version 2" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "STEP 3: Verify installation" -ForegroundColor Cyan
+    Write-Host "  Check version:" -ForegroundColor White
+    Write-Host "    wsl --status" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "For more information:" -ForegroundColor Cyan
+    Write-Host "  https://aka.ms/wsl2" -ForegroundColor White
+    Write-Host ""
+    Write-Host "After WSL2 is installed, re-run:" -ForegroundColor Yellow
+    Write-Host "  .\scoop-complete-install.ps1 -InstallTools" -ForegroundColor White
+    Write-Host ""
+}
+
+# ============================================================================
+# TEMP/TMP DIRECTORY SCANNER AND CREATOR
+# ============================================================================
+function Initialize-TempDirectories {
+    Write-Host ">>> Step 1: Checking TEMP/TMP configuration..." -ForegroundColor White
+    Write-Host ""
+
+    # Find all .env files
+    $envDir = "$ScoopDir\etc\environments"
+    if (-not (Test-Path $envDir)) {
+        Write-Host "[INFO] No environment directory found, skipping TEMP/TMP setup" -ForegroundColor Gray
+        return
+    }
+
+    $envFiles = Get-ChildItem -Path $envDir -Filter "*.env" -ErrorAction SilentlyContinue
+    if ($envFiles.Count -eq 0) {
+        Write-Host "[INFO] No environment files found, skipping TEMP/TMP setup" -ForegroundColor Gray
+        return
+    }
+
+    Write-Host "[INFO] Found $($envFiles.Count) environment file(s)" -ForegroundColor Gray
+    Write-Host ""
+
+    # Scan for TEMP/TMP assignments
+    $tempDirs = @{}
+
+    foreach ($envFile in $envFiles) {
+        Write-Host "  Scanning: $($envFile.Name)" -ForegroundColor Gray
+        $content = Get-Content $envFile.FullName -ErrorAction SilentlyContinue
+
+        foreach ($line in $content) {
+            # Match TEMP= or TMP= (with or without spaces)
+            if ($line -match '^\s*(TEMP|TMP)\s*=\s*(.+)\s*$') {
+                $varName = $Matches[1].Trim()
+                $varValue = $Matches[2].Trim()
+
+                # Skip comments
+                if ($varValue.StartsWith("#")) { continue }
+
+                # Expand environment variables
+                $expandedPath = [System.Environment]::ExpandEnvironmentVariables($varValue)
+
+                # Store path and reference
+                if (-not $tempDirs.ContainsKey($expandedPath)) {
+                    $tempDirs[$expandedPath] = @()
+                }
+                $tempDirs[$expandedPath] += @{File = $envFile.Name; Var = $varName}
+
+                Write-Host "    Found: $varName=$expandedPath" -ForegroundColor DarkGray
+            }
+        }
+    }
+
+    if ($tempDirs.Count -eq 0) {
+        Write-Host "[INFO] No TEMP/TMP configuration found in .env files" -ForegroundColor Gray
+        return
+    }
+
+    # Create directories
+    Write-Host ""
+    Write-Host "[INFO] Creating TEMP/TMP directories..." -ForegroundColor Gray
+    Write-Host ""
+
+    foreach ($dirPath in $tempDirs.Keys) {
+        Write-Host "  Creating: $dirPath" -ForegroundColor White
+
+        if (Test-Path $dirPath) {
+            Write-Host "    [OK] Already exists" -ForegroundColor Green
+        }
+        else {
+            try {
+                New-Item -ItemType Directory -Path $dirPath -Force -ErrorAction Stop | Out-Null
+                Write-Host "    [OK] Created directory" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "    [ERROR] Failed to create directory: $_" -ForegroundColor Red
+                Write-Host "    Please create manually: New-Item -ItemType Directory -Path '$dirPath' -Force" -ForegroundColor Yellow
+                continue
+            }
+        }
+
+        # Show which files reference this directory
+        Write-Host "      Referenced by:" -ForegroundColor DarkGray
+        foreach ($ref in $tempDirs[$dirPath]) {
+            Write-Host "        $($ref.File) ($($ref.Var))" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+
+    Write-Host "[OK] TEMP/TMP directories prepared" -ForegroundColor Green
+}
+
+# ============================================================================
+# RANCHER DESKTOP RESOURCES FIX
+# ============================================================================
+function Fix-RancherDesktopResources {
+    param([string]$RancherPath)
+
+    Write-Host "[INFO] Checking Rancher Desktop resources structure..." -ForegroundColor Gray
+
+    $resourcesDir = Join-Path $RancherPath "resources"
+    $resourcesResourcesDir = Join-Path $resourcesDir "resources"
+
+    # Check if double resources exists
+    if (Test-Path $resourcesResourcesDir) {
+        Write-Host "  [INFO] Found resources\resources structure, fixing..." -ForegroundColor Gray
+
+        try {
+            # Get all items in resources\resources
+            $items = Get-ChildItem -Path $resourcesResourcesDir -Force
+
+            # Move each item up one level
+            foreach ($item in $items) {
+                $destination = Join-Path $resourcesDir $item.Name
+
+                # Remove existing item if present
+                if (Test-Path $destination) {
+                    Remove-Item -Path $destination -Recurse -Force -ErrorAction Stop
+                }
+
+                # Move item
+                Move-Item -Path $item.FullName -Destination $destination -Force -ErrorAction Stop
+            }
+
+            # Remove empty resources\resources directory
+            Remove-Item -Path $resourcesResourcesDir -Force -ErrorAction Stop
+
+            Write-Host "  [OK] Fixed resources structure" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "  [WARN] Could not fix resources structure: $_" -ForegroundColor Yellow
+            Write-Host "  Rancher Desktop may not start correctly" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "  [OK] Resources structure is correct" -ForegroundColor Green
+    }
+}
 
 # ============================================================================
 # PART 1: ENVIRONMENT SETUP (RUN AS ADMIN)
@@ -58,101 +298,11 @@ function Set-DevelopmentEnvironment {
     Write-Host "[OK] Running with administrator privileges" -ForegroundColor Green
     Write-Host ""
 
-    # ============================================================================
-    # STEP 1: CHECK AND CREATE TEMP/TMP DIRECTORIES FROM .ENV FILES
-    # ============================================================================
-    Write-Host ">>> Step 1: Checking TEMP/TMP configuration..." -ForegroundColor White
+    # Step 1: Initialize TEMP/TMP directories
+    Initialize-TempDirectories
+
+    # Step 2: Apply environment configuration
     Write-Host ""
-
-    $envDir = "$ScoopDir\etc\environments"
-    if (Test-Path $envDir) {
-        # Get all .env files
-        $envFiles = Get-ChildItem -Path $envDir -Filter "*.env" -File
-
-        if ($envFiles.Count -gt 0) {
-            Write-Host "[INFO] Found $($envFiles.Count) environment file(s)" -ForegroundColor Gray
-            Write-Host ""
-
-            # Track TEMP/TMP directories to create
-            $tempDirs = @{}
-
-            foreach ($envFile in $envFiles) {
-                Write-Host "  Scanning: $($envFile.Name)" -ForegroundColor DarkGray
-
-                # Read file and look for TEMP/TMP assignments
-                $content = Get-Content $envFile.FullName
-                foreach ($line in $content) {
-                    # Skip comments and empty lines
-                    if ([string]::IsNullOrWhiteSpace($line) -or $line.Trim().StartsWith('#')) {
-                        continue
-                    }
-
-                    # Check for TEMP= or TMP=
-                    if ($line -match '^(TEMP|TMP)\s*=\s*(.+)$') {
-                        $varName = $Matches[1]
-                        $varValue = $Matches[2].Trim()
-
-                        # Expand environment variables in path
-                        $expandedPath = [System.Environment]::ExpandEnvironmentVariables($varValue)
-
-                        # Store for later creation
-                        if (-not $tempDirs.ContainsKey($expandedPath)) {
-                            $tempDirs[$expandedPath] = @()
-                        }
-                        $tempDirs[$expandedPath] += @{File = $envFile.Name; Var = $varName}
-
-                        Write-Host "    Found: $varName=$expandedPath" -ForegroundColor Cyan
-                    }
-                }
-            }
-
-            # Create directories
-            if ($tempDirs.Count -gt 0) {
-                Write-Host ""
-                Write-Host "[INFO] Creating TEMP/TMP directories..." -ForegroundColor Yellow
-                Write-Host ""
-
-                foreach ($dirPath in $tempDirs.Keys) {
-                    Write-Host "  Creating: $dirPath" -ForegroundColor Gray
-
-                    try {
-                        if (-not (Test-Path $dirPath)) {
-                            New-Item -ItemType Directory -Path $dirPath -Force | Out-Null
-                            Write-Host "    [OK] Created directory" -ForegroundColor Green
-                        } else {
-                            Write-Host "    [OK] Directory already exists" -ForegroundColor Green
-                        }
-
-                        # Show which env files reference this directory
-                        $refs = $tempDirs[$dirPath]
-                        foreach ($ref in $refs) {
-                            Write-Host "      Referenced by: $($ref.File) ($($ref.Var))" -ForegroundColor DarkGray
-                        }
-                    } catch {
-                        Write-Host "    [ERROR] Failed to create directory: $_" -ForegroundColor Red
-                        Write-Host "    Please create manually: New-Item -ItemType Directory -Path '$dirPath' -Force" -ForegroundColor Yellow
-                    }
-                }
-
-                Write-Host ""
-                Write-Host "[OK] TEMP/TMP directories prepared" -ForegroundColor Green
-            } else {
-                Write-Host "[INFO] No custom TEMP/TMP paths found in .env files" -ForegroundColor Gray
-                Write-Host "      (Using system defaults)" -ForegroundColor DarkGray
-            }
-        } else {
-            Write-Host "[WARN] No .env files found in $envDir" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "[INFO] Environment directory not found: $envDir" -ForegroundColor Gray
-        Write-Host "      Will be created during bootstrap" -ForegroundColor DarkGray
-    }
-
-    Write-Host ""
-
-    # ============================================================================
-    # STEP 2: APPLY ENVIRONMENT CONFIGURATION
-    # ============================================================================
     Write-Host ">>> Step 2: Applying environment configuration..." -ForegroundColor White
     Write-Host ""
 
@@ -180,9 +330,8 @@ function Set-DevelopmentEnvironment {
     Write-Host "=== Phase 1 Complete ===" -ForegroundColor Green
     Write-Host ""
     Write-Host "Environment configured:" -ForegroundColor Cyan
-    Write-Host "  - TEMP/TMP directories created (if specified)" -ForegroundColor White
-    Write-Host "  - Configuration files processed" -ForegroundColor White
-    Write-Host "  - All environment variables set" -ForegroundColor White
+    Write-Host "  - TEMP/TMP directories created" -ForegroundColor White
+    Write-Host "  - Environment variables applied" -ForegroundColor White
     Write-Host ""
     Write-Host "Next step:" -ForegroundColor Yellow
     Write-Host "  Close this Administrator PowerShell" -ForegroundColor White
@@ -221,7 +370,22 @@ function Install-ScoopTools {
     }
 
     # ============================================================================
-    # STEP 1: BOOTSTRAP SCOOP
+    # PREREQUISITE CHECK: WSL2
+    # ============================================================================
+    $wsl2Available = Test-WSL2
+
+    if (-not $wsl2Available) {
+        Write-Host ""
+        Write-Host "=== Installation Aborted ===" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "WSL2 is required for Rancher Desktop." -ForegroundColor Yellow
+        Write-Host "Please install WSL2 first (see instructions above)." -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
+
+    # ============================================================================
+    # STEP 1: BOOTSTRAP SCOOP (Using scoop-boot.ps1 pattern)
     # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor White
@@ -245,7 +409,7 @@ function Install-ScoopTools {
         }
     }
 
-    # Run scoop-boot.ps1 --bootstrap
+    # Run scoop-boot.ps1 --bootstrap (installs Scoop + 7zip + Git + aria2 + recommended tools + buckets)
     $bootstrapSuccess = $false
 
     if (Test-Path "$ScoopDir\bin\scoop-boot.ps1") {
@@ -278,25 +442,13 @@ function Install-ScoopTools {
         [Environment]::SetEnvironmentVariable('SCOOP', $ScoopDir, 'User')
         [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$ScoopDir\global", 'User')
 
-        # Get TEMP from environment (might be custom from Phase 1)
-        $userTemp = [System.Environment]::GetEnvironmentVariable("TEMP", "Machine")
-        if ([string]::IsNullOrEmpty($userTemp)) {
-            $userTemp = [System.Environment]::GetEnvironmentVariable("TEMP", "User")
-        }
-        if ([string]::IsNullOrEmpty($userTemp)) {
-            $userTemp = "$env:USERPROFILE\Temp"
-        }
-
-        # Ensure TEMP directory exists
+        # Fix TEMP path (common cause of .cs compilation errors)
+        $userTemp = "$env:USERPROFILE\Temp"
         if (-not (Test-Path $userTemp)) {
-            Write-Host "[INFO] Creating TEMP directory: $userTemp" -ForegroundColor Gray
             New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
         }
-
         $env:TMP = $userTemp
         $env:TEMP = $userTemp
-
-        Write-Host "[INFO] Using TEMP directory: $userTemp" -ForegroundColor Gray
 
         # Download and run official Scoop installer
         Write-Host "[INFO] Downloading official Scoop installer..." -ForegroundColor Gray
@@ -369,12 +521,13 @@ function Install-ScoopTools {
     scoop config aria2-warning-enabled false 2>&1 | Out-Null
 
     # ============================================================================
-    # STEP 2: ADD ADDITIONAL BUCKETS
+    # STEP 2: ADD ADDITIONAL BUCKETS (main + extras already added by bootstrap)
     # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 2: Adding additional buckets..." -ForegroundColor White
     Write-Host ""
 
+    # Bootstrap already added main + extras, we add java + versions
     $additionalBuckets = @('java', 'versions')
     foreach ($bucket in $additionalBuckets) {
         Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
@@ -387,7 +540,7 @@ function Install-ScoopTools {
     }
 
     # ============================================================================
-    # STEP 3: INSTALL DEVELOPMENT TOOLS
+    # STEP 3: INSTALL DEVELOPMENT TOOLS (INCLUDING RANCHER DESKTOP)
     # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 3: Installing development tools..." -ForegroundColor White
@@ -395,8 +548,11 @@ function Install-ScoopTools {
     Write-Host "This will take 15-30 minutes depending on internet speed." -ForegroundColor Gray
     Write-Host ""
 
+    # Essential tools already installed by bootstrap: 7zip, git, aria2, sudo, innounp, dark, lessmsi, wget, cacert
+    # We install everything else
+
     $apps = @(
-        # Java JDKs
+    # Java JDKs
         'temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk',
 
         # Build tools
@@ -427,7 +583,10 @@ function Install-ScoopTools {
         'jq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
 
         # System tools
-        'vcredist2022', 'systeminformer'
+        'vcredist2022', 'systeminformer',
+
+        # Rancher Desktop (requires WSL2)
+        'rancher-desktop'
     )
 
     foreach ($app in $apps) {
@@ -463,20 +622,45 @@ function Install-ScoopTools {
     # Initialize MSYS2 and install GCC
     if (Test-Path "$ScoopDir\apps\msys2\current") {
         Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
+        Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
+        Write-Host "  -> Updating package database (pacman -Sy)..." -ForegroundColor DarkGray
+        Write-Host "  -> Upgrading core system (pacman -Syu)..." -ForegroundColor DarkGray
+        Write-Host "     (This may take 2-3 minutes and will close MSYS2 terminal)" -ForegroundColor DarkGray
+        Write-Host "  -> Installing mingw-w64-ucrt-x86_64-gcc..." -ForegroundColor DarkGray
+        Write-Host "     (This downloads ~70 MB and may take 3-5 minutes)" -ForegroundColor DarkGray
 
+        # Try automatic installation
         $msys2 = "$ScoopDir\apps\msys2\current\msys2.exe"
         try {
+            # First run: update package database and system
             Start-Process -FilePath $msys2 -ArgumentList "pacman -Syu --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
+
+            # Second run: install GCC
             Start-Process -FilePath $msys2 -ArgumentList "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
         } catch {}
 
-        $gccPath = "$ScoopDir\apps\msys2\current\mingw64\bin\gcc.exe"
+        # Verify installation
+        $gccPath = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
         if (Test-Path $gccPath) {
             Write-Host "[OK] MSYS2 GCC installed successfully!" -ForegroundColor Green
+            Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
         } else {
-            Write-Host "[WARN] GCC installation may have failed" -ForegroundColor Yellow
+            Write-Host "[WARN] GCC installation may have failed (gcc.exe not found)" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "Manual installation steps:" -ForegroundColor Yellow
+            Write-Host "  1. Open MSYS2 terminal: $ScoopDir\apps\msys2\current\msys2.exe" -ForegroundColor White
+            Write-Host "  2. Run: pacman -Syu" -ForegroundColor White
+            Write-Host "  3. Run: pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor White
         }
+    } else {
+        Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
+    }
+
+    # Fix Rancher Desktop resources structure
+    if (Test-Path "$ScoopDir\apps\rancher-desktop\current") {
+        Write-Host ""
+        Fix-RancherDesktopResources -RancherPath "$ScoopDir\apps\rancher-desktop\current"
     }
 
     Write-Host ""
@@ -528,14 +712,18 @@ function Install-ScoopTools {
     Write-Host ">>> Step 7: Cleaning up User-Scope duplicates..." -ForegroundColor White
     Write-Host ""
 
+    # Get Machine-scope PATH
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     $machineEntries = $machinePath -split ';' | Where-Object { $_ -ne '' }
 
+    # Get User-scope PATH
     $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
     $userEntries = $userPath -split ';' | Where-Object { $_ -ne '' }
 
+    # Find entries to remove
     $toRemove = @()
 
+    # 1. Remove exact duplicates (same in Machine and User)
     foreach ($userEntry in $userEntries) {
         foreach ($machineEntry in $machineEntries) {
             if ($userEntry -eq $machineEntry) {
@@ -545,12 +733,15 @@ function Install-ScoopTools {
         }
     }
 
+    # 2. Remove Scoop-added paths using explicit pattern matching
     foreach ($userEntry in $userEntries) {
         $shouldRemove = $false
 
+        # Check if it's a temurin JDK path (any version: 8, 11, 17, 21, 23, 25, etc.)
         if ($userEntry -match '^C:\\usr\\apps\\temurin\d+-jdk\\current\\bin$') {
             $shouldRemove = $true
         }
+        # Check other unwanted patterns
         elseif ($userEntry -eq 'C:\usr\apps\vscode\current\bin') {
             $shouldRemove = $true
         }
@@ -572,6 +763,7 @@ function Install-ScoopTools {
             Write-Host "  - $entry" -ForegroundColor DarkGray
         }
 
+        # Remove unwanted entries from User-PATH
         $cleanedUserEntries = $userEntries | Where-Object { $toRemove -notcontains $_ }
         $cleanedUserPath = ($cleanedUserEntries -join ';')
 
@@ -581,6 +773,7 @@ function Install-ScoopTools {
         Write-Host "[OK] No entries to remove from User-PATH" -ForegroundColor Green
     }
 
+    # Get all Machine-scope environment variables
     $machineVars = @{}
     $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
     Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
@@ -590,6 +783,7 @@ function Install-ScoopTools {
         }
     }
 
+    # Get all User-scope environment variables that exist in Machine-scope
     $userRegPath = "HKCU:\Environment"
     $duplicateVars = @()
     Get-ItemProperty -Path $userRegPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
@@ -619,9 +813,18 @@ function Install-ScoopTools {
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Verify:" -ForegroundColor Cyan
-    Write-Host "  java -version    # Should show Java 21" -ForegroundColor Gray
-    Write-Host "  python --version # Should show Python 3.13.9" -ForegroundColor Gray
-    Write-Host "  gcc --version    # Should show GCC 15.2.0" -ForegroundColor Gray
+    Write-Host "  java -version        # Should show Java 21" -ForegroundColor Gray
+    Write-Host "  python --version     # Should show Python 3.13.9" -ForegroundColor Gray
+    Write-Host "  gcc --version        # Should show GCC 15.2.0" -ForegroundColor Gray
+    Write-Host "  wsl --version        # Should show WSL2" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Start Rancher Desktop:" -ForegroundColor Cyan
+    Write-Host "  & '$ScoopDir\apps\rancher-desktop\current\Rancher Desktop.exe'" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Rancher Desktop will:" -ForegroundColor Cyan
+    Write-Host "  - Start WSL2 backend automatically" -ForegroundColor White
+    Write-Host "  - Install Kubernetes cluster" -ForegroundColor White
+    Write-Host "  - Provide kubectl, docker, nerdctl commands" -ForegroundColor White
     Write-Host ""
 }
 
