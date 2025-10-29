@@ -422,13 +422,19 @@ function Install-ScoopTools {
         'windows-terminal',
 
         # GUI applications
-        'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver',
+        'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'keepass', 'postman', 'dbeaver'
 
         # CLI tools
-        'jq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
+        'jq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid', 'sysinternals',
 
         # System tools
-        'vcredist2022', 'systeminformer'
+        'vcredist2022', 'systeminformer',
+
+        # Server Apps
+        'tomcat', 'activemq-artemis', 'postgresql', 'mariadb', 'kafka',
+
+        # etc
+        'sqlite', 'nmap', 'openssl', 'yq', 'inkscape', 'darktable', 'handbrake', 'audacity', 'btop', 'pandoc', 'ghostscript', 'gnupg', 'gimp'
 
     # NOTE: Docker alternatives (Rancher Desktop, Docker Desktop) are not included
     # Install manually if needed:
@@ -664,9 +670,12 @@ function Install-ScoopTools {
 
     if ($wsl2Installed) {
         Write-Host "WSL2 is ready for:" -ForegroundColor Cyan
-        Write-Host "  - Rancher Desktop (download: https://rancherdesktop.io)" -ForegroundColor Gray
+        Write-Host "  - Install Rancher Desktop (download: https://rancherdesktop.io)" -ForegroundColor Gray
         Write-Host ""
     }
+    Write-Host "Install:" -ForegroundColor Cyan
+    Write-Host "  - Visual Studion (download: https://visualstudio.microsoft.com/de/downloads)" -ForegroundColor Gray
+    Write-Host ""
 }
 
 # ============================================================================
