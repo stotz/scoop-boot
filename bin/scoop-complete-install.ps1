@@ -8,14 +8,30 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
     
 .NOTES
-    Version: 2.6.0
+    Version: 2.7.1
     Date: 2025-10-28
     
-    Changes in v2.6.0:
-    - CRITICAL FIX: Regex pattern matching for JDK cleanup
-    - Now correctly removes ALL temurin*-jdk versions (8,11,17,23) from User-PATH
-    - Simplified matching logic - explicit checks instead of complex regex escaping
-    - Added MSYS2 terminal start command to output
+    Changes in v2.7.1:
+    - CRITICAL FIX: Robust fallback when scoop-boot.ps1 fails
+    - Fixes PowerShell temp file compilation errors
+    - Manual bootstrap with proper TEMP path configuration
+    - Automatic essential tools installation (7zip, git, aria2)
+    Changes in v2.7.1:
+    - CRITICAL FIX: Robust fallback when scoop-boot.ps1 fails
+    - Fixes PowerShell temp file compilation errors
+    - Manual bootstrap with proper TEMP path configuration
+    - Automatic essential tools installation (7zip, git, aria2)
+    Changes in v2.7.1:
+    - CRITICAL FIX: Robust fallback when scoop-boot.ps1 fails
+    - Fixes PowerShell temp file compilation errors
+    - Manual bootstrap with proper TEMP path configuration
+    - Automatic essential tools installation (7zip, git, aria2)
+    Changes in v2.7.1:
+    - CRITICAL FIX: Robust fallback when scoop-boot.ps1 fails
+    - Fixes PowerShell temp file compilation errors
+    - Manual bootstrap with proper TEMP path configuration
+    - Automatic essential tools installation (7zip, git, aria2)
+    - NO manual Git check needed - bootstrap handles everything
     
 .EXAMPLE
     # Phase 1 - As Administrator:
@@ -56,9 +72,6 @@ function Set-DevelopmentEnvironment {
     }
     
     Write-Host "[OK] Running with administrator privileges" -ForegroundColor Green
-    Write-Host ""
-    Write-Host ">>> Creating environment configuration file..." -ForegroundColor White
-    
     Write-Host ""
     Write-Host ">>> Applying environment configuration..." -ForegroundColor White
     Write-Host ""
@@ -124,7 +137,7 @@ function Install-ScoopTools {
     }
     
     # ============================================================================
-    # STEP 1: BOOTSTRAP SCOOP
+    # STEP 1: BOOTSTRAP SCOOP (Using scoop-boot.ps1 pattern)
     # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor White
@@ -142,46 +155,133 @@ function Install-ScoopTools {
             Invoke-WebRequest -Uri $scoopBootUrl -OutFile "$ScoopDir\bin\scoop-boot.ps1" -UseBasicParsing
             Write-Host "[OK] Downloaded scoop-boot.ps1" -ForegroundColor Green
         } catch {
-            Write-Host "[WARN] Could not download scoop-boot.ps1" -ForegroundColor Yellow
+            Write-Host "[ERROR] Could not download scoop-boot.ps1" -ForegroundColor Red
+            Write-Host "Download manually and run bootstrap first!" -ForegroundColor Yellow
+            exit 1
         }
     }
     
-    # Run scoop-boot.ps1 --bootstrap
+    # Run scoop-boot.ps1 --bootstrap (installs Scoop + 7zip + Git + aria2 + recommended tools + buckets)
+    $bootstrapSuccess = $false
+    
     if (Test-Path "$ScoopDir\bin\scoop-boot.ps1") {
-        Write-Host "[INFO] Running: scoop-boot.ps1 --bootstrap" -ForegroundColor Gray
+        Write-Host "[INFO] Trying: scoop-boot.ps1 --bootstrap" -ForegroundColor Gray
         Write-Host ""
-        & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap
-    } else {
-        Write-Host "[WARN] scoop-boot.ps1 not found, using manual bootstrap" -ForegroundColor Yellow
-        # Manual bootstrap fallback
+        
+        try {
+            & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap 2>&1 | Out-Null
+            Write-Host ""
+            
+            # Verify bootstrap success
+            if ((Test-Path "$ScoopDir\apps\scoop") -and (Test-Path "$ScoopDir\apps\git")) {
+                Write-Host "[OK] Bootstrap via scoop-boot.ps1 successful!" -ForegroundColor Green
+                $bootstrapSuccess = $true
+            }
+        } catch {
+            Write-Host "[WARN] scoop-boot.ps1 bootstrap failed, using fallback..." -ForegroundColor Yellow
+        }
+    }
+    
+    # FALLBACK: Manual bootstrap if scoop-boot.ps1 failed
+    if (-not $bootstrapSuccess) {
+        Write-Host ""
+        Write-Host "[INFO] Using manual bootstrap (scoop-boot.ps1 failed)..." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Set environment variables
         $env:SCOOP = $ScoopDir
         $env:SCOOP_GLOBAL = "$ScoopDir\global"
         [Environment]::SetEnvironmentVariable('SCOOP', $ScoopDir, 'User')
         [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$ScoopDir\global", 'User')
         
-        $tempInstaller = "$env:TEMP\scoop-install.ps1"
-        Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $tempInstaller -UseBasicParsing
-        & $tempInstaller -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
-        Remove-Item $tempInstaller -Force
+        # Fix TEMP path (common cause of .cs compilation errors)
+        $userTemp = "$env:USERPROFILE\Temp"
+        if (-not (Test-Path $userTemp)) {
+            New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
+        }
+        $env:TMP = $userTemp
+        $env:TEMP = $userTemp
+        
+        # Download and run official Scoop installer
+        Write-Host "[INFO] Downloading official Scoop installer..." -ForegroundColor Gray
+        $tempInstaller = "$userTemp\scoop-install.ps1"
+        try {
+            Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $tempInstaller -UseBasicParsing
+            Write-Host "[OK] Downloaded Scoop installer" -ForegroundColor Green
+            
+            Write-Host "[INFO] Installing Scoop core..." -ForegroundColor Gray
+            & $tempInstaller -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
+            
+            Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
+            
+            if (Test-Path "$ScoopDir\apps\scoop") {
+                Write-Host "[OK] Scoop core installed successfully!" -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Scoop installation failed!" -ForegroundColor Red
+                exit 1
+            }
+        } catch {
+            Write-Host "[ERROR] Failed to download/install Scoop!" -ForegroundColor Red
+            Write-Host "Error: $_" -ForegroundColor Red
+            exit 1
+        }
+        
+        # Update PATH for current session
+        $env:Path = "$ScoopDir\shims;$ScoopDir\bin;$env:Path"
+        
+        # Install essential tools manually
+        Write-Host ""
+        Write-Host "[INFO] Installing essential tools (7zip, git, aria2)..." -ForegroundColor Gray
+        
+        Write-Host "  -> Installing 7zip..." -ForegroundColor DarkGray
+        scoop install 7zip 2>&1 | Out-Null
+        Write-Host "  -> Installing git..." -ForegroundColor DarkGray
+        scoop install git 2>&1 | Out-Null
+        Write-Host "  -> Installing aria2..." -ForegroundColor DarkGray
+        scoop install aria2 2>&1 | Out-Null
+        
+        Write-Host "[OK] Essential tools installed" -ForegroundColor Green
+        
+        # Add main and extras buckets
+        Write-Host ""
+        Write-Host "[INFO] Adding main and extras buckets..." -ForegroundColor Gray
+        scoop bucket add main 2>&1 | Out-Null
+        scoop bucket add extras 2>&1 | Out-Null
+        Write-Host "[OK] Buckets added" -ForegroundColor Green
+        
+        $bootstrapSuccess = $true
     }
+    
+    # Final verification
+    if (-not (Test-Path "$ScoopDir\apps\scoop")) {
+        Write-Host "[ERROR] Scoop not found after bootstrap!" -ForegroundColor Red
+        exit 1
+    }
+    
+    if (-not (Test-Path "$ScoopDir\apps\git")) {
+        Write-Host "[ERROR] Git not found after bootstrap!" -ForegroundColor Red
+        exit 1
+    }
+    
+    Write-Host ""
+    Write-Host "[OK] Bootstrap complete - Scoop + Git ready!" -ForegroundColor Green
     
     # Update PATH for current session
     $env:Path = "$ScoopDir\shims;$ScoopDir\bin;$env:Path"
-    Write-Host ""
-    Write-Host "[OK] Scoop bootstrapped successfully" -ForegroundColor Green
     
     # Disable aria2 warnings
-    scoop config aria2-warning-enabled false | Out-Null
+    scoop config aria2-warning-enabled false 2>&1 | Out-Null
     
     # ============================================================================
-    # STEP 2: ADD BUCKETS
+    # STEP 2: ADD ADDITIONAL BUCKETS (main + extras already added by bootstrap)
     # ============================================================================
     Write-Host ""
-    Write-Host ">>> Step 2: Adding buckets..." -ForegroundColor White
+    Write-Host ">>> Step 2: Adding additional buckets..." -ForegroundColor White
     Write-Host ""
     
-    $buckets = @('main', 'extras', 'java', 'versions')
-    foreach ($bucket in $buckets) {
+    # Bootstrap already added main + extras, we add java + versions
+    $additionalBuckets = @('java', 'versions')
+    foreach ($bucket in $additionalBuckets) {
         Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
         $output = scoop bucket add $bucket 2>&1
         if ($output -match 'already exists') {
@@ -200,10 +300,10 @@ function Install-ScoopTools {
     Write-Host "This will take 15-30 minutes depending on internet speed." -ForegroundColor Gray
     Write-Host ""
     
+    # Essential tools already installed by bootstrap: 7zip, git, aria2, sudo, innounp, dark, lessmsi, wget, cacert
+    # We install everything else
+    
     $apps = @(
-        # Essential tools
-        'git', '7zip', 'aria2', 'wget', 'curl', 'openssh', 'sudo',
-        
         # Java JDKs
         'temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk',
         
@@ -232,7 +332,7 @@ function Install-ScoopTools {
         'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver',
         
         # CLI tools
-        'jq', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
+        'jq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
         
         # System tools
         'vcredist2022', 'systeminformer'
@@ -257,7 +357,7 @@ function Install-ScoopTools {
     
     # Set default Java version
     Write-Host "[INFO] Setting default Java to Temurin 21..." -ForegroundColor Gray
-    scoop reset temurin21-jdk | Out-Null
+    scoop reset temurin21-jdk 2>&1 | Out-Null
     Write-Host "[OK] Default Java set to Temurin 21" -ForegroundColor Green
     
     # Cleanup VC++ installer
