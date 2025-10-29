@@ -4,6 +4,7 @@
     
 .DESCRIPTION
     Performs complete cleanup:
+    - ROBUST process detection using handle64.exe
     - Removes all environment variables
     - Cleans PATH entries
     - Takes ownership and fixes permissions
@@ -13,13 +14,15 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
     
 .NOTES
-    Version: 2.1.0
-    Date: 2025-10-28
+    Version: 2.2.0
+    Date: 2025-01-29
     
-    Changes in v2.1.0:
-    - CRITICAL FIX: Always kill system tray apps (greenshot, jetbrains-toolbox)
-    - No more user prompts for stopping processes
-    - Automatic process termination to prevent deletion failures
+    Changes in v2.2.0:
+    - NEW: Uses handle64.exe for COMPLETE process detection
+    - CRITICAL FIX: Finds ALL processes (including keyboxd, gpg-agent, etc.)
+    - Detects background services without .Path property
+    - Kills GnuPG/SSH agents that Get-Process misses
+    - No more manual process hunting required
     
 .PARAMETER Force
     Skip confirmation prompts
@@ -32,7 +35,6 @@
     .\scoop-complete-reset.ps1 -Force
     .\scoop-complete-reset.ps1 -KeepPersist
 #>
-
 
 param(
     [switch]$Force,
@@ -74,26 +76,26 @@ function Remove-DirectoryAggressively {
         [string]$Path,
         [string]$Description
     )
-    
+
     if (-not (Test-Path $Path)) {
         Write-Host "[SKIP] Not found: $Description" -ForegroundColor Gray
         return
     }
-    
+
     Write-Host "[WORK] Removing: $Description" -ForegroundColor Yellow
-    
+
     # Step 1: Remove all file attributes
     Write-Host "  -> Removing file attributes..." -ForegroundColor Gray
     try {
-        Get-ChildItem $Path -Recurse -Force -ErrorAction SilentlyContinue | 
-            ForEach-Object { 
-                try { $_.Attributes = 'Normal' } catch {}
-            }
+        Get-ChildItem $Path -Recurse -Force -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    try { $_.Attributes = 'Normal' } catch {}
+                }
         Write-Host "  -> Attributes cleared" -ForegroundColor Green
     } catch {
         Write-Host "  -> Warning: Could not clear all attributes" -ForegroundColor Yellow
     }
-    
+
     # Step 2: Check if we have permissions (skip takeown if we do)
     Write-Host "  -> Checking permissions..." -ForegroundColor Gray
     $needsPermissionFix = $false
@@ -101,9 +103,9 @@ function Remove-DirectoryAggressively {
         $acl = Get-Acl $Path -ErrorAction Stop
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         $hasFullControl = $acl.Access | Where-Object {
-            ($_.IdentityReference -eq $currentUser -or 
-             $_.IdentityReference -eq "BUILTIN\Administrators") -and 
-            $_.FileSystemRights -match "FullControl"
+            ($_.IdentityReference -eq $currentUser -or
+                    $_.IdentityReference -eq "BUILTIN\Administrators") -and
+                    $_.FileSystemRights -match "FullControl"
         }
         if (-not $hasFullControl) {
             $needsPermissionFix = $true
@@ -111,7 +113,7 @@ function Remove-DirectoryAggressively {
     } catch {
         $needsPermissionFix = $true
     }
-    
+
     if ($needsPermissionFix) {
         Write-Host "  -> Taking ownership (this may take a while)..." -ForegroundColor Gray
         try {
@@ -120,7 +122,7 @@ function Remove-DirectoryAggressively {
         } catch {
             Write-Host "  -> Warning: Takeown had issues" -ForegroundColor Yellow
         }
-        
+
         Write-Host "  -> Setting permissions..." -ForegroundColor Gray
         try {
             $null = & icacls "$Path" /grant "Administrators:(OI)(CI)F" /t /c /q 2>&1
@@ -131,13 +133,13 @@ function Remove-DirectoryAggressively {
     } else {
         Write-Host "  -> Permissions OK, skipping takeown" -ForegroundColor Green
     }
-    
+
     # Step 3: Delete junctions first (they can block deletion)
     Write-Host "  -> Removing junctions..." -ForegroundColor Gray
     try {
-        $junctions = Get-ChildItem $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Attributes -match "ReparsePoint" }
-        
+        $junctions = Get-ChildItem $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Attributes -match "ReparsePoint" }
+
         foreach ($junction in $junctions) {
             try {
                 [System.IO.Directory]::Delete($junction.FullName, $false)
@@ -150,12 +152,12 @@ function Remove-DirectoryAggressively {
     } catch {
         Write-Host "  -> Warning: Some junctions may remain" -ForegroundColor Yellow
     }
-    
+
     # Step 4: Multiple deletion attempts with different methods
     Write-Host "  -> Deleting directory..." -ForegroundColor Gray
-    
+
     $deleted = $false
-    
+
     # Method 1: PowerShell Remove-Item with UNC path
     try {
         Remove-Item -Path "\\?\$Path" -Recurse -Force -ErrorAction Stop
@@ -164,7 +166,7 @@ function Remove-DirectoryAggressively {
     } catch {
         Write-Host "  -> Remove-Item failed, trying alternatives..." -ForegroundColor Yellow
     }
-    
+
     # Method 2: cmd rd with UNC path
     if (-not $deleted -and (Test-Path $Path)) {
         try {
@@ -177,7 +179,7 @@ function Remove-DirectoryAggressively {
             }
         } catch {}
     }
-    
+
     # Method 3: Restart Explorer if DLLs are locked
     if (-not $deleted -and (Test-Path $Path)) {
         Write-Host "  -> Files locked, restarting Explorer and Shell components..." -ForegroundColor Yellow
@@ -187,24 +189,24 @@ function Remove-DirectoryAggressively {
             Stop-Process -Name ShellExperienceHost -Force -ErrorAction SilentlyContinue
             Stop-Process -Name StartMenuExperienceHost -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
-            
+
             # Restart Explorer
             Start-Process "C:\Windows\explorer.exe"
             Start-Sleep -Seconds 2
-            
+
             # Restart Taskbar and Start Menu components
             $shellExperienceHost = "C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"
             $startMenuHost = "C:\Windows\SystemApps\StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe"
-            
+
             if (Test-Path $shellExperienceHost) {
                 Start-Process $shellExperienceHost -ErrorAction SilentlyContinue
             }
             if (Test-Path $startMenuHost) {
                 Start-Process $startMenuHost -ErrorAction SilentlyContinue
             }
-            
+
             Start-Sleep -Seconds 2
-            
+
             # Try deletion again with cmd rd
             & cmd /c "rd /s /q `"\\?\$Path`"" 2>$null
             if (-not (Test-Path $Path)) {
@@ -215,7 +217,7 @@ function Remove-DirectoryAggressively {
             Write-Host "  -> Explorer restart failed" -ForegroundColor Yellow
         }
     }
-    
+
     # Method 4: .NET Directory.Delete
     if (-not $deleted -and (Test-Path $Path)) {
         try {
@@ -224,7 +226,7 @@ function Remove-DirectoryAggressively {
             Write-Host "  -> Deleted with .NET method" -ForegroundColor Green
         } catch {}
     }
-    
+
     # Check if truly deleted
     if (Test-Path $Path) {
         Write-Host "[FAIL] Could not delete: $Description" -ForegroundColor Red
@@ -237,45 +239,136 @@ function Remove-DirectoryAggressively {
     }
 }
 
-# 1. Stop running Scoop processes - ALWAYS kill system tray apps
+# ============================================================================
+# 1. ROBUST PROCESS DETECTION - Uses handle64.exe for COMPLETE coverage
+# ============================================================================
 Write-Host ">>> Checking for running Scoop applications..." -ForegroundColor Cyan
+Write-Host ""
 
-# First, kill known system tray apps (they block deletion)
-$systemTrayApps = @('greenshot', 'jetbrains-toolbox', 'everything', 'mousejiggler')
+# Method 1: Kill known system tray apps first (they always block)
+Write-Host "[INFO] Stopping known system tray applications..." -ForegroundColor Gray
+$systemTrayApps = @('greenshot', 'jetbrains-toolbox', 'everything', 'mousejiggler', 'keyboxd', 'gpg-agent', 'ssh-agent')
+$killedCount = 0
 foreach ($appName in $systemTrayApps) {
     $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue
     if ($proc) {
         try {
             Stop-Process -Name $appName -Force -ErrorAction Stop
-            Write-Host "[OK] Stopped system tray app: $appName" -ForegroundColor Green
+            Write-Host "  [OK] Stopped: $appName" -ForegroundColor Green
+            $killedCount++
         } catch {
-            Write-Host "[WARN] Could not stop: $appName" -ForegroundColor Yellow
+            Write-Host "  [WARN] Could not stop: $appName" -ForegroundColor Yellow
         }
     }
 }
+if ($killedCount -eq 0) {
+    Write-Host "  [OK] No system tray apps running" -ForegroundColor Gray
+}
 
-# Then check for any other Scoop apps
-$runningApps = Get-Process | Where-Object { 
-    $_.Path -and $_.Path -like "$ScoopDir\apps\*" 
-} | Select-Object Name, Id, Path
+# Method 2: Use handle64.exe for COMPLETE detection (finds ALL processes with open handles)
+Write-Host ""
+Write-Host "[INFO] Scanning for ALL processes with open handles to Scoop..." -ForegroundColor Gray
+$handle64Path = "$ScoopDir\apps\sysinternals\current\handle64.exe"
+$usedHandle = $false
 
-if ($runningApps) {
-    Write-Host "[INFO] Other Scoop applications detected:" -ForegroundColor Yellow
-    $runningApps | Format-Table -AutoSize
-    
-    Write-Host "[INFO] Stopping all Scoop processes..." -ForegroundColor Yellow
-    $runningApps | ForEach-Object {
-        try {
-            Stop-Process -Id $_.Id -Force -ErrorAction Stop
-            Write-Host "[OK] Stopped: $($_.Name)" -ForegroundColor Green
-        } catch {
-            Write-Host "[WARN] Could not stop: $($_.Name)" -ForegroundColor Yellow
+if (Test-Path $handle64Path) {
+    Write-Host "  [INFO] Using handle64.exe for comprehensive scan..." -ForegroundColor DarkGray
+    try {
+        # Get all processes with handles to C:\usr\apps
+        $handleOutput = & $handle64Path -accepteula -nobanner "$ScoopDir\apps" 2>&1 | Out-String
+
+        # Parse output for process names and PIDs
+        $processesToKill = @{}
+        foreach ($line in ($handleOutput -split "`n")) {
+            # Format: "processname.exe pid: 12345 HOSTNAME\User"
+            if ($line -match '^\s*(\S+\.exe)\s+pid:\s+(\d+)') {
+                $exeName = $Matches[1]
+                $pid = [int]$Matches[2]
+                if (-not $processesToKill.ContainsKey($pid)) {
+                    $processesToKill[$pid] = $exeName
+                }
+            }
         }
+
+        if ($processesToKill.Count -gt 0) {
+            Write-Host "  [FOUND] $($processesToKill.Count) processes with open handles:" -ForegroundColor Yellow
+            foreach ($pid in $processesToKill.Keys) {
+                $exeName = $processesToKill[$pid]
+                Write-Host "    - $exeName (PID: $pid)" -ForegroundColor Yellow
+
+                try {
+                    Stop-Process -Id $pid -Force -ErrorAction Stop
+                    Write-Host "      [OK] Killed PID $pid" -ForegroundColor Green
+                } catch {
+                    Write-Host "      [FAIL] Could not kill PID $pid" -ForegroundColor Red
+                }
+            }
+            Start-Sleep -Seconds 2
+            $usedHandle = $true
+        } else {
+            Write-Host "  [OK] No processes found by handle64" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "  [WARN] handle64.exe failed: $_" -ForegroundColor Yellow
     }
-    Start-Sleep -Seconds 2
 } else {
-    Write-Host "[OK] No Scoop processes running" -ForegroundColor Green
+    Write-Host "  [WARN] handle64.exe not found at: $handle64Path" -ForegroundColor Yellow
+    Write-Host "  [INFO] Install Sysinternals for better process detection:" -ForegroundColor Yellow
+    Write-Host "         scoop install sysinternals" -ForegroundColor Gray
 }
+
+# Method 3: Fallback - Get-Process with Path check (may miss some processes)
+if (-not $usedHandle) {
+    Write-Host ""
+    Write-Host "  [INFO] Using Get-Process fallback (may miss background services)..." -ForegroundColor Gray
+    $runningApps = Get-Process | Where-Object {
+        $_.Path -and $_.Path -like "$ScoopDir\apps\*"
+    } | Select-Object Name, Id, Path
+
+    if ($runningApps) {
+        Write-Host "  [FOUND] Scoop applications detected:" -ForegroundColor Yellow
+        $runningApps | ForEach-Object {
+            Write-Host "    - $($_.Name) (PID: $($_.Id))" -ForegroundColor Yellow
+        }
+
+        Write-Host "  [INFO] Stopping all detected processes..." -ForegroundColor Gray
+        $runningApps | ForEach-Object {
+            try {
+                Stop-Process -Id $_.Id -Force -ErrorAction Stop
+                Write-Host "    [OK] Stopped: $($_.Name)" -ForegroundColor Green
+            } catch {
+                Write-Host "    [FAIL] Could not stop: $($_.Name)" -ForegroundColor Red
+            }
+        }
+        Start-Sleep -Seconds 2
+    } else {
+        Write-Host "  [OK] No Scoop processes detected via Get-Process" -ForegroundColor Green
+    }
+}
+
+# Method 4: Kill any remaining GnuPG/SSH agents (common blockers that Get-Process misses)
+Write-Host ""
+Write-Host "[INFO] Stopping background agents (GnuPG, SSH, etc.)..." -ForegroundColor Gray
+$backgroundAgents = @('gpg-agent', 'ssh-agent', 'ssh-pageant', 'keyboxd', 'dirmngr', 'scdaemon', 'gpg-connect-agent')
+$agentKilled = $false
+foreach ($agentName in $backgroundAgents) {
+    $proc = Get-Process -Name $agentName -ErrorAction SilentlyContinue
+    if ($proc) {
+        try {
+            Stop-Process -Name $agentName -Force -ErrorAction Stop
+            Write-Host "  [OK] Stopped: $agentName" -ForegroundColor Green
+            $agentKilled = $true
+        } catch {
+            Write-Host "  [WARN] Could not stop: $agentName" -ForegroundColor Yellow
+        }
+    }
+}
+if (-not $agentKilled) {
+    Write-Host "  [OK] No background agents running" -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "[OK] Process cleanup complete" -ForegroundColor Green
 
 # 2. Backup environment variables
 Write-Host ""
@@ -431,6 +524,13 @@ if ($remainingDirs.Count -gt 0) {
     $remainingDirs | ForEach-Object {
         Write-Host "  - $ScoopDir\$_" -ForegroundColor Yellow
     }
+    Write-Host ""
+    Write-Host "Diagnostic commands:" -ForegroundColor Cyan
+    Write-Host "  # Check for running processes:" -ForegroundColor Gray
+    Write-Host "  Get-Process | Where-Object { `$_.Path -like '*usr*' }" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  # Check for open handles (if Sysinternals installed):" -ForegroundColor Gray
+    Write-Host "  handle64.exe C:\usr\apps" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Manual cleanup commands:" -ForegroundColor Cyan
     $remainingDirs | ForEach-Object {

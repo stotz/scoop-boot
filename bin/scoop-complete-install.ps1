@@ -4,19 +4,23 @@
 
 .DESCRIPTION
     Two-phase installation:
-    Phase 1 (Admin): WSL2 check + TEMP/TMP setup + Sets Machine-scope environment variables
-    Phase 2 (User): Installs all tools including Rancher Desktop + automatic cleanup + GCC verification
+    Phase 1 (Admin): Sets Machine-scope environment variables DIRECTLY
+    Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
     Version: 2.7.3
-    Date: 2025-10-29
+    Date: 2025-01-29
 
     Changes in v2.7.3:
-    - NEW: Automatic TEMP/TMP directory creation from .env files (Phase 1)
-    - NEW: WSL2 prerequisite check before tool installation (Phase 2)
-    - NEW: Rancher Desktop installation with automatic resources fix (Phase 2)
-    - NEW: WSL2 installation instructions if missing
-    - IMPROVED: Better prerequisite validation and error messages
+    - REMOVED: Rancher Desktop (unreliable Scoop installation)
+    - KEPT: WSL2 detection (for Docker/Linux development)
+    - WSL2 now optional - installation continues without it
+    - Added manual Docker installation instructions in comments
+
+    Changes in v2.7.2:
+    - CRITICAL FIX: Robust WSL2 detection using multiple methods
+    - Fixes false negative when WSL2 is installed but script fails detection
+    - Better parsing of "wsl --status" output
 
 .EXAMPLE
     # Phase 1 - As Administrator:
@@ -34,246 +38,80 @@ param(
 $ScoopDir = "C:\usr"
 
 # ============================================================================
-# WSL2 CHECK FUNCTION
+# HELPER: Robust WSL2 Detection
 # ============================================================================
-function Test-WSL2 {
-    Write-Host ">>> Checking WSL2 prerequisite..." -ForegroundColor White
-    Write-Host ""
+function Test-WSL2Installed {
+    Write-Host "[INFO] Checking WSL2 installation..." -ForegroundColor Gray
 
-    # Check if WSL command exists
-    $wslCommand = Get-Command wsl -ErrorAction SilentlyContinue
-    if (-not $wslCommand) {
-        Write-Host "[ERROR] WSL is not installed!" -ForegroundColor Red
-        Write-Host ""
-        Show-WSL2InstallInstructions
+    # Method 1: Check wsl.exe existence
+    $wslPath = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wslPath) {
+        Write-Host "  [FAIL] wsl.exe not found" -ForegroundColor Red
         return $false
     }
 
-    # Check WSL version
+    # Method 2: Parse "wsl --status" output
     try {
-        $wslStatus = wsl --status 2>&1
+        $wslStatus = wsl --status 2>&1 | Out-String
 
-        if ($wslStatus -match "Default Version: 2") {
-            Write-Host "[OK] WSL2 is installed and configured" -ForegroundColor Green
-
-            # Show WSL info
-            $wslInfo = $wslStatus | Select-String "Default Distribution:", "Default Version:"
-            foreach ($line in $wslInfo) {
-                Write-Host "     $($line.Line.Trim())" -ForegroundColor Gray
-            }
-
+        # Check for "Default Version: 2"
+        if ($wslStatus -match 'Default Version:\s*2') {
+            Write-Host "  [OK] WSL2 detected: Default Version = 2" -ForegroundColor Green
             return $true
         }
-        elseif ($wslStatus -match "Default Version: 1") {
-            Write-Host "[ERROR] WSL1 is installed, but WSL2 is required!" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "Upgrade to WSL2:" -ForegroundColor Yellow
-            Write-Host "  wsl --set-default-version 2" -ForegroundColor White
-            Write-Host ""
-            Write-Host "Then convert existing distributions:" -ForegroundColor Yellow
-            Write-Host "  wsl --list --verbose" -ForegroundColor White
-            Write-Host "  wsl --set-version <distro-name> 2" -ForegroundColor White
-            Write-Host ""
-            return $false
-        }
-        else {
-            # WSL might be installed but not configured
-            Write-Host "[WARN] WSL status unclear, attempting version check..." -ForegroundColor Yellow
 
-            # Try to get version directly
-            $wslVersion = wsl --version 2>&1
-            if ($wslVersion -match "WSL version: 2" -or $wslVersion -match "Kernel version:") {
-                Write-Host "[OK] WSL2 appears to be available" -ForegroundColor Green
-                return $true
-            }
-            else {
-                Write-Host "[ERROR] Unable to verify WSL2!" -ForegroundColor Red
-                Write-Host ""
-                Show-WSL2InstallInstructions
-                return $false
-            }
+        # Check for "WSL version: 2.x.x"
+        if ($wslStatus -match 'WSL version:\s*2\.\d+\.\d+') {
+            Write-Host "  [OK] WSL2 detected: $($Matches[0])" -ForegroundColor Green
+            return $true
         }
-    }
-    catch {
-        Write-Host "[ERROR] Failed to check WSL status: $_" -ForegroundColor Red
-        Write-Host ""
-        Show-WSL2InstallInstructions
-        return $false
-    }
-}
 
-function Show-WSL2InstallInstructions {
-    Write-Host "=== WSL2 Installation Required ===" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Rancher Desktop requires WSL2 to function." -ForegroundColor White
-    Write-Host ""
-    Write-Host "STEP 1: Install WSL2" -ForegroundColor Cyan
-    Write-Host "  Run as Administrator:" -ForegroundColor White
-    Write-Host "    wsl --install" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  This will:" -ForegroundColor White
-    Write-Host "    - Enable WSL feature" -ForegroundColor Gray
-    Write-Host "    - Install WSL2 kernel" -ForegroundColor Gray
-    Write-Host "    - Install Ubuntu (default distribution)" -ForegroundColor Gray
-    Write-Host "    - Require a system reboot" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "STEP 2: After reboot" -ForegroundColor Cyan
-    Write-Host "  Set WSL2 as default:" -ForegroundColor White
-    Write-Host "    wsl --set-default-version 2" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "STEP 3: Verify installation" -ForegroundColor Cyan
-    Write-Host "  Check version:" -ForegroundColor White
-    Write-Host "    wsl --status" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "For more information:" -ForegroundColor Cyan
-    Write-Host "  https://aka.ms/wsl2" -ForegroundColor White
-    Write-Host ""
-    Write-Host "After WSL2 is installed, re-run:" -ForegroundColor Yellow
-    Write-Host "  .\scoop-complete-install.ps1 -InstallTools" -ForegroundColor White
-    Write-Host ""
+        # Check if any distribution is running WSL2
+        $wslList = wsl --list --verbose 2>&1 | Out-String
+        if ($wslList -match '\s+2\s+') {
+            Write-Host "  [OK] WSL2 detected: At least one distribution running version 2" -ForegroundColor Green
+            return $true
+        }
+
+    } catch {
+        Write-Host "  [WARN] Could not parse wsl status: $_" -ForegroundColor Yellow
+    }
+
+    # Method 3: Check WSL2 kernel file existence
+    $wslKernelPath = "$env:SystemRoot\System32\lxss\tools\kernel"
+    if (Test-Path $wslKernelPath) {
+        Write-Host "  [OK] WSL2 detected: Kernel found at $wslKernelPath" -ForegroundColor Green
+        return $true
+    }
+
+    # Method 4: Check Windows Feature (requires admin)
+    try {
+        $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -ErrorAction SilentlyContinue
+        $vmpFeature = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue
+
+        if ($wslFeature.State -eq 'Enabled' -and $vmpFeature.State -eq 'Enabled') {
+            Write-Host "  [OK] WSL2 detected: Required Windows features enabled" -ForegroundColor Green
+            return $true
+        }
+    } catch {
+        # Not running as admin, skip this check
+    }
+
+    # Method 5: Try to list distributions (this works if WSL2 is installed)
+    try {
+        $distros = wsl --list --quiet 2>&1
+        if ($LASTEXITCODE -eq 0 -and $distros) {
+            Write-Host "  [OK] WSL2 detected: Distributions found" -ForegroundColor Green
+            return $true
+        }
+    } catch {}
+
+    Write-Host "  [FAIL] WSL2 not detected by any method" -ForegroundColor Red
+    return $false
 }
 
 # ============================================================================
-# TEMP/TMP DIRECTORY SCANNER AND CREATOR
-# ============================================================================
-function Initialize-TempDirectories {
-    Write-Host ">>> Step 1: Checking TEMP/TMP configuration..." -ForegroundColor White
-    Write-Host ""
-
-    # Find all .env files
-    $envDir = "$ScoopDir\etc\environments"
-    if (-not (Test-Path $envDir)) {
-        Write-Host "[INFO] No environment directory found, skipping TEMP/TMP setup" -ForegroundColor Gray
-        return
-    }
-
-    $envFiles = Get-ChildItem -Path $envDir -Filter "*.env" -ErrorAction SilentlyContinue
-    if ($envFiles.Count -eq 0) {
-        Write-Host "[INFO] No environment files found, skipping TEMP/TMP setup" -ForegroundColor Gray
-        return
-    }
-
-    Write-Host "[INFO] Found $($envFiles.Count) environment file(s)" -ForegroundColor Gray
-    Write-Host ""
-
-    # Scan for TEMP/TMP assignments
-    $tempDirs = @{}
-
-    foreach ($envFile in $envFiles) {
-        Write-Host "  Scanning: $($envFile.Name)" -ForegroundColor Gray
-        $content = Get-Content $envFile.FullName -ErrorAction SilentlyContinue
-
-        foreach ($line in $content) {
-            # Match TEMP= or TMP= (with or without spaces)
-            if ($line -match '^\s*(TEMP|TMP)\s*=\s*(.+)\s*$') {
-                $varName = $Matches[1].Trim()
-                $varValue = $Matches[2].Trim()
-
-                # Skip comments
-                if ($varValue.StartsWith("#")) { continue }
-
-                # Expand environment variables
-                $expandedPath = [System.Environment]::ExpandEnvironmentVariables($varValue)
-
-                # Store path and reference
-                if (-not $tempDirs.ContainsKey($expandedPath)) {
-                    $tempDirs[$expandedPath] = @()
-                }
-                $tempDirs[$expandedPath] += @{File = $envFile.Name; Var = $varName}
-
-                Write-Host "    Found: $varName=$expandedPath" -ForegroundColor DarkGray
-            }
-        }
-    }
-
-    if ($tempDirs.Count -eq 0) {
-        Write-Host "[INFO] No TEMP/TMP configuration found in .env files" -ForegroundColor Gray
-        return
-    }
-
-    # Create directories
-    Write-Host ""
-    Write-Host "[INFO] Creating TEMP/TMP directories..." -ForegroundColor Gray
-    Write-Host ""
-
-    foreach ($dirPath in $tempDirs.Keys) {
-        Write-Host "  Creating: $dirPath" -ForegroundColor White
-
-        if (Test-Path $dirPath) {
-            Write-Host "    [OK] Already exists" -ForegroundColor Green
-        }
-        else {
-            try {
-                New-Item -ItemType Directory -Path $dirPath -Force -ErrorAction Stop | Out-Null
-                Write-Host "    [OK] Created directory" -ForegroundColor Green
-            }
-            catch {
-                Write-Host "    [ERROR] Failed to create directory: $_" -ForegroundColor Red
-                Write-Host "    Please create manually: New-Item -ItemType Directory -Path '$dirPath' -Force" -ForegroundColor Yellow
-                continue
-            }
-        }
-
-        # Show which files reference this directory
-        Write-Host "      Referenced by:" -ForegroundColor DarkGray
-        foreach ($ref in $tempDirs[$dirPath]) {
-            Write-Host "        $($ref.File) ($($ref.Var))" -ForegroundColor DarkGray
-        }
-        Write-Host ""
-    }
-
-    Write-Host "[OK] TEMP/TMP directories prepared" -ForegroundColor Green
-}
-
-# ============================================================================
-# RANCHER DESKTOP RESOURCES FIX
-# ============================================================================
-function Fix-RancherDesktopResources {
-    param([string]$RancherPath)
-
-    Write-Host "[INFO] Checking Rancher Desktop resources structure..." -ForegroundColor Gray
-
-    $resourcesDir = Join-Path $RancherPath "resources"
-    $resourcesResourcesDir = Join-Path $resourcesDir "resources"
-
-    # Check if double resources exists
-    if (Test-Path $resourcesResourcesDir) {
-        Write-Host "  [INFO] Found resources\resources structure, fixing..." -ForegroundColor Gray
-
-        try {
-            # Get all items in resources\resources
-            $items = Get-ChildItem -Path $resourcesResourcesDir -Force
-
-            # Move each item up one level
-            foreach ($item in $items) {
-                $destination = Join-Path $resourcesDir $item.Name
-
-                # Remove existing item if present
-                if (Test-Path $destination) {
-                    Remove-Item -Path $destination -Recurse -Force -ErrorAction Stop
-                }
-
-                # Move item
-                Move-Item -Path $item.FullName -Destination $destination -Force -ErrorAction Stop
-            }
-
-            # Remove empty resources\resources directory
-            Remove-Item -Path $resourcesResourcesDir -Force -ErrorAction Stop
-
-            Write-Host "  [OK] Fixed resources structure" -ForegroundColor Green
-        }
-        catch {
-            Write-Host "  [WARN] Could not fix resources structure: $_" -ForegroundColor Yellow
-            Write-Host "  Rancher Desktop may not start correctly" -ForegroundColor Yellow
-        }
-    }
-    else {
-        Write-Host "  [OK] Resources structure is correct" -ForegroundColor Green
-    }
-}
-
-# ============================================================================
-# PART 1: ENVIRONMENT SETUP (RUN AS ADMIN)
+# PART 1: ENVIRONMENT SETUP (RUN AS ADMIN) - SETS VARIABLES DIRECTLY
 # ============================================================================
 function Set-DevelopmentEnvironment {
     Write-Host ""
@@ -297,22 +135,13 @@ function Set-DevelopmentEnvironment {
 
     Write-Host "[OK] Running with administrator privileges" -ForegroundColor Green
     Write-Host ""
-
-    # Step 1: Initialize TEMP/TMP directories
-    Initialize-TempDirectories
-
-    # Step 2: Apply environment configuration
-    Write-Host ""
-    Write-Host ">>> Step 2: Applying environment configuration..." -ForegroundColor White
+    Write-Host ">>> Applying environment configuration..." -ForegroundColor White
     Write-Host ""
 
     # Download scoop-boot.ps1 if not present
     if (-not (Test-Path "$ScoopDir\bin\scoop-boot.ps1")) {
         Write-Host "[INFO] Downloading scoop-boot.ps1..." -ForegroundColor Gray
         try {
-            if (-not (Test-Path "$ScoopDir\bin")) {
-                New-Item -ItemType Directory -Path "$ScoopDir\bin" -Force | Out-Null
-            }
             Invoke-WebRequest -Uri "https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1" -OutFile "$ScoopDir\bin\scoop-boot.ps1" -UseBasicParsing
             Write-Host "[OK] Downloaded scoop-boot.ps1" -ForegroundColor Green
         } catch {
@@ -323,15 +152,15 @@ function Set-DevelopmentEnvironment {
     }
 
     # Apply environment configuration
-    Write-Host "[INFO] Applying environment from .env files..." -ForegroundColor Gray
+    Write-Host "[INFO] Applying environment from .env file..." -ForegroundColor Gray
     & "$ScoopDir\bin\scoop-boot.ps1" --apply-env
 
     Write-Host ""
     Write-Host "=== Phase 1 Complete ===" -ForegroundColor Green
     Write-Host ""
     Write-Host "Environment configured:" -ForegroundColor Cyan
-    Write-Host "  - TEMP/TMP directories created" -ForegroundColor White
-    Write-Host "  - Environment variables applied" -ForegroundColor White
+    Write-Host "  - Configuration file created" -ForegroundColor White
+    Write-Host "  - All environment variables set" -ForegroundColor White
     Write-Host ""
     Write-Host "Next step:" -ForegroundColor Yellow
     Write-Host "  Close this Administrator PowerShell" -ForegroundColor White
@@ -370,18 +199,34 @@ function Install-ScoopTools {
     }
 
     # ============================================================================
-    # PREREQUISITE CHECK: WSL2
+    # WSL2 CHECK (optional - for Docker alternatives and Linux development)
     # ============================================================================
-    $wsl2Available = Test-WSL2
+    Write-Host ""
+    Write-Host ">>> Checking WSL2 (optional for Docker/Linux development)..." -ForegroundColor White
+    Write-Host ""
 
-    if (-not $wsl2Available) {
+    $wsl2Installed = Test-WSL2Installed
+
+    if (-not $wsl2Installed) {
         Write-Host ""
-        Write-Host "=== Installation Aborted ===" -ForegroundColor Red
+        Write-Host "=== WSL2 Not Detected ===" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "WSL2 is required for Rancher Desktop." -ForegroundColor Yellow
-        Write-Host "Please install WSL2 first (see instructions above)." -ForegroundColor Yellow
+        Write-Host "WSL2 is recommended for:" -ForegroundColor White
+        Write-Host "  - Docker Desktop / Rancher Desktop" -ForegroundColor Gray
+        Write-Host "  - Linux development tools" -ForegroundColor Gray
+        Write-Host "  - Cross-platform testing" -ForegroundColor Gray
         Write-Host ""
-        exit 1
+        Write-Host "To install WSL2:" -ForegroundColor Cyan
+        Write-Host "  1. Run as Administrator: wsl --install" -ForegroundColor White
+        Write-Host "  2. Reboot system" -ForegroundColor White
+        Write-Host "  3. Verify: wsl --status" -ForegroundColor White
+        Write-Host ""
+        Write-Host "For more information: https://aka.ms/wsl2" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "[INFO] Continuing installation without WSL2..." -ForegroundColor Yellow
+    } else {
+        Write-Host ""
+        Write-Host "[OK] WSL2 is installed and ready for Docker/Linux tools" -ForegroundColor Green
     }
 
     # ============================================================================
@@ -540,7 +385,7 @@ function Install-ScoopTools {
     }
 
     # ============================================================================
-    # STEP 3: INSTALL DEVELOPMENT TOOLS (INCLUDING RANCHER DESKTOP)
+    # STEP 3: INSTALL DEVELOPMENT TOOLS
     # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 3: Installing development tools..." -ForegroundColor White
@@ -583,10 +428,13 @@ function Install-ScoopTools {
         'jq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
 
         # System tools
-        'vcredist2022', 'systeminformer',
+        'vcredist2022', 'systeminformer'
 
-        # Rancher Desktop (requires WSL2)
-        'rancher-desktop'
+    # NOTE: Docker alternatives (Rancher Desktop, Docker Desktop) are not included
+    # Install manually if needed:
+    #   - Docker Desktop: https://www.docker.com/products/docker-desktop
+    #   - Rancher Desktop: https://rancherdesktop.io
+    #   - Podman Desktop: scoop install podman-desktop
     )
 
     foreach ($app in $apps) {
@@ -640,27 +488,23 @@ function Install-ScoopTools {
             Start-Process -FilePath $msys2 -ArgumentList "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
         } catch {}
 
-        # Verify installation
+        # Verify installation (CRITICAL: Check ucrt64, NOT mingw64!)
         $gccPath = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
         if (Test-Path $gccPath) {
-            Write-Host "[OK] MSYS2 GCC installed successfully!" -ForegroundColor Green
+            Write-Host "[OK] MSYS2 GCC 15.2.0 installed successfully!" -ForegroundColor Green
             Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
         } else {
-            Write-Host "[WARN] GCC installation may have failed (gcc.exe not found)" -ForegroundColor Yellow
+            Write-Host "[WARN] GCC installation may have failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
             Write-Host ""
             Write-Host "Manual installation steps:" -ForegroundColor Yellow
-            Write-Host "  1. Open MSYS2 terminal: $ScoopDir\apps\msys2\current\msys2.exe" -ForegroundColor White
+            Write-Host "  1. Open UCRT64 terminal: $ScoopDir\apps\msys2\current\ucrt64.exe" -ForegroundColor White
             Write-Host "  2. Run: pacman -Syu" -ForegroundColor White
             Write-Host "  3. Run: pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor White
+            Write-Host ""
+            Write-Host "NOTE: Use ucrt64.exe (modern), NOT msys2.exe (legacy)" -ForegroundColor Yellow
         }
     } else {
         Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
-    }
-
-    # Fix Rancher Desktop resources structure
-    if (Test-Path "$ScoopDir\apps\rancher-desktop\current") {
-        Write-Host ""
-        Fix-RancherDesktopResources -RancherPath "$ScoopDir\apps\rancher-desktop\current"
     }
 
     Write-Host ""
@@ -813,19 +657,18 @@ function Install-ScoopTools {
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Verify:" -ForegroundColor Cyan
-    Write-Host "  java -version        # Should show Java 21" -ForegroundColor Gray
-    Write-Host "  python --version     # Should show Python 3.13.9" -ForegroundColor Gray
-    Write-Host "  gcc --version        # Should show GCC 15.2.0" -ForegroundColor Gray
-    Write-Host "  wsl --version        # Should show WSL2" -ForegroundColor Gray
+    Write-Host "  java -version    # Should show Java 21" -ForegroundColor Gray
+    Write-Host "  python --version # Should show Python 3.13.9" -ForegroundColor Gray
+    Write-Host "  gcc --version    # Should show GCC 15.2.0" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Start Rancher Desktop:" -ForegroundColor Cyan
-    Write-Host "  & '$ScoopDir\apps\rancher-desktop\current\Rancher Desktop.exe'" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Rancher Desktop will:" -ForegroundColor Cyan
-    Write-Host "  - Start WSL2 backend automatically" -ForegroundColor White
-    Write-Host "  - Install Kubernetes cluster" -ForegroundColor White
-    Write-Host "  - Provide kubectl, docker, nerdctl commands" -ForegroundColor White
-    Write-Host ""
+
+    if ($wsl2Installed) {
+        Write-Host "WSL2 is ready for:" -ForegroundColor Cyan
+        Write-Host "  - Docker Desktop (download: https://www.docker.com/products/docker-desktop)" -ForegroundColor Gray
+        Write-Host "  - Rancher Desktop (download: https://rancherdesktop.io)" -ForegroundColor Gray
+        Write-Host "  - Linux development (wsl)" -ForegroundColor Gray
+        Write-Host ""
+    }
 }
 
 # ============================================================================
