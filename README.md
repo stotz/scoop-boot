@@ -225,7 +225,6 @@ Complete cleanup and removal of Scoop installation
 - greenshot
 - jetbrains-toolbox
 - everything
-- mousejiggler
 - Any process running from C:\usr\apps\*
 
 #### 2. Creates Backup
