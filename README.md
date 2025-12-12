@@ -416,6 +416,6 @@ scoop --version  # Should show Scoop version
 
 ## Author & License
 
-- **Author:** System Administrator
+- **Author:** Urs Stotz
 - **License:** MIT
 - **Repository:** https://github.com/stotz/scoop-boot
