@@ -9,7 +9,8 @@ Three PowerShell scripts for Windows development environment management using Sc
 
 ---
 [Scoop Boot Complete Guide](scoop-boot-complete-guide.md)  
-[Scoop Security Enterprise Guide](scoop-security-enterprise-guide.md)
+[Scoop Security Enterprise Guide](scoop-security-enterprise-guide.md)  
+[Scoop Security Scanning with GitHub Actions CI/CD](scoop-security-github-actions.md)
 ---
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)

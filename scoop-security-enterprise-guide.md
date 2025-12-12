@@ -9,6 +9,8 @@
 6. [Corporate Deployment Strategy](#corporate-deployment-strategy)
 
 ---
+[Scoop Security Scanning with GitHub Actions CI/CD](scoop-security-github-actions.md)
+--- 
 
 ## Scoop Security Features
 
@@ -776,6 +778,7 @@ A secure enterprise Scoop deployment includes:
 7. **Network Security** - Proxy, internal mirrors, and network segmentation
 
 This approach ensures that only verified, scanned, and approved software is deployed while maintaining the flexibility and simplicity of Scoop.
+
 
 ---
 [Main](README.md)
