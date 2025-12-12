@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     scoop-boot.ps1 v1.10.0 - Portable Windows Development Environment Bootstrap
-    
+
     Features:
     - Order-independent parameter parsing
     - Dynamic Git version detection
@@ -23,7 +23,7 @@
     Version: 1.10.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
-    
+
     Changes in v1.10.0:
     - List operations (+=, =+, -=) now work for ALL variables (not just PATH)
     - Added support for PERL5LIB, PYTHONPATH, CLASSPATH, PSModulePath, etc.
@@ -57,7 +57,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Validate PowerShell version
-if ($PSVersionTable.PSVersion.Major -lt 5 -or 
+if ($PSVersionTable.PSVersion.Major -lt 5 -or
     ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
     Write-Host "ERROR: PowerShell 5.1 or higher required" -ForegroundColor Red
     Write-Host "Current version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
@@ -97,11 +97,11 @@ $global:ParsedArgs = @{
 
 function Parse-Arguments {
     param([string[]]$Arguments)
-    
+
     $i = 0
     while ($i -lt $Arguments.Count) {
         $arg = $Arguments[$i]
-        
+
         switch -Regex ($arg) {
             '^--?h(elp)?$' { $global:ParsedArgs.Help = $true }
             '^--?v(ersion)?$' { $global:ParsedArgs.Version = $true }
@@ -195,19 +195,19 @@ function Get-Username {
 
 function Expand-EnvironmentVariables {
     param([string]$Value)
-    
+
     $expandedValue = $Value
     $maxIterations = 10
     $iteration = 0
-    
+
     while ($iteration -lt $maxIterations) {
         $previousValue = $expandedValue
-        
+
         # Replace $VAR or ${VAR} patterns
         $expandedValue = [regex]::Replace($expandedValue, '\$\{?([A-Z_][A-Z0-9_]*)\}?', {
             param($match)
             $varName = $match.Groups[1].Value
-            
+
             # Check various sources
             if ($varName -eq "SCOOP") {
                 return $global:BaseDir
@@ -233,24 +233,24 @@ function Expand-EnvironmentVariables {
                 if ([string]::IsNullOrEmpty($envValue)) {
                     $envValue = [Environment]::GetEnvironmentVariable($varName, "Process")
                 }
-                
+
                 if (![string]::IsNullOrEmpty($envValue)) {
                     return $envValue
                 }
             }
-            
+
             # Return original if not found
             return $match.Value
         })
-        
+
         # If no changes were made, we're done
         if ($expandedValue -eq $previousValue) {
             break
         }
-        
+
         $iteration++
     }
-    
+
     return $expandedValue
 }
 
@@ -309,11 +309,11 @@ function Show-Version {
 
 function Invoke-Bootstrap {
     Write-Section "Scoop Bootstrap"
-    
+
     # Check current state
     Write-Info "Checking current state..."
     $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
-    
+
     if ($scoopCommand) {
         Write-Host "     SCOOP=$global:BaseDir"
         Write-Host "     SCOOP_GLOBAL=$global:BaseDir\global"
@@ -326,7 +326,7 @@ function Invoke-Bootstrap {
         Write-Host "  scoop update" -ForegroundColor White
         return $true
     }
-    
+
     # Set environment variables
     Write-Info "Setting environment variables..."
     [Environment]::SetEnvironmentVariable('SCOOP', $global:BaseDir, 'User')
@@ -334,7 +334,7 @@ function Invoke-Bootstrap {
     $env:SCOOP = $global:BaseDir
     $env:SCOOP_GLOBAL = "$global:BaseDir\global"
     Write-Success "Environment variables set"
-    
+
     # Install Scoop
     Write-Info "Installing Scoop core..."
     try {
@@ -348,7 +348,7 @@ function Invoke-Bootstrap {
         Write-ErrorMsg "Failed to install Scoop: $_"
         return $false
     }
-    
+
     # Verify installation
     $env:Path = "$global:BaseDir\shims;$env:Path"
     $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
@@ -356,7 +356,7 @@ function Invoke-Bootstrap {
         Write-ErrorMsg "Scoop installation verification failed"
         return $false
     }
-    
+
     # Install essential tools
     Write-Info "Installing essential tools..."
     $essentialTools = @('git', '7zip')
@@ -369,7 +369,7 @@ function Invoke-Bootstrap {
             Write-Warning "Failed to install $tool"
         }
     }
-    
+
     # Install recommended tools
     Write-Info "Installing recommended tools for optimal performance..."
     $recommendedTools = @(
@@ -380,7 +380,7 @@ function Invoke-Bootstrap {
         @{Name = 'lessmsi'; Desc = 'MSI extraction'},
         @{Name = 'wget'; Desc = 'alternative downloader'}
     )
-    
+
     foreach ($tool in $recommendedTools) {
         try {
             & scoop install $tool.Name 2>&1 | Out-Null
@@ -390,14 +390,14 @@ function Invoke-Bootstrap {
             Write-Warning "Failed to install $($tool.Name)"
         }
     }
-    
+
     # Add essential buckets
     Write-Info "Adding essential buckets..."
     $buckets = @(
         @{Name = 'main'; Desc = 'official apps'},
         @{Name = 'extras'; Desc = 'additional apps'}
     )
-    
+
     foreach ($bucket in $buckets) {
         try {
             & scoop bucket add $bucket.Name 2>&1 | Out-Null
@@ -407,7 +407,7 @@ function Invoke-Bootstrap {
             Write-Warning "Failed to add $($bucket.Name) bucket"
         }
     }
-    
+
     Write-Section "Bootstrap Complete!"
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell for PATH changes to take effect!" -ForegroundColor Yellow
@@ -430,7 +430,7 @@ function Invoke-Bootstrap {
     Write-Host "5. Install applications:" -ForegroundColor Cyan
     Write-Host "   .\bin\scoop-boot.ps1 --install git nodejs python" -ForegroundColor White
     Write-Host ""
-    
+
     return $true
 }
 
@@ -440,15 +440,15 @@ function Invoke-Bootstrap {
 
 function Parse-EnvironmentLine {
     param([string]$Line)
-    
+
     # Skip empty lines and comments
     if ([string]::IsNullOrWhiteSpace($Line) -or $Line.StartsWith("#")) {
         return $null
     }
-    
+
     # Remove leading/trailing whitespace
     $Line = $Line.Trim()
-    
+
     # Parse += for ANY variable (prepend to list)
     if ($Line -match '^([A-Z_][A-Z0-9_]*)\s*\+=\s*(.+)$') {
         return @{
@@ -457,7 +457,7 @@ function Parse-EnvironmentLine {
             Value = $Matches[2].Trim()
         }
     }
-    
+
     # Parse =+ for ANY variable (append to list)
     elseif ($Line -match '^([A-Z_][A-Z0-9_]*)\s*=\+\s*(.+)$') {
         return @{
@@ -466,7 +466,7 @@ function Parse-EnvironmentLine {
             Value = $Matches[2].Trim()
         }
     }
-    
+
     # Parse -= for ANY variable (remove from list)
     elseif ($Line -match '^([A-Z_][A-Z0-9_]*)\s*-=\s*(.+)$|^([A-Z_][A-Z0-9_]*)-=(.+)$') {
         $name = if ($Matches[1]) { $Matches[1] } else { $Matches[3] }
@@ -477,7 +477,7 @@ function Parse-EnvironmentLine {
             Value = $value.Trim()
         }
     }
-    
+
     # Parse simple assignment
     elseif ($Line -match '^([A-Z_][A-Z0-9_]*)=(.*)$') {
         return @{
@@ -486,7 +486,7 @@ function Parse-EnvironmentLine {
             Value = $Matches[2].Trim()
         }
     }
-    
+
     # Parse unset
     elseif ($Line -match '^-([A-Z_][A-Z0-9_]*)$') {
         return @{
@@ -494,42 +494,42 @@ function Parse-EnvironmentLine {
             Name = $Matches[1]
         }
     }
-    
+
     return $null
 }
 
 function Get-EnvironmentFiles {
     $hostname = Get-Hostname
     $username = Get-Username
-    
+
     $files = @()
-    
+
     # System scope files
     $systemDefault = Join-Path $global:EnvDir "system.default.env"
     $systemHost = Join-Path $global:EnvDir "system.$hostname.$username.env"
-    
+
     # User scope files
     $userDefault = Join-Path $global:EnvDir "user.default.env"
     $userHost = Join-Path $global:EnvDir "user.$hostname.$username.env"
-    
+
     # Add existing files
     if (Test-Path $systemDefault) { $files += @{Path = $systemDefault; Scope = "Machine"} }
     if (Test-Path $systemHost) { $files += @{Path = $systemHost; Scope = "Machine"} }
     if (Test-Path $userDefault) { $files += @{Path = $userDefault; Scope = "User"} }
     if (Test-Path $userHost) { $files += @{Path = $userHost; Scope = "User"} }
-    
+
     return $files
 }
 
 function Read-EnvironmentFile {
     param([string]$FilePath)
-    
+
     $operations = @()
-    
+
     if (-not (Test-Path $FilePath)) {
         return $operations
     }
-    
+
     $lines = Get-Content $FilePath
     foreach ($line in $lines) {
         $parsed = Parse-EnvironmentLine -Line $line
@@ -537,7 +537,7 @@ function Read-EnvironmentFile {
             $operations += $parsed
         }
     }
-    
+
     return $operations
 }
 
@@ -552,13 +552,13 @@ function Apply-EnvironmentOperations {
         [string]$SourceFile,
         [bool]$DryRun = $false
     )
-    
+
     $changes = 0
     $fileName = Split-Path -Leaf $SourceFile
-    
+
     foreach ($op in $Operations) {
         $expandedValue = if ($op.Value) { Expand-EnvironmentVariables -Value $op.Value } else { $null }
-        
+
         switch ($op.Type) {
             "Set" {
                 if ($DryRun) {
@@ -569,7 +569,7 @@ function Apply-EnvironmentOperations {
                 }
                 $changes++
             }
-            
+
             "Unset" {
                 if ($DryRun) {
                     Write-DryRun "Unset $($op.Name) [$Scope from $fileName]"
@@ -579,7 +579,7 @@ function Apply-EnvironmentOperations {
                 }
                 $changes++
             }
-            
+
             "ListPrepend" {
                 $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
                 if ($currentValue) {
@@ -589,7 +589,7 @@ function Apply-EnvironmentOperations {
                 } else {
                     $newValue = $expandedValue
                 }
-                
+
                 if ($DryRun) {
                     Write-DryRun "Prepend to $($op.Name): $expandedValue [$Scope from $fileName]"
                 } else {
@@ -598,7 +598,7 @@ function Apply-EnvironmentOperations {
                 }
                 $changes++
             }
-            
+
             "ListAppend" {
                 $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
                 if ($currentValue) {
@@ -608,7 +608,7 @@ function Apply-EnvironmentOperations {
                 } else {
                     $newValue = $expandedValue
                 }
-                
+
                 if ($DryRun) {
                     Write-DryRun "Append to $($op.Name): $expandedValue [$Scope from $fileName]"
                 } else {
@@ -617,13 +617,13 @@ function Apply-EnvironmentOperations {
                 }
                 $changes++
             }
-            
+
             "ListRemove" {
                 $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
                 if ($currentValue) {
                     $parts = $currentValue -split ';' | Where-Object { $_ -and $_ -ne $expandedValue }
                     $newValue = $parts -join ';'
-                    
+
                     if ($DryRun) {
                         Write-DryRun "Remove from $($op.Name): $expandedValue [$Scope from $fileName]"
                     } else {
@@ -635,7 +635,7 @@ function Apply-EnvironmentOperations {
             }
         }
     }
-    
+
     return $changes
 }
 
@@ -644,16 +644,16 @@ function Invoke-ApplyEnv {
         [bool]$DryRun = $false,
         [bool]$Rollback = $false
     )
-    
+
     if ($DryRun) {
         Write-Section "Environment Apply (DRY RUN)"
     } else {
         Write-Section "Environment Apply"
     }
-    
+
     # Get environment files
     $envFiles = Get-EnvironmentFiles
-    
+
     if ($envFiles.Count -eq 0) {
         Write-Warning "No environment configuration files found"
         Write-Host ""
@@ -661,7 +661,7 @@ function Invoke-ApplyEnv {
         Write-Host "  .\bin\scoop-boot.ps1 --init-env=user.default.env" -ForegroundColor White
         return
     }
-    
+
     # Check admin rights for system files
     $hasSystemFiles = $envFiles | Where-Object { $_.Scope -eq "Machine" }
     if ($hasSystemFiles -and -not (Test-AdminRights)) {
@@ -675,18 +675,18 @@ function Invoke-ApplyEnv {
         Write-Host "Run PowerShell as Administrator and try again" -ForegroundColor Yellow
         return
     }
-    
+
     # Process each file
     $totalChanges = 0
     foreach ($file in $envFiles) {
         $fileName = Split-Path -Leaf $file.Path
         Write-Info "Processing: $fileName"
-        
+
         $operations = Read-EnvironmentFile -FilePath $file.Path
         $changes = Apply-EnvironmentOperations -Operations $operations -Scope $file.Scope -SourceFile $file.Path -DryRun $DryRun
         $totalChanges += $changes
     }
-    
+
     if ($DryRun) {
         Write-Info "DRY RUN: Would apply $totalChanges changes"
         Write-Host "Run without --dry-run to apply changes"
@@ -706,9 +706,9 @@ function Invoke-ApplyEnv {
 
 function Invoke-InitEnv {
     param([string]$FileName)
-    
+
     Write-Section "Initialize Environment Configuration"
-    
+
     # Validate filename
     if ([string]::IsNullOrWhiteSpace($FileName)) {
         Write-ErrorMsg "No filename specified"
@@ -720,36 +720,36 @@ function Invoke-InitEnv {
         Write-Host "  --init-env=system.$(Get-Hostname).$(Get-Username).env" -ForegroundColor White
         return $false
     }
-    
+
     # Normalize filename to lowercase
     $FileName = $FileName.ToLower()
-    
+
     # Ensure directory exists
     if (-not (Test-Path $global:EnvDir)) {
         New-Item -ItemType Directory -Path $global:EnvDir -Force | Out-Null
     }
-    
+
     # Full path
     $filePath = Join-Path $global:EnvDir $FileName
-    
+
     # Check if file exists
     if (Test-Path $filePath) {
         Write-Warning "File already exists: $filePath"
         Write-Host "Edit the existing file or delete it first"
         return $false
     }
-    
+
     # Determine scope
     $scope = if ($FileName -match '^system\.') { "Machine" } else { "User" }
-    
+
     # Download or use embedded template
     Write-Info "Creating template..."
     $templateContent = Get-EnvironmentTemplate -Scope $scope
-    
+
     # Write to file
     $templateContent | Out-File -FilePath $filePath -Encoding UTF8
     Write-Success "Created: $filePath"
-    
+
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
     Write-Host "1. Edit the configuration file:" -ForegroundColor White
@@ -763,13 +763,13 @@ function Invoke-InitEnv {
         Write-Host "   # Run as Administrator!" -ForegroundColor Yellow
     }
     Write-Host "   .\bin\scoop-boot.ps1 --apply-env" -ForegroundColor White
-    
+
     return $true
 }
 
 function Get-EnvironmentTemplate {
     param([string]$Scope)
-    
+
     # Try to download from GitHub
     try {
         Write-Info "Downloading template from GitHub..."
@@ -779,12 +779,12 @@ function Get-EnvironmentTemplate {
     catch {
         Write-Warning "Could not download template, using embedded version"
     }
-    
+
     # Embedded template
     $hostname = Get-Hostname
     $username = Get-Username
     $date = Get-Date -Format "yyyy-MM-dd"
-    
+
     return @"
 # ============================================================================
 # Environment Configuration Template
@@ -943,19 +943,19 @@ PATH+=`$SCOOP\shims
 
 function Show-Status {
     Write-Section "Scoop Boot Status"
-    
+
     Write-Host ""
     Write-Host "Environment:" -ForegroundColor Yellow
     Write-Host "  SCOOP: $(if ($env:SCOOP) { $env:SCOOP } else { 'Not set' })"
     Write-Host "  SCOOP_GLOBAL: $(if ($env:SCOOP_GLOBAL) { $env:SCOOP_GLOBAL } else { 'Not set' })"
     Write-Host ""
-    
+
     Write-Host "Scoop:" -ForegroundColor Yellow
     $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
     if ($scoopCommand) {
         Write-Host "  Status: Installed"
         Write-Host "  Location: $($scoopCommand.Source)"
-        
+
         # Get Scoop apps
         try {
             $apps = & scoop list 2>$null
@@ -969,7 +969,7 @@ function Show-Status {
         Write-Host "  Run: .\bin\scoop-boot.ps1 --bootstrap"
     }
     Write-Host ""
-    
+
     Write-Host "Configuration:" -ForegroundColor Yellow
     $envFiles = Get-EnvironmentFiles
     if ($envFiles.Count -gt 0) {
@@ -987,21 +987,21 @@ function Show-Status {
 
 function Invoke-EnvStatus {
     Write-Section "Environment Configuration Status"
-    
+
     $envFiles = Get-EnvironmentFiles
-    
+
     if ($envFiles.Count -eq 0) {
         Write-Warning "No environment configuration files found"
         return
     }
-    
+
     foreach ($file in $envFiles) {
         $fileName = Split-Path -Leaf $file.Path
         Write-Host ""
         Write-Host "File: $fileName" -ForegroundColor Cyan
         Write-Host "Scope: $($file.Scope)" -ForegroundColor White
         Write-Host "Path: $($file.Path)" -ForegroundColor Gray
-        
+
         $operations = Read-EnvironmentFile -FilePath $file.Path
         $stats = @{
             Set = 0
@@ -1010,11 +1010,11 @@ function Invoke-EnvStatus {
             ListAppend = 0
             ListRemove = 0
         }
-        
+
         foreach ($op in $operations) {
             $stats[$op.Type]++
         }
-        
+
         Write-Host "Operations:" -ForegroundColor White
         Write-Host "  Set: $($stats.Set)"
         Write-Host "  Unset: $($stats.Unset)"
@@ -1031,22 +1031,22 @@ function Invoke-EnvStatus {
 
 function Test-ScoopBoot {
     Write-Section "Self-Test"
-    
+
     $tests = @()
     $passed = 0
     $failed = 0
-    
+
     # Save original Write-DryRun function for Test 24
     $script:OriginalWriteDryRun = ${function:Write-DryRun}
-    
+
     # Test 1: PowerShell version
     $test = @{Name = "PowerShell version >= 5.1"; Result = $false}
     try {
-        $test.Result = $PSVersionTable.PSVersion.Major -gt 5 -or 
-                       ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -ge 1)
+        $test.Result = $PSVersionTable.PSVersion.Major -gt 5 -or
+            ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -ge 1)
     } catch {}
     $tests += $test
-    
+
     # Test 2: Execution policy
     $test = @{Name = "Execution Policy allows scripts"; Result = $false}
     try {
@@ -1054,7 +1054,7 @@ function Test-ScoopBoot {
         $test.Result = $policy -ne "Restricted" -and $policy -ne "AllSigned"
     } catch {}
     $tests += $test
-    
+
     # Test 3: Parameter parsing
     $test = @{Name = "Parameter parsing"; Result = $false}
     try {
@@ -1066,7 +1066,7 @@ function Test-ScoopBoot {
         $global:ParsedArgs = $savedArgs
     } catch {}
     $tests += $test
-    
+
     # Test 4: Admin rights detection
     $test = @{Name = "Admin rights detection"; Result = $false}
     try {
@@ -1074,14 +1074,14 @@ function Test-ScoopBoot {
         $test.Result = $isAdmin -is [bool]
     } catch {}
     $tests += $test
-    
+
     # Test 5: Directory path generation
     $test = @{Name = "Directory path generation"; Result = $false}
     try {
         $test.Result = $global:BaseDir -and $global:EnvDir -and $global:BackupDir
     } catch {}
     $tests += $test
-    
+
     # Test 6: Hostname detection
     $test = @{Name = "Hostname detection"; Result = $false}
     try {
@@ -1089,7 +1089,7 @@ function Test-ScoopBoot {
         $test.Result = ![string]::IsNullOrEmpty($hostname)
     } catch {}
     $tests += $test
-    
+
     # Test 7: Username detection
     $test = @{Name = "Username detection"; Result = $false}
     try {
@@ -1097,7 +1097,7 @@ function Test-ScoopBoot {
         $test.Result = ![string]::IsNullOrEmpty($username)
     } catch {}
     $tests += $test
-    
+
     # Test 8: Host-User filename generation
     $test = @{Name = "Host-User filename generation"; Result = $false}
     try {
@@ -1107,7 +1107,7 @@ function Test-ScoopBoot {
         $test.Result = $filename -match "^system\.[a-z0-9\-]+\.[a-z0-9\-]+\.env$"
     } catch {}
     $tests += $test
-    
+
     # Test 9: Parse PATH += (prepend)
     $test = @{Name = "Parse PATH += (prepend)"; Result = $false}
     try {
@@ -1115,7 +1115,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed.Type -eq "ListPrepend" -and $parsed.Name -eq "PATH" -and $parsed.Value -eq "C:\test\bin"
     } catch {}
     $tests += $test
-    
+
     # Test 10: Parse PATH =+ (append)
     $test = @{Name = "Parse PATH =+ (append)"; Result = $false}
     try {
@@ -1123,7 +1123,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed.Type -eq "ListAppend" -and $parsed.Name -eq "PATH" -and $parsed.Value -eq "C:\test\bin"
     } catch {}
     $tests += $test
-    
+
     # Test 11: Parse PATH - (remove with space)
     $test = @{Name = "Parse PATH - (remove with space)"; Result = $false}
     try {
@@ -1131,7 +1131,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed.Type -eq "ListRemove" -and $parsed.Name -eq "PATH" -and $parsed.Value -eq "C:\test\bin"
     } catch {}
     $tests += $test
-    
+
     # Test 12: Parse PATH-= (remove without space)
     $test = @{Name = "Parse PATH-= (remove without space)"; Result = $false}
     try {
@@ -1139,7 +1139,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed.Type -eq "ListRemove" -and $parsed.Name -eq "PATH" -and $parsed.Value -eq "C:\test\bin"
     } catch {}
     $tests += $test
-    
+
     # Test 13: Parse PATH -= (remove with -= syntax)
     $test = @{Name = "Parse PATH -= (remove with -= syntax)"; Result = $false}
     try {
@@ -1147,7 +1147,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed.Type -eq "ListRemove" -and $parsed.Name -eq "PATH" -and $parsed.Value -eq "C:\test\bin"
     } catch {}
     $tests += $test
-    
+
     # Test 14: Parse variable assignment
     $test = @{Name = "Parse variable assignment"; Result = $false}
     try {
@@ -1155,7 +1155,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed.Type -eq "Set" -and $parsed.Name -eq "JAVA_HOME" -and $parsed.Value -eq "C:\java"
     } catch {}
     $tests += $test
-    
+
     # Test 15: Parse comment line
     $test = @{Name = "Parse comment line (should ignore)"; Result = $false}
     try {
@@ -1163,7 +1163,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed -eq $null
     } catch {}
     $tests += $test
-    
+
     # Test 16: Parse empty line
     $test = @{Name = "Parse empty line (should ignore)"; Result = $false}
     try {
@@ -1171,7 +1171,7 @@ function Test-ScoopBoot {
         $test.Result = $parsed -eq $null
     } catch {}
     $tests += $test
-    
+
     # Test 17: Variable expansion with $SCOOP
     $test = @{Name = "Variable expansion with `$SCOOP"; Result = $false}
     try {
@@ -1179,7 +1179,7 @@ function Test-ScoopBoot {
         $test.Result = $expanded -eq "$global:BaseDir\bin"
     } catch {}
     $tests += $test
-    
+
     # Test 18: Variable expansion with env var
     $test = @{Name = "Variable expansion with env var"; Result = $false}
     try {
@@ -1187,7 +1187,7 @@ function Test-ScoopBoot {
         $test.Result = $expanded -like "*\test" -and $expanded -ne "`$USERPROFILE\test"
     } catch {}
     $tests += $test
-    
+
     # Test 19: Variable expansion with cache
     $test = @{Name = "Variable expansion with cache"; Result = $false}
     try {
@@ -1197,7 +1197,7 @@ function Test-ScoopBoot {
         [Environment]::SetEnvironmentVariable("TEST_VAR_TEMP", $null, "Process")
     } catch {}
     $tests += $test
-    
+
     # Test 20: Multiple variable expansion
     $test = @{Name = "Multiple variable expansion"; Result = $false}
     try {
@@ -1205,23 +1205,23 @@ function Test-ScoopBoot {
         $test.Result = $expanded -match "^[^$]+\\[^$]+$" -and $expanded -notlike "*`$*"
     } catch {}
     $tests += $test
-    
+
     # Test 21: Scope detection (system.*)
     $test = @{Name = "Scope detection (system.*)"; Result = $false}
     try {
-        $test.Result = "system.default.env" -match "^system\." -and 
-                       "system.host.user.env" -match "^system\."
+        $test.Result = "system.default.env" -match "^system\." -and
+            "system.host.user.env" -match "^system\."
     } catch {}
     $tests += $test
-    
+
     # Test 22: Scope detection (user.*)
     $test = @{Name = "Scope detection (user.*)"; Result = $false}
     try {
-        $test.Result = "user.default.env" -match "^user\." -and 
-                       "user.host.user.env" -match "^user\."
+        $test.Result = "user.default.env" -match "^user\." -and
+            "user.host.user.env" -match "^user\."
     } catch {}
     $tests += $test
-    
+
     # Test 23: Mock environment file processing
     $test = @{Name = "Mock environment file processing"; Result = $false}
     try {
@@ -1237,27 +1237,27 @@ JAVA_HOME=C:\java
         Remove-Item $tempFile -Force
     } catch {}
     $tests += $test
-    
+
     # Test 24: END-TO-END Mock environment apply
     $test = @{Name = "END-TO-END: Mock environment apply"; Result = $false}
     try {
         # Suppress DryRun output during test
         $global:SuppressDryRunOutput = $true
-        
+
         $ops = @(
             @{Type = "Set"; Name = "TEST_VAR"; Value = "TestValue"}
             @{Type = "ListPrepend"; Name = "TEST_PATH"; Value = "C:\test"}
         )
         $changes = Apply-EnvironmentOperations -Operations $ops -Scope "Process" -SourceFile "test.env" -DryRun $true
         $test.Result = $changes -eq 2
-        
+
         # Restore output
         $global:SuppressDryRunOutput = $false
     } catch {
         $global:SuppressDryRunOutput = $false
     }
     $tests += $test
-    
+
     # Test 25: Scope detection with Get-EnvironmentFiles
     $test = @{Name = "Scope detection with Get-EnvironmentFiles"; Result = $false}
     try {
@@ -1282,7 +1282,7 @@ JAVA_HOME=C:\java
         }
     } catch {}
     $tests += $test
-    
+
     # Test 26: PATH operations on mock data
     $test = @{Name = "PATH operations on mock data"; Result = $false}
     try {
@@ -1294,7 +1294,7 @@ JAVA_HOME=C:\java
         [Environment]::SetEnvironmentVariable("TEST_PATH_VAR", $null, "Process")
     } catch {}
     $tests += $test
-    
+
     # Test 27: PERL5LIB += operation (NEW)
     $test = @{Name = "Parse PERL5LIB += (prepend)"; Result = $false}
     try {
@@ -1302,7 +1302,7 @@ JAVA_HOME=C:\java
         $test.Result = $parsed.Type -eq "ListPrepend" -and $parsed.Name -eq "PERL5LIB" -and $parsed.Value -eq "C:\perl\lib"
     } catch {}
     $tests += $test
-    
+
     # Test 28: PYTHONPATH =+ operation (NEW)
     $test = @{Name = "Parse PYTHONPATH =+ (append)"; Result = $false}
     try {
@@ -1310,7 +1310,7 @@ JAVA_HOME=C:\java
         $test.Result = $parsed.Type -eq "ListAppend" -and $parsed.Name -eq "PYTHONPATH" -and $parsed.Value -eq "C:\python\lib"
     } catch {}
     $tests += $test
-    
+
     # Test 29: CLASSPATH -= operation (NEW)
     $test = @{Name = "Parse CLASSPATH -= (remove)"; Result = $false}
     try {
@@ -1318,7 +1318,7 @@ JAVA_HOME=C:\java
         $test.Result = $parsed.Type -eq "ListRemove" -and $parsed.Name -eq "CLASSPATH" -and $parsed.Value -eq "old.jar"
     } catch {}
     $tests += $test
-    
+
     # Test 30: PSModulePath += operation (NEW)
     $test = @{Name = "Parse PSModulePath += (prepend)"; Result = $false}
     try {
@@ -1326,7 +1326,7 @@ JAVA_HOME=C:\java
         $test.Result = $parsed.Type -eq "ListPrepend" -and $parsed.Name -eq "PSModulePath" -and $parsed.Value -eq "C:\modules"
     } catch {}
     $tests += $test
-    
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -1338,10 +1338,10 @@ JAVA_HOME=C:\java
             $failed++
         }
     }
-    
+
     Write-Host ""
     Write-Host "Tests: $passed passed, $failed failed, $($passed + $failed) total" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Yellow" })
-    
+
     return $failed -eq 0
 }
 
@@ -1351,7 +1351,7 @@ JAVA_HOME=C:\java
 
 function Show-Suggest {
     Write-Section "Suggested Applications"
-    
+
     Write-Host ""
     Write-Host "Essential Development Tools:" -ForegroundColor Yellow
     Write-Host "  git          - Version control"
@@ -1361,27 +1361,27 @@ function Show-Suggest {
     Write-Host "  go           - Go programming language"
     Write-Host "  rust         - Rust programming language"
     Write-Host ""
-    
+
     Write-Host "Editors & IDEs:" -ForegroundColor Yellow
     Write-Host "  vscode       - Visual Studio Code"
     Write-Host "  neovim       - Advanced text editor"
     Write-Host "  notepadplusplus - Text editor"
     Write-Host ""
-    
+
     Write-Host "Build Tools:" -ForegroundColor Yellow
     Write-Host "  maven        - Java build tool"
     Write-Host "  gradle       - Build automation"
     Write-Host "  cmake        - Cross-platform build"
     Write-Host "  make         - GNU Make"
     Write-Host ""
-    
+
     Write-Host "Databases:" -ForegroundColor Yellow
     Write-Host "  postgresql   - PostgreSQL database"
     Write-Host "  mysql        - MySQL database"
     Write-Host "  mongodb      - NoSQL database"
     Write-Host "  redis        - In-memory data store"
     Write-Host ""
-    
+
     Write-Host "Install example:" -ForegroundColor Cyan
     Write-Host "  .\bin\scoop-boot.ps1 --install git nodejs python vscode" -ForegroundColor White
     Write-Host ""
@@ -1389,9 +1389,9 @@ function Show-Suggest {
 
 function Show-Environment {
     Write-Section "Current Environment Variables"
-    
+
     $vars = @(
-        "SCOOP", "SCOOP_GLOBAL", 
+        "SCOOP", "SCOOP_GLOBAL",
         "PATH",
         "JAVA_HOME", "JAVA_OPTS", "CLASSPATH",
         "PYTHON_HOME", "PYTHONPATH",
@@ -1406,7 +1406,7 @@ function Show-Environment {
         "MSYS2_HOME",
         "PSModulePath"
     )
-    
+
     Write-Host ""
     foreach ($var in $vars) {
         $value = [Environment]::GetEnvironmentVariable($var, "Machine")
@@ -1416,7 +1416,7 @@ function Show-Environment {
         if ([string]::IsNullOrEmpty($value)) {
             $value = [Environment]::GetEnvironmentVariable($var, "Process")
         }
-        
+
         if (![string]::IsNullOrEmpty($value)) {
             Write-Host "$var`:" -ForegroundColor Yellow
             if ($var -eq "PATH" -or $var -like "*PATH*" -or $var -like "*LIB*") {
@@ -1440,9 +1440,9 @@ function Show-Environment {
 
 function Invoke-Install {
     param([string[]]$Apps)
-    
+
     Write-Section "Install Applications"
-    
+
     if ($Apps.Count -eq 0) {
         Write-Warning "No applications specified"
         Write-Host ""
@@ -1450,7 +1450,7 @@ function Invoke-Install {
         Write-Host "  .\bin\scoop-boot.ps1 --install git nodejs python" -ForegroundColor White
         return
     }
-    
+
     # Check if Scoop is installed
     $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
     if (-not $scoopCommand) {
@@ -1460,10 +1460,10 @@ function Invoke-Install {
         Write-Host "  .\bin\scoop-boot.ps1 --bootstrap" -ForegroundColor White
         return
     }
-    
+
     Write-Info "Installing $($Apps.Count) application(s)..."
     Write-Host ""
-    
+
     foreach ($app in $Apps) {
         Write-Host "Installing: $app" -ForegroundColor White
         try {
@@ -1475,7 +1475,7 @@ function Invoke-Install {
         }
         Write-Host ""
     }
-    
+
     Write-Info "Installation complete"
 }
 

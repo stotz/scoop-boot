@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Complete Scoop installation reset and cleanup
-    
+
 .DESCRIPTION
     Performs complete cleanup:
     - ROBUST process detection using handle64.exe
@@ -12,24 +12,24 @@
     - Deletes all Scoop directories including junctions
     - Creates backups before deletion
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
-    
+
 .NOTES
     Version: 2.2.0
     Date: 2025-01-29
-    
+
     Changes in v2.2.0:
     - NEW: Uses handle64.exe for COMPLETE process detection
     - CRITICAL FIX: Finds ALL processes (including keyboxd, gpg-agent, etc.)
     - Detects background services without .Path property
     - Kills GnuPG/SSH agents that Get-Process misses
     - No more manual process hunting required
-    
+
 .PARAMETER Force
     Skip confirmation prompts
-    
+
 .PARAMETER KeepPersist
     Keep persist directory (app data/settings)
-    
+
 .EXAMPLE
     .\scoop-complete-reset.ps1
     .\scoop-complete-reset.ps1 -Force
@@ -88,9 +88,9 @@ function Remove-DirectoryAggressively {
     Write-Host "  -> Removing file attributes..." -ForegroundColor Gray
     try {
         Get-ChildItem $Path -Recurse -Force -ErrorAction SilentlyContinue |
-                ForEach-Object {
-                    try { $_.Attributes = 'Normal' } catch {}
-                }
+            ForEach-Object {
+                try { $_.Attributes = 'Normal' } catch {}
+            }
         Write-Host "  -> Attributes cleared" -ForegroundColor Green
     } catch {
         Write-Host "  -> Warning: Could not clear all attributes" -ForegroundColor Yellow
@@ -104,8 +104,8 @@ function Remove-DirectoryAggressively {
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         $hasFullControl = $acl.Access | Where-Object {
             ($_.IdentityReference -eq $currentUser -or
-                    $_.IdentityReference -eq "BUILTIN\Administrators") -and
-                    $_.FileSystemRights -match "FullControl"
+                $_.IdentityReference -eq "BUILTIN\Administrators") -and
+                $_.FileSystemRights -match "FullControl"
         }
         if (-not $hasFullControl) {
             $needsPermissionFix = $true
@@ -138,7 +138,7 @@ function Remove-DirectoryAggressively {
     Write-Host "  -> Removing junctions..." -ForegroundColor Gray
     try {
         $junctions = Get-ChildItem $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.Attributes -match "ReparsePoint" }
+            Where-Object { $_.Attributes -match "ReparsePoint" }
 
         foreach ($junction in $junctions) {
             try {
