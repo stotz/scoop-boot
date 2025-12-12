@@ -8,6 +8,9 @@ Three PowerShell scripts for Windows development environment management using Sc
 3. **scoop-complete-reset.ps1** - Safe cleanup and reset (v2.1.0)
 
 ---
+[Scoop Boot Complete Guide](scoop-boot-complete-guide.md)  
+[Scoop Security Enterprise Guide](scoop-security-enterprise-guide.md)
+---
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
@@ -419,3 +422,5 @@ scoop --version  # Should show Scoop version
 - **Author:** Urs Stotz
 - **License:** MIT
 - **Repository:** https://github.com/stotz/scoop-boot
+
+---
