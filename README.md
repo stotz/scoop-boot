@@ -424,21 +424,41 @@ Contributions are welcome! Please:
 
 ## Changelog
 
-### v2.8.0 (2025-01-13)
-- ✅ **NEW:** Complete installation script (scoop-complete-install.ps1)
-- ✅ **NEW:** Complete reset script (scoop-complete-reset.ps1)
-- ✅ **NEW:** Automatic TMP/TEMP configuration
-- ✅ **NEW:** Admin installation support with -RunAsAdmin
-- ✅ **NEW:** 80+ tools installation package
-- ✅ **FIX:** MSYS2 UCRT64 PATH configuration
-- ✅ **FIX:** Registry import for context menus
-- ✅ **IMPROVED:** Error handling and fallbacks
+### v2.8.0 (2025-12-12)
+- ✅ **NEW:** Complete documentation rewrite and streamlining
+- ✅ **NEW:** System-wide environment template enhancements
+- ✅ **IMPROVED:** Expanded documentation with v2.8 features
+- ✅ **IMPROVED:** Extended toolset documentation (80+ technologies)
+- ✅ **IMPROVED:** Streamlined usage examples
 
-### v2.1.0 (2025-01-29)
-- ✅ MSYS2/UCRT64 support for GCC 15.2.0
-- ✅ Enhanced bootstrap with fallbacks
-- ✅ PATH cleanup improvements
-- ✅ Bootstrap compilation error fixes
+### v2.7.5 (2025-10-30)
+- ✅ **FIX:** Validates .env filenames (must start with "system." or "user.")
+- ✅ **IMPROVED:** User-friendly error messages when .env files missing
+- ✅ **IMPROVED:** Better validation before calling scoop-boot.ps1
+- ✅ **NEW:** Expanded default installation list
+
+### v2.7.3 (2025-10-29)
+- ✅ **NEW:** WSL2 detection and compatibility improvements
+- ✅ **REMOVED:** Rancher Desktop from auto-install (manual recommendation)
+- ✅ **FIX:** Robust process detection
+- ✅ **NEW:** Complete documentation updates
+
+### v2.7.1 (2025-10-29)
+- ✅ **CRITICAL FIX:** Robust fallback when scoop-boot.ps1 fails
+- ✅ **FIX:** PowerShell temp file compilation errors
+- ✅ **NEW:** Manual bootstrap with proper TEMP path configuration
+- ✅ **NEW:** Automatic essential tools installation (7zip, git, aria2)
+
+### v2.6.0 (2025-10-28)
+- ✅ **NEW:** MSYS2 GCC setup automation
+- ✅ **IMPROVED:** Installation script enhancements
+- ✅ **FIX:** Process termination in reset script
+- ✅ **NEW:** Backup location message improvements
+
+### Earlier versions (2025-10-21)
+- ✅ **INITIAL:** First install and reset scripts added
+- ✅ **NEW:** Basic scoop-boot.ps1 functionality
+- ✅ **NEW:** Environment template system
 
 ## License
 
@@ -448,7 +468,6 @@ MIT License - Copyright (c) 2025 Urs Stotz
 
 - 🏠 **Repository:** [https://github.com/stotz/scoop-boot](https://github.com/stotz/scoop-boot)
 - 🐛 **Issues:** [https://github.com/stotz/scoop-boot/issues](https://github.com/stotz/scoop-boot/issues)
-- 💬 **Discussions:** [https://github.com/stotz/scoop-boot/discussions](https://github.com/stotz/scoop-boot/discussions)
 - 🌟 **Scoop:** [https://scoop.sh](https://scoop.sh)
 
 ---
@@ -461,4 +480,4 @@ If you find scoop-boot useful, please ⭐ **star the repository** on GitHub!
 
 [⬆ Back to Top](#scoop-boot)
 
-</div
+</div>
