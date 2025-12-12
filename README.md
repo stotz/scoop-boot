@@ -22,12 +22,12 @@ Three PowerShell scripts for Windows development environment management using Sc
 
 ### Key Commands:
 ```powershell
---bootstrap          # Install Scoop + Git + 7zip + aria2 + essential tools
---init-env=FILE      # Create environment configuration file
---apply-env          # Apply environment configuration
---dry-run           # Preview changes without applying
---install APP...    # Install applications
---selfTest          # Run 30 self-tests
+--bootstrap        # Install Scoop + Git + 7zip + aria2 + essential tools
+--init-env=FILE    # Create environment configuration file
+--apply-env        # Apply environment configuration
+--dry-run          # Preview changes without applying
+--install APP...   # Install applications
+--selfTest         # Run 30 self-tests
 --status           # Show current environment status
 --env-status       # Show environment files and hierarchy
 --environment      # Display current environment variables
@@ -40,7 +40,7 @@ Three PowerShell scripts for Windows development environment management using Sc
 Load Order (later overrides earlier):
 1. system.default.env              # Machine scope (needs admin)
 2. system.HOSTNAME.USERNAME.env    # Machine scope (needs admin)
-3. user.default.env               # User scope (RECOMMENDED)
+3. user.default.env                # User scope (RECOMMENDED)
 4. user.HOSTNAME.USERNAME.env      # User scope (highest priority)
 ```
 
@@ -62,7 +62,7 @@ PATH-=C:\old\path
 -OLD_VAR
 
 # List operations work for ALL variables (not just PATH)
-PERL5LIB+=C:\perl\lib     # Prepend
+PERL5LIB+=C:\perl\lib      # Prepend
 PYTHONPATH=+C:\python\lib  # Append
 CLASSPATH-=old.jar         # Remove
 ```
