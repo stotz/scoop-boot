@@ -16,7 +16,12 @@ Three PowerShell scripts for Windows development environment management using Sc
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
 ### Version: 1.10.0
-### Lines of Code: 1157
+### Lines of Code:
+| lines | program                        |
+|------:|:-------------------------------|
+|  1553 | bin/scoop-boot.ps1             |
+|   858 | bin/scoop-complete-install.ps1 |
+|   549 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
 - **Bootstrap Scoop** with essential tools
