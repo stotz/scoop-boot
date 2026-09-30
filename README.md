@@ -34,7 +34,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 New-Item -ItemType Directory -Path C:\usr\bin -Force
 New-Item -ItemType Directory -Path C:\usr\etc\environments -Force
 New-Item -ItemType Directory -Path C:\tmp -Force
-New-Item -ItemType Directory -Path C:\devl -Force
+New-Item -ItemType Directory -Path C:\devl -Force    # workspace for repositories, not used by scoop-boot
 
 $base = "https://raw.githubusercontent.com/stotz/scoop-boot/main"
 Invoke-WebRequest -Uri "$base/bin/scoop-boot.ps1"             -OutFile C:\usr\bin\scoop-boot.ps1
