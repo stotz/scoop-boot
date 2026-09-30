@@ -1,17 +1,116 @@
-# Complete Analysis: Scoop-Boot Scripts Documentation
+# scoop-boot
 
-## Overview
-Three PowerShell scripts for Windows development environment management using Scoop package manager:
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](bin/)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-lightgrey.svg)](#support-matrix)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#author--license)
 
-1. **scoop-boot.ps1** - Core bootstrap and environment management (v1.10.0)
-2. **scoop-complete-install.ps1** - Complete installation with 50+ tools (v2.7.1)
-3. **scoop-complete-reset.ps1** - Safe cleanup and reset (v2.1.0)
+Three PowerShell scripts that set up, configure and tear down a Windows development environment based on the [Scoop](https://scoop.sh) package manager. Everything lives under `C:\usr`.
+
+| Script                             | Version | Purpose                                              |
+|------------------------------------|---------|------------------------------------------------------|
+| `bin/scoop-boot.ps1`               | 1.10.0  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.7.6   | Two-phase installation of the full tool set          |
+| `bin/scoop-complete-reset.ps1`     | 2.1.0   | Remove everything again (processes, files, registry) |
 
 ---
-[Scoop Boot Complete Guide](scoop-boot-complete-guide.md)  
-[Scoop Security Enterprise Guide](scoop-security-enterprise-guide.md)  
-[Scoop Security Scanning with GitHub Actions CI/CD](scoop-security-github-actions.md)
+
+## Quick Setup
+
+From a fresh Windows machine (for example an Azure Virtual Desktop) to a working environment. All commands are PowerShell.
+
+### 0. Prerequisites
+
+- Windows display language: **English (United States)**.
+  Settings > Time & Language > Language & region > Windows display language.
+  Error messages in English are searchable; localized ones are not.
+- Administrator rights for phase 1. Phase 2 runs as a normal user.
+- Internet access to `github.com`, `raw.githubusercontent.com` and the download hosts of the Scoop manifests.
+
+### 1. Directories, scripts and environment file (PowerShell as Administrator)
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+
+New-Item -ItemType Directory -Path C:\usr\bin -Force
+New-Item -ItemType Directory -Path C:\usr\etc\environments -Force
+New-Item -ItemType Directory -Path C:\tmp -Force
+New-Item -ItemType Directory -Path C:\devl -Force
+
+$base = "https://raw.githubusercontent.com/stotz/scoop-boot/main"
+Invoke-WebRequest -Uri "$base/bin/scoop-boot.ps1"             -OutFile C:\usr\bin\scoop-boot.ps1
+Invoke-WebRequest -Uri "$base/bin/scoop-complete-install.ps1" -OutFile C:\usr\bin\scoop-complete-install.ps1
+Invoke-WebRequest -Uri "$base/bin/scoop-complete-reset.ps1"   -OutFile C:\usr\bin\scoop-complete-reset.ps1
+
+# Machine-scope environment file, named after this host and user (lowercase)
+$envFile = "C:\usr\etc\environments\system.$($env:COMPUTERNAME.ToLower()).$($env:USERNAME.ToLower()).env"
+Invoke-WebRequest -Uri "$base/etc/environments/system.hostname.username.env" -OutFile $envFile
+
+# Optional: review paths and tool versions before applying
+notepad $envFile
+```
+
+Notes:
+
+- `$env:USERNAME` is the account running this shell. If you run PowerShell as a separate admin account ("run as"), replace it with your regular user name.
+- The file name must start with `system.` (Machine scope) or `user.` (User scope). Other names are rejected by phase 1.
+
+### 2. Phase 1: environment (PowerShell as Administrator)
+
+```powershell
+C:\usr\bin\scoop-complete-install.ps1 -SetEnvironment
+```
+
+Sets `TMP`/`TEMP` to `C:\tmp`, then applies the `.env` file(s) from `C:\usr\etc\environments` at Machine scope.
+
+### 3. Phase 2: tools (new PowerShell window, normal user)
+
+```powershell
+C:\usr\bin\scoop-complete-install.ps1 -InstallTools
+```
+
+Bootstraps Scoop, adds the `extras`, `java` and `versions` buckets, installs the tool set (JDK 25, Python 3.14, Node.js, Kotlin, Maven, Gradle, MSYS2/GCC, editors, CLI tools), imports registry files and cleans up duplicate User-scope PATH entries. Takes 15-30 minutes.
+
+### 4. Verify (new shell)
+
+```powershell
+scoop --version
+java -version      # openjdk 25.x
+python --version   # Python 3.14.x
+gcc --version      # gcc.exe (Built by MSYS2 project)
+node --version     # v26.x
+scoop-boot.ps1 --env-status
+```
+
+### Start over
+
+```powershell
+C:\usr\bin\scoop-complete-reset.ps1          # full cleanup, asks for confirmation
+C:\usr\bin\scoop-complete-reset.ps1 -Force   # no prompts
+```
+
 ---
+
+## Documents
+
+Overview and concepts:
+
+- [Scoop Boot Complete Guide](scoop-boot-complete-guide.md) - environment file syntax, version pinning, bucket handling
+
+Operations and security:
+
+- [Scoop Security Enterprise Guide](scoop-security-enterprise-guide.md) - manifest verification, private buckets, hash checks
+- [Scoop Security Scanning with GitHub Actions CI/CD](scoop-security-github-actions.md) - automated scanning of manifests
+
+AI workflow (working documents for AI-assisted development):
+
+- [docs/AI_Instruktion.md](docs/AI_Instruktion.md) - workflow rules between developer and AI (German)
+- [docs/AI_TODO.md](docs/AI_TODO.md) - AI working state, decisions and version history (German)
+
+---
+
+## Reference
+
+The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
@@ -20,7 +119,7 @@ Three PowerShell scripts for Windows development environment management using Sc
 | lines | program                        |
 |------:|:-------------------------------|
 |  1553 | bin/scoop-boot.ps1             |
-|   858 | bin/scoop-complete-install.ps1 |
+|   866 | bin/scoop-complete-install.ps1 |
 |   549 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -56,7 +155,7 @@ Load Order (later overrides earlier):
 ### Environment File Syntax:
 ```ini
 # Set variable
-JAVA_HOME=$SCOOP\apps\temurin21-jdk\current
+JAVA_HOME=$SCOOP\apps\temurin25-jdk\current
 
 # Prepend to PATH (highest priority)
 PATH+=$JAVA_HOME\bin
@@ -105,8 +204,8 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.7.1
-### Lines of Code: 856
+### Version: 2.7.6
+### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
 ### Phase 1: Environment Setup (-SetEnvironment)
@@ -138,16 +237,16 @@ What it does:
 #### Step 3: Install Development Tools (50+ packages)
 
 **Java Development:**
-- temurin8-jdk, temurin11-jdk, temurin17-jdk, temurin21-jdk, temurin23-jdk
+- temurin25-jdk
 
 **Build Tools:**
 - maven, gradle, ant, cmake, make, ninja, kotlin
 
 **Programming Languages:**
-- python313, perl, nodejs, msys2
+- python314, perl, nodejs, msys2
 
 **Version Control:**
-- tortoisesvn, gh, lazygit (git already from bootstrap)
+- sliksvn, tortoisesvn, gh, lazygit (git already from bootstrap)
 
 **Editors & IDEs:**
 - vscode, neovim, notepadplusplus, jetbrains-toolbox
@@ -184,9 +283,9 @@ What it does:
 ```
 
 **Other Post-Installation:**
-- Sets Java 21 as default (`scoop reset temurin21-jdk`)
+- Sets Java 25 as default (`scoop reset temurin25-jdk`)
 - Cleans up VC++ installer files
-- **AUTOMATICALLY installs GCC 15.2.0 via MSYS2/UCRT64**
+- **AUTOMATICALLY installs GCC via MSYS2/UCRT64**
 
 #### Step 5: Registry Imports
 - 7zip context menu
@@ -216,7 +315,7 @@ What it does:
 ## 3. scoop-complete-reset.ps1 (Safe Cleanup)
 
 ### Version: 2.1.0
-### Lines of Code: 408
+### Lines of Code: see table above
 
 ### Purpose:
 Complete cleanup and removal of Scoop installation
@@ -300,9 +399,9 @@ Complete cleanup and removal of Scoop installation
 
 **In environment files (.env):**
 ```ini
-# CORRECT - GCC 15.2.0 location
+# CORRECT - GCC location
 MSYS2_HOME=$SCOOP\apps\msys2\current
-PATH+=$MSYS2_HOME\ucrt64\bin    # GCC 15.2.0 is HERE!
+PATH+=$MSYS2_HOME\ucrt64\bin    # GCC is HERE!
 PATH+=$MSYS2_HOME\usr\bin       # Unix tools
 
 # WRONG - Old/legacy
@@ -310,7 +409,7 @@ PATH+=$MSYS2_HOME\usr\bin       # Unix tools
 ```
 
 **Why UCRT64:**
-- Modern GCC 15.2.0
+- Modern GCC (UCRT64)
 - Universal C Runtime (Windows 10/11 standard)
 - Better compatibility
 
@@ -322,10 +421,7 @@ PATH+=$MSYS2_HOME\usr\bin       # Unix tools
 
 ### Initial Setup:
 ```powershell
-# 1. Download scripts
-New-Item -ItemType Directory -Path C:\usr\bin -Force
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1 -OutFile C:\usr\bin\scoop-boot.ps1
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-complete-install.ps1 -OutFile C:\usr\bin\scoop-complete-install.ps1
+# 1. Download scripts: see "Quick Setup" at the top of this document
 
 # 2. Option A: Basic Bootstrap (just Scoop + essentials)
 C:\usr\bin\scoop-boot.ps1 --bootstrap
@@ -373,16 +469,16 @@ scoop-boot.ps1 --env-status
 
 ```powershell
 # Java
-java -version    # Should show: openjdk 21.0.x
+java -version    # Should show: openjdk 25.0.x
 
 # Python
-python --version # Should show: Python 3.13.x
+python --version # Should show: Python 3.14.x
 
 # GCC (AUTOMATICALLY INSTALLED!)
-gcc --version    # Should show: gcc.exe (Rev8, Built by MSYS2 project) 15.2.0
+gcc --version    # Should show: gcc.exe (Built by MSYS2 project) 15.x or newer
 
 # Node.js
-node --version   # Should show: v25.x.x
+node --version   # Should show: v26.x.x
 
 # Scoop
 scoop --version  # Should show Scoop version
@@ -428,5 +524,11 @@ scoop --version  # Should show Scoop version
 - **Author:** Urs Stotz
 - **License:** MIT
 - **Repository:** https://github.com/stotz/scoop-boot
+
+---
+
+---
+
+[Quick Setup](#quick-setup) | [Documents](#documents)
 
 ---

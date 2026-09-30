@@ -8,8 +8,16 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.5
-    Date: 2025-01-29
+    Version: 2.7.6
+    Date: 2026-09-30
+
+    Changes in v2.7.6:
+    - Java: only temurin25-jdk is installed (removed 8, 11, 17, 21, 23)
+    - Default Java is now Temurin 25
+    - Python: python313 replaced by python314
+    - Removed obsolete packages: processhacker (superseded by systeminformer), htop (no manifest)
+    - svn renamed to sliksvn (manifest rename in Main bucket)
+    - Verification hints no longer pin exact patch versions
 
     Changes in v2.7.5:
     - CRITICAL FIX: Validates .env filenames (must start with "system." or "user.")
@@ -546,7 +554,7 @@ function Install-ScoopTools {
         'firefox', 'googlechrome',
 
         # Java JDKs
-        'temurin8-jdk', 'temurin11-jdk', 'temurin17-jdk', 'temurin21-jdk', 'temurin23-jdk',
+        'temurin25-jdk',
 
         # Build tools
         'maven', 'gradle', 'ant', 'cmake', 'make', 'ninja', 'kotlin',
@@ -558,10 +566,10 @@ function Install-ScoopTools {
         'vcpkg',
 
         # Programming languages
-        'python313', 'perl', 'nodejs', 'msys2',
+        'python314', 'perl', 'nodejs', 'msys2',
 
         # Version control
-        'svn', 'tortoisesvn', 'gh', 'lazygit',
+        'sliksvn', 'tortoisesvn', 'gh', 'lazygit',
 
         # Editors & IDEs
         'vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox',
@@ -580,10 +588,10 @@ function Install-ScoopTools {
 
         # CLI tools
         'jq', 'yq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
-        'htop', 'btop', 'less', 'sudo', 'wget', 'cacert', 'innounp', 'dark', 'lessmsi',
+        'btop', 'less', 'sudo', 'wget', 'cacert', 'innounp', 'dark', 'lessmsi',
 
         # System tools
-        'sysinternals', 'processhacker', 'mousejiggler',
+        'sysinternals', 'mousejiggler',
 
         # Database tools
         'sqlite', 'mariadb', 'tomcat',
@@ -622,9 +630,9 @@ function Install-ScoopTools {
     Write-Host ""
 
     # Set default Java version
-    Write-Host "[INFO] Setting default Java to Temurin 21..." -ForegroundColor Gray
-    scoop reset temurin21-jdk 2>&1 | Out-Null
-    Write-Host "[OK] Default Java set to Temurin 21" -ForegroundColor Green
+    Write-Host "[INFO] Setting default Java to Temurin 25..." -ForegroundColor Gray
+    scoop reset temurin25-jdk 2>&1 | Out-Null
+    Write-Host "[OK] Default Java set to Temurin 25" -ForegroundColor Green
 
     # Cleanup VC++ installer
     Write-Host "[INFO] Cleaning up VC++ redistributable installer..." -ForegroundColor Gray
@@ -658,7 +666,7 @@ function Install-ScoopTools {
         # Verify installation (CRITICAL: Check ucrt64, NOT mingw64!)
         $gccPath = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
         if (Test-Path $gccPath) {
-            Write-Host "[OK] MSYS2 GCC 15.2.0 installed successfully!" -ForegroundColor Green
+            Write-Host "[OK] MSYS2 GCC (UCRT64) installed successfully!" -ForegroundColor Green
             Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
         } else {
             Write-Host "[WARN] GCC installation may have failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
@@ -683,7 +691,7 @@ function Install-ScoopTools {
         @{App='notepadplusplus'; File='install-context.reg'},
         @{App='vscode'; File='install-context.reg'},
         @{App='git'; File='install-context.reg'},
-        @{App='python313'; File='install-pep-514.reg'}
+        @{App='python314'; File='install-pep-514.reg'}
     )
 
     foreach ($item in $regFiles) {
@@ -824,9 +832,9 @@ function Install-ScoopTools {
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Verify:" -ForegroundColor Cyan
-    Write-Host "  java -version    # Should show Java 21" -ForegroundColor Gray
-    Write-Host "  python --version # Should show Python 3.13.9" -ForegroundColor Gray
-    Write-Host "  gcc --version    # Should show GCC 15.2.0" -ForegroundColor Gray
+    Write-Host "  java -version    # Should show openjdk 25.x" -ForegroundColor Gray
+    Write-Host "  python --version # Should show Python 3.14.x" -ForegroundColor Gray
+    Write-Host "  gcc --version    # Should show GCC from MSYS2/UCRT64" -ForegroundColor Gray
     Write-Host ""
 
     if ($wsl2Installed) {

@@ -830,14 +830,14 @@ PATH+=`$SCOOP\shims
 # ============================================================================
 
 # --- Java Development ---
-#JAVA_HOME=`$SCOOP\apps\temurin21-jdk\current
+#JAVA_HOME=`$SCOOP\apps\temurin25-jdk\current
 #PATH+=`$JAVA_HOME\bin
 #JAVA_OPTS=-Xmx2g -Xms512m -XX:+UseG1GC
 #CLASSPATH=.
 #CLASSPATH+=`$JAVA_HOME\lib\tools.jar
 
 # --- Python Development ---
-#PYTHON_HOME=`$SCOOP\apps\python313\current
+#PYTHON_HOME=`$SCOOP\apps\python314\current
 #PATH+=`$PYTHON_HOME
 #PATH+=`$PYTHON_HOME\Scripts
 #PYTHONPATH=`$PYTHON_HOME\Lib\site-packages
@@ -909,7 +909,7 @@ PATH+=`$SCOOP\shims
 #PATH+=`$GIT_HOME\cmd
 #GIT_SSH=`$SCOOP\apps\openssh\current\ssh.exe
 
-#SVN_HOME=`$SCOOP\apps\svn\current
+#SVN_HOME=`$SCOOP\apps\sliksvn\current
 #PATH+=`$SVN_HOME\bin
 
 # ============================================================================

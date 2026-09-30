@@ -21,10 +21,10 @@ Every Scoop manifest includes SHA256 hashes for downloaded files:
 
 ```json
 {
-    "version": "3.13.1",
+    "version": "3.14.7",
     "architecture": {
         "64bit": {
-            "url": "https://www.python.org/ftp/python/3.13.1/python-3.13.1-amd64.exe",
+            "url": "https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe",
             "hash": "sha256:a1d9a7b8b8c8b9d8e7f6d5c4b3a2z1y9x8w7v6u5t4s3r2q1p0o9n8m7l6k5j4h3g2f1"
         }
     }
@@ -39,7 +39,7 @@ Every Scoop manifest includes SHA256 hashes for downloaded files:
 
 ```powershell
 # Manual hash check
-scoop hash C:\usr\cache\python#3.13.1#x64.exe
+scoop hash C:\usr\cache\python#3.14.7#x64.exe
 # Compare with manifest hash
 
 # Force re-verification
@@ -740,13 +740,13 @@ cd scoop-bucket
 
 # 2. Scan and add package
 ./scripts/scan-and-approve.ps1 `
-    -PackageUrl "https://download.python.org/python-3.13.1.exe" `
+    -PackageUrl "https://download.python.org/python-3.14.7.exe" `
     -PackageName "python" `
-    -Version "3.13.1"
+    -Version "3.14.7"
 
 # 3. Review and commit
 git add bucket/python.json
-git commit -m "Added: Python 3.13.1 (Security Approved)"
+git commit -m "Added: Python 3.14.7 (Security Approved)"
 git push
 
 # 4. Deploy to workstations

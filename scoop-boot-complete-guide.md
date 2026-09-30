@@ -29,14 +29,14 @@ C:\usr\etc\environments\
 # ============================================================================
 
 # Set variable (use $SCOOP for portability)
-JAVA_HOME=$SCOOP\apps\temurin21-jdk\current
-PYTHON_HOME=$SCOOP\apps\python313\current
+JAVA_HOME=$SCOOP\apps\temurin25-jdk\current
+PYTHON_HOME=$SCOOP\apps\python314\current
 MAVEN_HOME=$SCOOP\apps\maven\current
 
 # Prepend to PATH (highest priority - added at beginning)
-PATH+=$SCOOP\apps\temurin21-jdk\current\bin
-PATH+=$SCOOP\apps\python313\current
-PATH+=$SCOOP\apps\python313\current\Scripts
+PATH+=$SCOOP\apps\temurin25-jdk\current\bin
+PATH+=$SCOOP\apps\python314\current
+PATH+=$SCOOP\apps\python314\current\Scripts
 
 # Append to PATH (lowest priority - added at end)
 PATH=+$SCOOP\persist\nodejs\bin
@@ -44,7 +44,7 @@ PATH=+$USERPROFILE\tools
 
 # Remove from PATH (exact match required)
 PATH-=C:\old\java\installation
-PATH-=$SCOOP\apps\python312\current
+PATH-=$SCOOP\apps\python313\current
 
 # Delete variable completely
 -OLD_JAVA_HOME
@@ -62,9 +62,9 @@ PERL5LIB+=$SCOOP\apps\perl\current\perl\site\lib
 PERL5LIB=+$USERPROFILE\perl5\lib                   # Append
 
 # PYTHONPATH (Python modules)
-PYTHONPATH+=$SCOOP\apps\python313\current\Lib\site-packages  # Prepend
+PYTHONPATH+=$SCOOP\apps\python314\current\Lib\site-packages  # Prepend
 PYTHONPATH=+$USERPROFILE\python\libs                         # Append
-PYTHONPATH-=$SCOOP\apps\python312\current\Lib\site-packages  # Remove old
+PYTHONPATH-=$SCOOP\apps\python313\current\Lib\site-packages  # Remove old
 
 # CLASSPATH (Java classes)
 CLASSPATH+=$JAVA_HOME\lib\tools.jar               # Prepend
@@ -83,8 +83,8 @@ NODE_PATH=+$SCOOP\persist\nodejs\node_modules
 # REAL-WORLD EXAMPLE: Complete Java Development Setup
 # ============================================================================
 
-# Java JDK 21 LTS
-JAVA_HOME=$SCOOP\apps\temurin21-jdk\current
+# Java JDK 25 LTS
+JAVA_HOME=$SCOOP\apps\temurin25-jdk\current
 PATH+=$JAVA_HOME\bin
 JAVA_OPTS=-Xmx2g -Xms512m -XX:+UseG1GC
 
@@ -100,7 +100,7 @@ PATH+=$GRADLE_HOME\bin
 GRADLE_USER_HOME=$USERPROFILE\.gradle
 
 # ============================================================================
-# MSYS2/UCRT64 - CRITICAL: Use ucrt64 for GCC 15.2.0!
+# MSYS2/UCRT64 - CRITICAL: Use ucrt64 for GCC (UCRT64)!
 # ============================================================================
 
 # Remove old/wrong mingw64 paths
@@ -108,7 +108,7 @@ PATH-=$SCOOP\apps\msys2\current\mingw64\bin
 
 # Add correct UCRT64 paths
 MSYS2_HOME=$SCOOP\apps\msys2\current
-PATH+=$MSYS2_HOME\ucrt64\bin     # GCC 15.2.0 is here!
+PATH+=$MSYS2_HOME\ucrt64\bin     # GCC (UCRT64) is here!
 PATH+=$MSYS2_HOME\usr\bin        # Unix tools
 ```
 
@@ -154,44 +154,44 @@ scoop info python
 
 ```powershell
 # Install specific version
-scoop install python@3.13.0
+scoop install python@3.14.0
 
 # List available versions
 scoop bucket add versions  # Need versions bucket first
 scoop search python
 
 # Switch between versions
+scoop reset python314
 scoop reset python313
-scoop reset python312
 
 # Hold/Unhold updates
 scoop hold python          # Prevent updates
 scoop unhold python        # Allow updates again
 ```
 
-### 3. Version Pinning - Python 3.13 Example
+### 3. Version Pinning - Python 3.14 Example
 
 ```powershell
 # Method 1: Install specific version and hold
-scoop install python313
-scoop hold python313
+scoop install python314
+scoop hold python314
 
 # Method 2: Install from versions bucket
 scoop bucket add versions
-scoop install python@3.13.0
+scoop install python@3.14.0
 scoop hold python
 
 # Method 3: Reset to specific version after update
 scoop update python        # Updates to latest
-scoop reset python313      # Switch back to 3.13
+scoop reset python314      # Switch back to 3.14
 
 # Check current version and hold status
 scoop list python
 # Output shows:
-# python313 3.13.1 [held]  # Won't be updated
+# python314 3.14.1 [held]  # Won't be updated
 
 # Later, to allow updates again
-scoop unhold python313
+scoop unhold python314
 ```
 
 ### 4. Cache Management
@@ -259,10 +259,10 @@ scoop verify *
 C:\usr\                            # $SCOOP root
 │
 ├── apps\                          # Installed applications
-│   ├── python313\
+│   ├── python314\
 │   │   ├── current\              # Symlink to active version
-│   │   ├── 3.13.0\              # Version 1
-│   │   └── 3.13.1\              # Version 2 (current points here)
+│   │   ├── 3.14.0\              # Version 1
+│   │   └── 3.14.1\              # Version 2 (current points here)
 │   ├── nodejs\
 │   │   ├── current\
 │   │   └── 25.0.0\
@@ -281,7 +281,7 @@ C:\usr\                            # $SCOOP root
 │   └── versions\                 # Alternative versions
 │
 ├── cache\                         # Downloaded installers (reusable)
-│   ├── python#3.13.1#x64.zip
+│   ├── python#3.14.1#x64.zip
 │   ├── nodejs#25.0.0#x64.msi
 │   └── git#2.51.0#x64.exe
 │
@@ -401,12 +401,12 @@ scoop update
 ```json
 // File: buckets/main/bucket/python.json
 {
-    "version": "3.13.1",
+    "version": "3.14.1",
     "homepage": "https://www.python.org/",
     "license": "Python-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://www.python.org/ftp/python/3.13.1/python-3.13.1-amd64.exe",
+            "url": "https://www.python.org/ftp/python/3.14.1/python-3.14.1-amd64.exe",
             "hash": "sha256:..."
         }
     },
@@ -454,14 +454,14 @@ scoop-boot.ps1 --apply-env
 # 5. Install development stack
 scoop bucket add java
 scoop bucket add versions
-scoop install python313 nodejs openjdk21 maven gradle vscode
+scoop install python314 nodejs openjdk25 maven gradle vscode
 
-# 6. Pin Python to 3.13
-scoop hold python313
+# 6. Pin Python to 3.14
+scoop hold python314
 
 # 7. Verify
-python --version  # Python 3.13.x
-java -version     # OpenJDK 21
+python --version  # Python 3.14.x
+java -version     # OpenJDK 25
 node --version    # Node.js 25.x
 ```
 
@@ -475,9 +475,9 @@ scoop status
 scoop update *
 
 # Update specific app (even if held)
-scoop unhold python313
-scoop update python313
-scoop hold python313
+scoop unhold python314
+scoop update python314
+scoop hold python314
 
 # Clean old versions
 scoop cleanup *
@@ -487,24 +487,24 @@ scoop cleanup *
 
 ```powershell
 # Install multiple versions
+scoop install python314
 scoop install python313
 scoop install python312
-scoop install python311
 
 # Switch between them
+scoop reset python314  # Use 3.14
+python --version       # 3.14.x
+
 scoop reset python313  # Use 3.13
 python --version       # 3.13.x
 
-scoop reset python312  # Use 3.12
-python --version       # 3.12.x
-
 # Create aliases for specific versions
+scoop alias add py314 'scoop reset python314'
 scoop alias add py313 'scoop reset python313'
-scoop alias add py312 'scoop reset python312'
 
 # Now switch with:
+scoop py314
 scoop py313
-scoop py312
 ```
 
 ### Example 4: Complete Reset and Reinstall
@@ -541,7 +541,7 @@ scoop depends python
 
 # Reinstall problematic app
 scoop uninstall python --purge
-scoop install python313
+scoop install python314
 ```
 
 ---
@@ -585,8 +585,8 @@ scoop backup
 ### 5. Environment variable best practices
 ```powershell
 # Always use $SCOOP instead of hardcoded paths
-# Good: PATH+=$SCOOP\apps\python313\current
-# Bad:  PATH+=C:\usr\apps\python313\current
+# Good: PATH+=$SCOOP\apps\python314\current
+# Bad:  PATH+=C:\usr\apps\python314\current
 
 # Test changes first
 scoop-boot.ps1 --apply-env --dry-run
