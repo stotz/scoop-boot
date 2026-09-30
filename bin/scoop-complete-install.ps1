@@ -8,8 +8,18 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.7
+    Version: 2.7.8
     Date: 2026-09-30
+
+    Changes in v2.7.8:
+    - FIX: Step 3 reported "[OK] Installed" for every package regardless of
+      the result. Success is now verified via apps\<app>\current; failed
+      packages are collected and listed at the end.
+    - Removed netcat (blocked by Windows Defender; ncat from nmap replaces it)
+      and hxd (download host not reachable)
+    - vcredist2022: skipped when the VC++ 2015-2022 runtime is already
+      installed (registry check); otherwise the result is verified and the
+      elevated fallback command is printed
 
     Changes in v2.7.7:
     - FIX: Bootstrap on a fresh machine (official Scoop installer rejects the
@@ -598,13 +608,13 @@ function Install-ScoopTools {
         'windows-terminal',
 
         # GUI applications
-        'hxd', 'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver',
+        'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver',
 
         # Security tools
         'keepass', 'gnupg', 'openssl',
 
         # Network tools
-        'nmap', 'wireshark', 'netcat',
+        'nmap', 'wireshark',
 
         # CLI tools
         'jq', 'yq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
@@ -632,14 +642,36 @@ function Install-ScoopTools {
     #   - Podman Desktop: scoop install podman-desktop
     )
 
+    # VC++ 2015-2022 runtime: the vcredist2022 post_install needs elevation.
+    # Skip it when the runtime is already present (usual on managed images).
+    $vcRuntimeKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
+    $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue
+    if ($vcRuntime -and $vcRuntime.Installed -eq 1) {
+        Write-Host "[OK] VC++ runtime already present ($($vcRuntime.Version)), skipping vcredist2022" -ForegroundColor Gray
+        $apps = $apps | Where-Object { $_ -ne 'vcredist2022' }
+    }
+
+    $failedApps = @()
     foreach ($app in $apps) {
-        Write-Host "[INFO] Installing $app..." -ForegroundColor Gray
-        $output = scoop install $app 2>&1
-        if ($output -match 'is already installed') {
+        $appDir = "$ScoopDir\apps\$app\current"
+        if (Test-Path $appDir) {
             Write-Host "[OK] Already installed: $app" -ForegroundColor Gray
-        } else {
-            Write-Host "[OK] Installed: $app" -ForegroundColor Green
+            continue
         }
+        Write-Host "[INFO] Installing $app..." -ForegroundColor Gray
+        scoop install $app
+        if (Test-Path $appDir) {
+            Write-Host "[OK] Installed: $app" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Not installed: $app" -ForegroundColor Red
+            $failedApps += $app
+        }
+    }
+
+    if ($failedApps.Count -gt 0) {
+        Write-Host ""
+        Write-Host "[WARN] $($failedApps.Count) package(s) failed: $($failedApps -join ', ')" -ForegroundColor Yellow
+        Write-Host "       Retry later with: scoop install <name>; remove leftovers with: scoop uninstall <name>" -ForegroundColor Gray
     }
 
     # ============================================================================
@@ -654,12 +686,20 @@ function Install-ScoopTools {
     scoop reset temurin25-jdk 2>&1 | Out-Null
     Write-Host "[OK] Default Java set to Temurin 25" -ForegroundColor Green
 
-    # Cleanup VC++ installer
-    Write-Host "[INFO] Cleaning up VC++ redistributable installer..." -ForegroundColor Gray
-    $vcredistInstaller = Get-ChildItem "$ScoopDir\apps\vcredist2022\current" -Filter "VC_redist*.exe" -ErrorAction SilentlyContinue
-    if ($vcredistInstaller) {
-        Remove-Item $vcredistInstaller.FullName -Force -ErrorAction SilentlyContinue
-        Write-Host "[OK] Installer removed (libraries remain)" -ForegroundColor Green
+    # VC++ runtime: verify the result of the vcredist2022 post_install (needs elevation)
+    $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue
+    if ($vcRuntime -and $vcRuntime.Installed -eq 1) {
+        Write-Host "[OK] VC++ runtime installed ($($vcRuntime.Version))" -ForegroundColor Green
+        $vcredistInstaller = Get-ChildItem "$ScoopDir\apps\vcredist2022\current" -Filter "VC_redist*.exe" -ErrorAction SilentlyContinue
+        if ($vcredistInstaller) {
+            Remove-Item $vcredistInstaller.FullName -Force -ErrorAction SilentlyContinue
+            Write-Host "[OK] vcredist2022 installer removed (libraries remain)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "[WARN] VC++ runtime not installed (vcredist2022 post_install needs elevation, UAC was denied?)" -ForegroundColor Yellow
+        Write-Host "       Run in an Administrator PowerShell:" -ForegroundColor Gray
+        Write-Host "       Get-ChildItem C:\usr\cache\vcredist2022* | ForEach-Object { & `$_.FullName /install /quiet /norestart }" -ForegroundColor Gray
+        $failedApps += 'vcredist2022 (runtime)'
     }
 
     # Initialize MSYS2 and install GCC
@@ -847,7 +887,12 @@ function Install-ScoopTools {
     }
 
     Write-Host ""
-    Write-Host "=== Installation Complete! ===" -ForegroundColor Green
+    if ($failedApps.Count -gt 0) {
+        Write-Host "=== Installation Complete with $($failedApps.Count) failure(s) ===" -ForegroundColor Yellow
+        Write-Host "Failed: $($failedApps -join ', ')" -ForegroundColor Yellow
+    } else {
+        Write-Host "=== Installation Complete! ===" -ForegroundColor Green
+    }
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""

@@ -8,8 +8,8 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.11.0  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.7.7   | Two-phase installation of the full tool set          |
+| `bin/scoop-boot.ps1`               | 1.11.1  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.7.8   | Two-phase installation of the full tool set          |
 | `bin/scoop-complete-reset.ps1`     | 2.1.0   | Remove everything again (processes, files, registry) |
 
 ---
@@ -114,12 +114,12 @@ The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
-### Version: 1.11.0
+### Version: 1.11.1
 ### Lines of Code:
 | lines | program                        |
 |------:|:-------------------------------|
-|  1613 | bin/scoop-boot.ps1             |
-|   886 | bin/scoop-complete-install.ps1 |
+|  1621 | bin/scoop-boot.ps1             |
+|   931 | bin/scoop-complete-install.ps1 |
 |   549 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -204,7 +204,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.7.7
+### Version: 2.7.8
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
@@ -252,7 +252,7 @@ What it does:
 - vscode, neovim, notepadplusplus, jetbrains-toolbox
 
 **GUI Applications:**
-- windows-terminal, hxd, winmerge, freecommander
+- windows-terminal, winmerge, freecommander
 - greenshot, everything, postman, dbeaver
 
 **CLI Tools:**

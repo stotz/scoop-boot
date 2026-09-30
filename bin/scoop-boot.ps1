@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.11.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.11.1 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,14 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.11.0
+    Version: 1.11.1
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.11.1:
+    - Bootstrap: 7zip before git (git depends on 7zip; avoids the duplicate install)
+    - Bootstrap: aria2 warning disabled right after aria2 is installed, not after bootstrap
+    - Bootstrap: each essential/recommended tool is verified via apps\<tool>\current
 
     Changes in v1.11.0:
     - FIX: Bootstrap failed on every fresh machine because the official Scoop
@@ -79,7 +84,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.11.0"
+$global:ScriptVersion = "1.11.1"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -413,14 +418,14 @@ function Invoke-Bootstrap {
 
     # Install essential tools
     Write-Info "Installing essential tools..."
-    $essentialTools = @('git', '7zip')
+    $essentialTools = @('7zip', 'git')
     foreach ($tool in $essentialTools) {
-        try {
-            & scoop install $tool 2>&1 | Out-Null
+        & scoop install $tool 2>&1 | Out-Null
+        if (Test-Path (Join-Path $global:BaseDir "apps\$tool\current")) {
             Write-Success "$tool installed"
-        }
-        catch {
-            Write-Warning "Failed to install $tool"
+        } else {
+            Write-ErrorMsg "Failed to install $tool (required)"
+            return $false
         }
     }
 
@@ -436,12 +441,15 @@ function Invoke-Bootstrap {
     )
 
     foreach ($tool in $recommendedTools) {
-        try {
-            & scoop install $tool.Name 2>&1 | Out-Null
+        & scoop install $tool.Name 2>&1 | Out-Null
+        if (Test-Path (Join-Path $global:BaseDir "apps\$($tool.Name)\current")) {
             Write-Success "$($tool.Name) installed ($($tool.Desc))"
-        }
-        catch {
-            Write-Warning "Failed to install $($tool.Name)"
+            if ($tool.Name -eq 'aria2') {
+                # Silence the aria2 advisory that Scoop prints before every download
+                & scoop config aria2-warning-enabled false 2>&1 | Out-Null
+            }
+        } else {
+            Write-Warning "Failed to install $($tool.Name) ($($tool.Desc))"
         }
     }
 
