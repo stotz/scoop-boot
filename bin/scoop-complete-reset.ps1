@@ -14,8 +14,17 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
 
 .NOTES
-    Version: 2.2.0
+    Version: 2.3.0
     Date: 2025-01-29
+
+    Changes in v2.3.0:
+    - FIX: handle64.exe scan failed with "Cannot overwrite variable PID"
+      ($pid is a read-only automatic variable; renamed to $processId)
+    - Environment cleanup removes every User/Machine variable whose value points
+      into the Scoop directory, in addition to the fixed name list. Previously
+      manifest env_set entries (OPENSSL_*, CATALINA_*, AZURE_CLI_PATH, ...) and
+      GIT_SSH/USR from the .env file survived a reset.
+    - Directory removal no longer prints a stray "True" per directory
 
     Changes in v2.2.0:
     - NEW: Uses handle64.exe for COMPLETE process detection
@@ -283,24 +292,24 @@ if (Test-Path $handle64Path) {
             # Format: "processname.exe pid: 12345 HOSTNAME\User"
             if ($line -match '^\s*(\S+\.exe)\s+pid:\s+(\d+)') {
                 $exeName = $Matches[1]
-                $pid = [int]$Matches[2]
-                if (-not $processesToKill.ContainsKey($pid)) {
-                    $processesToKill[$pid] = $exeName
+                $processId = [int]$Matches[2]
+                if (-not $processesToKill.ContainsKey($processId)) {
+                    $processesToKill[$processId] = $exeName
                 }
             }
         }
 
         if ($processesToKill.Count -gt 0) {
             Write-Host "  [FOUND] $($processesToKill.Count) processes with open handles:" -ForegroundColor Yellow
-            foreach ($pid in $processesToKill.Keys) {
-                $exeName = $processesToKill[$pid]
-                Write-Host "    - $exeName (PID: $pid)" -ForegroundColor Yellow
+            foreach ($processId in $processesToKill.Keys) {
+                $exeName = $processesToKill[$processId]
+                Write-Host "    - $exeName (PID: $processId)" -ForegroundColor Yellow
 
                 try {
-                    Stop-Process -Id $pid -Force -ErrorAction Stop
-                    Write-Host "      [OK] Killed PID $pid" -ForegroundColor Green
+                    Stop-Process -Id $processId -Force -ErrorAction Stop
+                    Write-Host "      [OK] Killed PID $processId" -ForegroundColor Green
                 } catch {
-                    Write-Host "      [FAIL] Could not kill PID $pid" -ForegroundColor Red
+                    Write-Host "      [FAIL] Could not kill PID $processId" -ForegroundColor Red
                 }
             }
             Start-Sleep -Seconds 2
@@ -391,49 +400,44 @@ $machineEnvVars | ConvertTo-Json | Out-File "$BackupDir\machine_env_backup.json"
 
 Write-Host "[OK] Backup created: $BackupDir" -ForegroundColor Green
 
-# 3. Clean User environment variables
-Write-Host ""
-Write-Host ">>> Cleaning User environment variables..." -ForegroundColor Cyan
-
+# 3./4. Clean User and Machine environment variables
+# Two criteria: a fixed list of names that scoop-boot or Scoop set without a path
+# value (options, locale), plus every variable whose value points into $ScoopDir.
+# The second criterion catches env_set entries from any manifest (OPENSSL_*,
+# CATALINA_*, AZURE_CLI_PATH, ...) without maintaining a list per package.
 $varsToRemove = @(
     'SCOOP', 'SCOOP_GLOBAL', 'SCOOP_CACHE',
-    'JAVA_HOME', 'JAVA_OPTS',
-    'GRADLE_HOME', 'GRADLE_USER_HOME', 'GRADLE_OPTS',
-    'MAVEN_HOME', 'M2_HOME', 'M2_REPO', 'MAVEN_OPTS',
-    'ANT_HOME',
-    'KOTLIN_HOME',
-    'PYTHON_HOME', 'PYTHONPATH',
-    'PERL_HOME', 'PERL5LIB',
-    'NODE_HOME', 'NODE_PATH', 'NPM_CONFIG_PREFIX',
-    'MSYS2_HOME', 'MSYS2_ROOT',
-    'GIT_HOME', 'GIT_INSTALL_ROOT',
-    'SVN_HOME',
-    'MAKE_HOME',
-    'CMAKE_HOME',
-    'VCPKG_ROOT',
-    'BAT_CONFIG_DIR',
+    'JAVA_OPTS', 'GRADLE_OPTS', 'MAVEN_OPTS',
+    'GRADLE_USER_HOME', 'M2_REPO',
     'LANG', 'LC_ALL', 'LANGUAGE'
 )
+$varsToKeep = @('Path', 'TMP', 'TEMP')
 
-foreach ($var in $varsToRemove) {
-    $currentValue = [System.Environment]::GetEnvironmentVariable($var, "User")
-    if ($currentValue) {
-        [System.Environment]::SetEnvironmentVariable($var, $null, "User")
-        Write-Host "[OK] Removed User variable: $var" -ForegroundColor Green
+function Remove-ScoopEnvironmentVariables {
+    param([string]$Scope)
+
+    Write-Host ""
+    Write-Host ">>> Cleaning $Scope environment variables..." -ForegroundColor Cyan
+    $removed = 0
+    $all = [System.Environment]::GetEnvironmentVariables($Scope)
+    foreach ($name in @($all.Keys)) {
+        if ($varsToKeep -contains $name) { continue }
+        $value = [string]$all[$name]
+        $byName  = $varsToRemove -contains $name
+        $byValue = $value -like "$ScoopDir*" -or $value -like "*;$ScoopDir*"
+        if ($byName -or $byValue) {
+            [System.Environment]::SetEnvironmentVariable($name, $null, $Scope)
+            Write-Host "[OK] Removed $Scope variable: $name" -ForegroundColor Green
+            $removed++
+        }
+    }
+    if ($removed -eq 0) {
+        Write-Host "[OK] No $Scope variables to remove" -ForegroundColor Gray
     }
 }
 
-# 4. Clean Machine environment variables
-Write-Host ""
-Write-Host ">>> Cleaning Machine environment variables..." -ForegroundColor Cyan
-
-foreach ($var in $varsToRemove) {
-    $currentValue = [System.Environment]::GetEnvironmentVariable($var, "Machine")
-    if ($currentValue) {
-        [System.Environment]::SetEnvironmentVariable($var, $null, "Machine")
-        Write-Host "[OK] Removed Machine variable: $var" -ForegroundColor Green
-    }
-}
+Remove-ScoopEnvironmentVariables -Scope "User"
+Remove-ScoopEnvironmentVariables -Scope "Machine"
 
 # 5. Clean User PATH
 Write-Host ""
@@ -473,7 +477,7 @@ if (-not $KeepPersist) {
 }
 
 foreach ($dir in $dirsToRemove) {
-    Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
+    $null = Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
 }
 
 # 8. Clean registry
