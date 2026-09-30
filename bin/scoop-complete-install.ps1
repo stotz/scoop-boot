@@ -8,8 +8,17 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.8
+    Version: 2.7.9
     Date: 2026-09-30
+
+    Changes in v2.7.9:
+    - FIX: WSL2 detection. wsl.exe output is UTF-16 and was matched with NUL
+      bytes in it; "WSL version" 3.x was rejected; Store/MSI kernel path added.
+    - FIX: MSYS2/GCC. msys2.exe is a launcher and returns immediately, so the
+      two pacman runs overlapped (database lock) and the result depended on
+      timing. bash.exe is called directly with MSYSTEM=UCRT64, waits, shows
+      output and exit codes. A failure is listed in the summary.
+    - Step 6 reports tray apps that are already running
 
     Changes in v2.7.8:
     - FIX: Step 3 reported "[OK] Installed" for every package regardless of
@@ -88,38 +97,49 @@ function Test-WSL2Installed {
         return $false
     }
 
-    # Method 2: Parse "wsl --status" output
+    # Method 2: Parse "wsl --status" and "wsl --version".
+    # wsl.exe writes UTF-16; captured through the default console encoding every
+    # character is followed by a NUL, which breaks any regex. Read it as Unicode.
     try {
-        $wslStatus = wsl --status 2>&1 | Out-String
+        $previousEncoding = [Console]::OutputEncoding
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        try {
+            $wslStatus  = (wsl --status 2>&1 | Out-String) -replace "`0", ''
+            $wslVersion = (wsl --version 2>&1 | Out-String) -replace "`0", ''
+            $wslList    = (wsl --list --verbose 2>&1 | Out-String) -replace "`0", ''
+        } finally {
+            [Console]::OutputEncoding = $previousEncoding
+        }
 
-        # Check for "Default Version: 2"
         if ($wslStatus -match 'Default Version:\s*2') {
             Write-Host "  [OK] WSL2 detected: Default Version = 2" -ForegroundColor Green
             return $true
         }
 
-        # Check for "WSL version: 2.x.x"
-        if ($wslStatus -match 'WSL version:\s*2\.\d+\.\d+') {
-            Write-Host "  [OK] WSL2 detected: $($Matches[0])" -ForegroundColor Green
+        # Store/MSI WSL (1.x, 2.x, 3.x) reports a kernel version only when WSL2 is usable
+        if ($wslVersion -match 'Kernel version:\s*\d') {
+            Write-Host "  [OK] WSL2 detected: $(($wslVersion -split "`n" | Select-String 'WSL version').Line.Trim())" -ForegroundColor Green
             return $true
         }
 
-        # Check if any distribution is running WSL2
-        $wslList = wsl --list --verbose 2>&1 | Out-String
-        if ($wslList -match '\s+2\s+') {
-            Write-Host "  [OK] WSL2 detected: At least one distribution running version 2" -ForegroundColor Green
+        if ($wslList -match '\s+2\s*$') {
+            Write-Host "  [OK] WSL2 detected: at least one distribution runs version 2" -ForegroundColor Green
             return $true
         }
-
     } catch {
-        Write-Host "  [WARN] Could not parse wsl status: $_" -ForegroundColor Yellow
+        Write-Host "  [WARN] Could not parse wsl output: $_" -ForegroundColor Yellow
     }
 
-    # Method 3: Check WSL2 kernel file existence
-    $wslKernelPath = "$env:SystemRoot\System32\lxss\tools\kernel"
-    if (Test-Path $wslKernelPath) {
-        Write-Host "  [OK] WSL2 detected: Kernel found at $wslKernelPath" -ForegroundColor Green
-        return $true
+    # Method 3: Kernel file (inbox feature: System32\lxss; Store/MSI package: Program Files\WSL)
+    $wslKernelPaths = @(
+        "$env:SystemRoot\System32\lxss\tools\kernel",
+        "$env:ProgramFiles\WSL\tools\kernel"
+    )
+    foreach ($wslKernelPath in $wslKernelPaths) {
+        if (Test-Path $wslKernelPath) {
+            Write-Host "  [OK] WSL2 detected: kernel found at $wslKernelPath" -ForegroundColor Green
+            return $true
+        }
     }
 
     # Method 4: Check Windows Feature (requires admin)
@@ -707,22 +727,36 @@ function Install-ScoopTools {
     if (Test-Path "$ScoopDir\apps\msys2\current") {
         Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
         Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
-        Write-Host "  -> Updating package database (pacman -Sy)..." -ForegroundColor DarkGray
-        Write-Host "  -> Upgrading core system (pacman -Syu)..." -ForegroundColor DarkGray
-        Write-Host "     (This may take 2-3 minutes and will close MSYS2 terminal)" -ForegroundColor DarkGray
-        Write-Host "  -> Installing mingw-w64-ucrt-x86_64-gcc..." -ForegroundColor DarkGray
-        Write-Host "     (This downloads ~70 MB and may take 3-5 minutes)" -ForegroundColor DarkGray
+        Write-Host "     (core update plus GCC download, several minutes)" -ForegroundColor DarkGray
 
-        # Try automatic installation
-        $msys2 = "$ScoopDir\apps\msys2\current\msys2.exe"
+        # msys2.exe is only a launcher: it spawns a terminal and exits at once, so
+        # Start-Process -Wait returns before pacman has done anything. Call bash.exe
+        # directly instead; that blocks until pacman is finished and streams its output.
+        $msysBash = "$ScoopDir\apps\msys2\current\usr\bin\bash.exe"
+        $env:MSYSTEM = 'UCRT64'
+        $env:CHERE_INVOKING = '1'
+        $env:MSYS2_PATH_TYPE = 'minimal'
         try {
-            # First run: update package database and system
-            Start-Process -FilePath $msys2 -ArgumentList "pacman -Syu --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
+            # First login run completes the MSYS2 post-install setup
+            & $msysBash -lc 'true' 2>&1 | Out-Null
 
-            # Second run: install GCC
-            Start-Process -FilePath $msys2 -ArgumentList "pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm" -Wait -NoNewWindow -ErrorAction SilentlyContinue
-        } catch {}
+            # Core update may replace msys2-runtime/pacman and stop; second pass finishes
+            foreach ($pass in 1, 2) {
+                Write-Host "  -> pacman -Syu, pass $pass" -ForegroundColor DarkGray
+                & $msysBash -lc 'pacman -Syu --noconfirm'
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "  [WARN] pacman -Syu pass $pass exited with code $LASTEXITCODE" -ForegroundColor Yellow
+                }
+            }
+
+            Write-Host "  -> pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor DarkGray
+            & $msysBash -lc 'pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc'
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  [WARN] pacman -S exited with code $LASTEXITCODE" -ForegroundColor Yellow
+            }
+        } finally {
+            Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING, Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue
+        }
 
         # Verify installation (CRITICAL: Check ucrt64, NOT mingw64!)
         $gccPath = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
@@ -730,7 +764,8 @@ function Install-ScoopTools {
             Write-Host "[OK] MSYS2 GCC (UCRT64) installed successfully!" -ForegroundColor Green
             Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
         } else {
-            Write-Host "[WARN] GCC installation may have failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
+            Write-Host "[WARN] GCC installation failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
+            $failedApps += 'msys2 gcc (ucrt64)'
             Write-Host ""
             Write-Host "Manual installation steps:" -ForegroundColor Yellow
             Write-Host "  1. Open UCRT64 terminal: $ScoopDir\apps\msys2\current\ucrt64.exe" -ForegroundColor White
@@ -794,6 +829,8 @@ function Install-ScoopTools {
         if (-not $toolboxRunning) {
             Start-Process -FilePath $toolboxPath -ErrorAction SilentlyContinue
             Write-Host "[OK] Started: JetBrains Toolbox" -ForegroundColor Green
+        } else {
+            Write-Host "[OK] Already running: JetBrains Toolbox" -ForegroundColor Gray
         }
     }
 
@@ -803,6 +840,8 @@ function Install-ScoopTools {
         if (-not $greenshotRunning) {
             Start-Process -FilePath $greenshotPath -ErrorAction SilentlyContinue
             Write-Host "[OK] Started: Greenshot" -ForegroundColor Green
+        } else {
+            Write-Host "[OK] Already running: Greenshot" -ForegroundColor Gray
         }
     }
 

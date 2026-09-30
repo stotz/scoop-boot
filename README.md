@@ -9,7 +9,7 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
 | `bin/scoop-boot.ps1`               | 1.11.1  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.7.8   | Two-phase installation of the full tool set          |
+| `bin/scoop-complete-install.ps1`   | 2.7.9   | Two-phase installation of the full tool set          |
 | `bin/scoop-complete-reset.ps1`     | 2.3.0   | Remove everything again (processes, files, registry) |
 
 ---
@@ -119,7 +119,7 @@ The sections below describe each script in detail.
 | lines | program                        |
 |------:|:-------------------------------|
 |  1621 | bin/scoop-boot.ps1             |
-|   953 | bin/scoop-complete-install.ps1 |
+|   992 | bin/scoop-complete-install.ps1 |
 |   553 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -204,7 +204,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.7.8
+### Version: 2.7.9
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
@@ -272,10 +272,10 @@ What it does:
 
 **CRITICAL: MSYS2/GCC Installation is AUTOMATIC!**
 ```powershell
-# The script AUTOMATICALLY does:
-1. Initializes MSYS2
-2. Runs: pacman -Syu --noconfirm
-3. Runs: pacman -S mingw-w64-ucrt-x86_64-gcc --noconfirm
+# The script AUTOMATICALLY does (via usr\bin\bash.exe -lc, MSYSTEM=UCRT64, blocking):
+1. First login run (MSYS2 post-install setup)
+2. Runs: pacman -Syu --noconfirm (two passes: core update, then the rest)
+3. Runs: pacman -S --needed mingw-w64-ucrt-x86_64-gcc --noconfirm
 4. Verifies GCC at: C:\usr\apps\msys2\current\ucrt64\bin\gcc.exe
 
 # NO MANUAL STEPS REQUIRED!
