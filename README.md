@@ -46,7 +46,9 @@ $envFile = "C:\usr\etc\environments\system.$($env:COMPUTERNAME.ToLower()).$($env
 Invoke-WebRequest -Uri "$base/etc/environments/system.hostname.username.env" -OutFile $envFile
 
 # Optional: review paths and tool versions before applying
-notepad $envFile
+# (notepad.exe with extension: on managed machines a bare 'notepad' may resolve to a
+#  blocked Store alias and open a "Select an app" dialog instead)
+notepad.exe $envFile
 ```
 
 Notes:
