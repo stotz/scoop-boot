@@ -9,7 +9,7 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
 | `bin/scoop-boot.ps1`               | 1.11.1  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.7.10  | Two-phase installation of the full tool set          |
+| `bin/scoop-complete-install.ps1`   | 2.7.11  | Two-phase installation of the full tool set          |
 | `bin/scoop-complete-reset.ps1`     | 2.3.1   | Remove everything again (processes, files, registry) |
 
 ---
@@ -119,7 +119,7 @@ The sections below describe each script in detail.
 | lines | program                        |
 |------:|:-------------------------------|
 |  1621 | bin/scoop-boot.ps1             |
-|  1001 | bin/scoop-complete-install.ps1 |
+|  1039 | bin/scoop-complete-install.ps1 |
 |   557 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -204,7 +204,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.7.10
+### Version: 2.7.11
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
@@ -277,6 +277,8 @@ What it does:
 2. Runs: pacman -Syu --noconfirm (two passes: core update, then the rest)
 3. Runs: pacman -S --needed mingw-w64-ucrt-x86_64-gcc --noconfirm (up to 3 attempts, mirrors fail sporadically)
 4. Verifies GCC at: C:\usr\apps\msys2\current\ucrt64\bin\gcc.exe
+5. Compiles and runs a one-line test program; distinct warnings for DLL shadowing
+   (older libstdc++ earlier in PATH) and for endpoint security refusing the built exe
 
 # NO MANUAL STEPS REQUIRED!
 # If automatic installation fails, script shows manual steps
@@ -285,6 +287,8 @@ What it does:
 # - Default Java: scoop reset temurin25-jdk
 # - VC++ runtime check (registry), vcredist2022 only if missing
 # - Shims nc and netcat -> ncat.exe from nmap (netcat package is blocked by Defender)
+# Step 7 removes every User-PATH entry under C:\usr; the Machine PATH from the .env
+# file is authoritative (ucrt64\bin is placed above Git and Perl there on purpose)
 ```
 
 **Other Post-Installation:**

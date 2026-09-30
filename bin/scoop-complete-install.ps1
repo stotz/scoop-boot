@@ -8,8 +8,15 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.10
+    Version: 2.7.11
     Date: 2026-09-30
+
+    Changes in v2.7.11:
+    - Step 4: GCC compile-and-run smoke test with distinct messages for DLL
+      shadowing (cc1.exe STATUS_ENTRYPOINT_NOT_FOUND) and for endpoint
+      security refusing the built executable (Defender ASR 01443614)
+    - Step 7: every User-PATH entry under C:\usr is removed, not only a fixed
+      pattern list; the Machine PATH from the .env file is authoritative
 
     Changes in v2.7.10:
     - MSYS2/GCC: pacman -S is retried up to three times (mirror errors such as
@@ -772,6 +779,48 @@ function Install-ScoopTools {
         if (Test-Path $gccPath) {
             Write-Host "[OK] MSYS2 GCC (UCRT64) installed successfully!" -ForegroundColor Green
             Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
+
+            # Smoke test: compile and run a one-line program. Two known failure modes on
+            # managed machines, each with its own message:
+            #  - cc1.exe exits with -1073741511 (STATUS_ENTRYPOINT_NOT_FOUND) when another
+            #    directory earlier in PATH ships older libstdc++/libgcc DLLs
+            #  - the built exe is refused by endpoint security (ASR rule 01443614, "Block
+            #    executable files unless they meet a prevalence, age, or trusted list criterion")
+            $ccTestDir = "$ScoopDir\cache\scoop-boot-cctest"
+            New-Item -ItemType Directory -Path $ccTestDir -Force | Out-Null
+            $ccTestSrc = "$ccTestDir\hello.c"
+            $ccTestExe = "$ccTestDir\hello.exe"
+            Set-Content -Path $ccTestSrc -Value 'int main(void){return 42;}' -Encoding ASCII
+            Remove-Item $ccTestExe -Force -ErrorAction SilentlyContinue
+            $savedPath = $env:Path
+            $env:Path = "$ScoopDir\apps\msys2\current\ucrt64\bin;$env:Path"
+            & $gccPath $ccTestSrc -o $ccTestExe 2>&1 | Out-Null
+            $ccExit = $LASTEXITCODE
+            $env:Path = $savedPath
+            if (-not (Test-Path $ccTestExe)) {
+                Write-Host "[WARN] GCC is installed but cannot compile (gcc exit code $ccExit)" -ForegroundColor Yellow
+                if ($ccExit -eq -1073741511) {
+                    Write-Host "       cc1.exe: STATUS_ENTRYPOINT_NOT_FOUND. A directory earlier in PATH ships older" -ForegroundColor Gray
+                    Write-Host "       libstdc++/libgcc DLLs. Check: where.exe libstdc++-6.dll" -ForegroundColor Gray
+                }
+                $failedApps += 'gcc (compile test)'
+            } else {
+                $runOk = $false
+                try {
+                    & $ccTestExe 2>&1 | Out-Null
+                    $runOk = ($LASTEXITCODE -eq 42)
+                } catch { }
+                if ($runOk) {
+                    Write-Host "[OK] GCC compile-and-run test passed" -ForegroundColor Green
+                } else {
+                    Write-Host "[WARN] GCC compiled the test program, but Windows refused to run it." -ForegroundColor Yellow
+                    Write-Host "       Endpoint security (Defender ASR rule 01443614) blocks locally built" -ForegroundColor Gray
+                    Write-Host "       executables on this machine. Check the Defender log for event 1121:" -ForegroundColor Gray
+                    Write-Host "       Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1121}" -ForegroundColor Gray
+                    $failedApps += 'gcc (running built exe blocked by ASR)'
+                }
+            }
+            Remove-Item $ccTestDir -Recurse -Force -ErrorAction SilentlyContinue
         } else {
             Write-Host "[WARN] GCC installation failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
             $failedApps += 'msys2 gcc (ucrt64)'
@@ -882,24 +931,13 @@ function Install-ScoopTools {
         }
     }
 
-    # 2. Remove Scoop-added paths using explicit pattern matching
+    # 2. Remove every Scoop-added entry under $ScoopDir. The Machine PATH built from
+    #    the .env file is authoritative and orders the directories deliberately
+    #    (compiler before Git/Perl DLLs, shims first); User entries that Scoop
+    #    prepends (env_add_path) would otherwise take precedence or shadow DLLs.
+    #    Everything Scoop installs is reachable through shims anyway.
     foreach ($userEntry in $userEntries) {
-        $shouldRemove = $false
-
-        # Check if it's a temurin JDK path (any version: 8, 11, 17, 21, 23, 25, etc.)
-        if ($userEntry -match '^C:\\usr\\apps\\temurin\d+-jdk\\current\\bin$') {
-            $shouldRemove = $true
-        }
-        # Check other unwanted patterns
-        elseif ($userEntry -eq 'C:\usr\apps\vscode\current\bin') {
-            $shouldRemove = $true
-        }
-        elseif ($userEntry -eq 'C:\usr\apps\nodejs\current\bin') {
-            $shouldRemove = $true
-        }
-        elseif ($userEntry -eq 'C:\usr\shims') {
-            $shouldRemove = $true
-        }
+        $shouldRemove = $userEntry -like "$ScoopDir\*"
 
         if ($shouldRemove -and ($toRemove -notcontains $userEntry)) {
             $toRemove += $userEntry
