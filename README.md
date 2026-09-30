@@ -45,10 +45,11 @@ Invoke-WebRequest -Uri "$base/bin/scoop-complete-reset.ps1"   -OutFile C:\usr\bi
 $envFile = "C:\usr\etc\environments\system.$($env:COMPUTERNAME.ToLower()).$($env:USERNAME.ToLower()).env"
 Invoke-WebRequest -Uri "$base/etc/environments/system.hostname.username.env" -OutFile $envFile
 
-# Optional: review paths and tool versions before applying
-# (notepad.exe with extension: on managed machines a bare 'notepad' may resolve to a
-#  blocked Store alias and open a "Select an app" dialog instead)
-notepad.exe $envFile
+# Optional: review paths and tool versions before applying.
+# Full path on purpose: Git's usr\bin (in PATH once Git is installed) contains an
+# extensionless script named 'notepad', and PowerShell would hand it to ShellExecute
+# ("Select an app to open 'notepad'").
+C:\Windows\System32\notepad.exe $envFile
 ```
 
 Notes:
