@@ -119,7 +119,7 @@ The sections below describe each script in detail.
 | lines | program                        |
 |------:|:-------------------------------|
 |  1621 | bin/scoop-boot.ps1             |
-|   931 | bin/scoop-complete-install.ps1 |
+|   953 | bin/scoop-complete-install.ps1 |
 |   549 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -280,6 +280,11 @@ What it does:
 
 # NO MANUAL STEPS REQUIRED!
 # If automatic installation fails, script shows manual steps
+
+# Also in Step 4:
+# - Default Java: scoop reset temurin25-jdk
+# - VC++ runtime check (registry), vcredist2022 only if missing
+# - Shims nc and netcat -> ncat.exe from nmap (netcat package is blocked by Defender)
 ```
 
 **Other Post-Installation:**

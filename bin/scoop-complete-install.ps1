@@ -17,6 +17,7 @@
       packages are collected and listed at the end.
     - Removed netcat (blocked by Windows Defender; ncat from nmap replaces it)
       and hxd (download host not reachable)
+    - Step 4 creates the shims nc and netcat pointing to ncat.exe (scoop shim add)
     - vcredist2022: skipped when the VC++ 2015-2022 runtime is already
       installed (registry check); otherwise the result is verified and the
       elevated fallback command is printed
@@ -740,6 +741,27 @@ function Install-ScoopTools {
         }
     } else {
         Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
+    }
+
+    # netcat aliases: the netcat package is blocked by Windows Defender (PUA), so nc and
+    # netcat point to ncat from nmap. "scoop shim add" re-adds shims to the User PATH,
+    # which Step 7 cleans up again; that is why this runs before Step 7.
+    $ncat = "$ScoopDir\apps\nmap\current\ncat.exe"
+    if (Test-Path $ncat) {
+        foreach ($alias in @('nc', 'netcat')) {
+            if (Test-Path "$ScoopDir\shims\$alias.exe") {
+                Write-Host "[OK] Shim already present: $alias -> ncat" -ForegroundColor Gray
+            } else {
+                scoop shim add $alias $ncat 2>&1 | Out-Null
+                if (Test-Path "$ScoopDir\shims\$alias.exe") {
+                    Write-Host "[OK] Shim created: $alias -> ncat" -ForegroundColor Green
+                } else {
+                    Write-Host "[WARN] Could not create shim $alias (scoop shim add $alias $ncat)" -ForegroundColor Yellow
+                }
+            }
+        }
+    } else {
+        Write-Host "[WARN] nmap not found, skipping nc/netcat shims" -ForegroundColor Yellow
     }
 
     Write-Host ""
