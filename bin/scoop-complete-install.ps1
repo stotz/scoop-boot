@@ -8,8 +8,12 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.9
+    Version: 2.7.10
     Date: 2026-09-30
+
+    Changes in v2.7.10:
+    - MSYS2/GCC: pacman -S is retried up to three times (mirror errors such as
+      HTTP 500 on a signature file abort the whole transaction)
 
     Changes in v2.7.9:
     - FIX: WSL2 detection. wsl.exe output is UTF-16 and was matched with NUL
@@ -660,7 +664,7 @@ function Install-ScoopTools {
     # Install manually if needed:
     #   - Docker Desktop: https://www.docker.com/products/docker-desktop
     #   - Rancher Desktop: https://rancherdesktop.io
-    #   - Podman Desktop: scoop install podman-desktop
+    #   - Podman Desktop: https://podman-desktop.io
     )
 
     # VC++ 2015-2022 runtime: the vcredist2022 post_install needs elevation.
@@ -749,10 +753,15 @@ function Install-ScoopTools {
                 }
             }
 
-            Write-Host "  -> pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor DarkGray
-            & $msysBash -lc 'pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc'
-            if ($LASTEXITCODE -ne 0) {
+            # Package mirrors fail sporadically (HTTP 500 on a single .sig file aborts the
+            # whole transaction). Retry a few times; pacman keeps what it already downloaded.
+            $gccExe = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
+            foreach ($attempt in 1, 2, 3) {
+                Write-Host "  -> pacman -S mingw-w64-ucrt-x86_64-gcc, attempt $attempt" -ForegroundColor DarkGray
+                & $msysBash -lc 'pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc'
+                if ($LASTEXITCODE -eq 0 -and (Test-Path $gccExe)) { break }
                 Write-Host "  [WARN] pacman -S exited with code $LASTEXITCODE" -ForegroundColor Yellow
+                if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
             }
         } finally {
             Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING, Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue
