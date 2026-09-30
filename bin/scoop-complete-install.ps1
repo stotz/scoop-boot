@@ -8,8 +8,15 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.6
+    Version: 2.7.7
     Date: 2026-09-30
+
+    Changes in v2.7.7:
+    - FIX: Bootstrap on a fresh machine (official Scoop installer rejects the
+      non-empty C:\usr). scoop-boot.ps1 v1.11.0 handles it; the manual
+      fallback here applies the same installer patch.
+    - Bootstrap output of scoop-boot.ps1 is no longer discarded
+    - Phase 1 summary wording corrected (file applied, not created)
 
     Changes in v2.7.6:
     - Java: only temurin25-jdk is installed (removed 8, 11, 17, 21, 23)
@@ -300,7 +307,7 @@ function Set-DevelopmentEnvironment {
     Write-Host "=== Phase 1 Complete ===" -ForegroundColor Green
     Write-Host ""
     Write-Host "Environment configured:" -ForegroundColor Cyan
-    Write-Host "  - Configuration file created" -ForegroundColor White
+    Write-Host "  - Environment file(s) applied at Machine scope" -ForegroundColor White
     Write-Host "  - All environment variables set" -ForegroundColor White
     Write-Host ""
     Write-Host "Next step:" -ForegroundColor Yellow
@@ -403,7 +410,7 @@ function Install-ScoopTools {
         Write-Host ""
 
         try {
-            & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap 2>&1 | Out-Null
+            & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap
             Write-Host ""
 
             # Verify bootstrap success
@@ -442,6 +449,19 @@ function Install-ScoopTools {
         try {
             Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $tempInstaller -UseBasicParsing
             Write-Host "[OK] Downloaded Scoop installer" -ForegroundColor Green
+
+            # The official installer aborts when the target directory is not empty.
+            # C:\usr already contains bin\ and etc\ (scoop-boot layout), so that single
+            # check is replaced. Same patch as Get-ScoopInstaller in scoop-boot.ps1.
+            $installerContent = [System.IO.File]::ReadAllText($tempInstaller)
+            $emptyCheck = 'Deny-Install "''$SCOOP_DIR'' exists and is not empty, please specify another path."'
+            $emptyInfo  = 'Write-Host "[INFO] ''$SCOOP_DIR'' is not empty (scoop-boot layout: bin\ and etc\ are expected), continuing"'
+            if ($installerContent.Contains($emptyCheck)) {
+                [System.IO.File]::WriteAllText($tempInstaller, $installerContent.Replace($emptyCheck, $emptyInfo))
+                Write-Host "[OK] Installer prepared (non-empty directory check removed)" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] Installer layout changed upstream; running unpatched" -ForegroundColor Yellow
+            }
 
             Write-Host "[INFO] Installing Scoop core..." -ForegroundColor Gray
 

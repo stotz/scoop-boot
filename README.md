@@ -8,8 +8,8 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.10.0  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.7.6   | Two-phase installation of the full tool set          |
+| `bin/scoop-boot.ps1`               | 1.11.0  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.7.7   | Two-phase installation of the full tool set          |
 | `bin/scoop-complete-reset.ps1`     | 2.1.0   | Remove everything again (processes, files, registry) |
 
 ---
@@ -114,12 +114,12 @@ The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
-### Version: 1.10.0
+### Version: 1.11.0
 ### Lines of Code:
 | lines | program                        |
 |------:|:-------------------------------|
-|  1553 | bin/scoop-boot.ps1             |
-|   866 | bin/scoop-complete-install.ps1 |
+|  1613 | bin/scoop-boot.ps1             |
+|   886 | bin/scoop-complete-install.ps1 |
 |   549 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -204,7 +204,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.7.6
+### Version: 2.7.7
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 

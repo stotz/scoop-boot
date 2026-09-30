@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.10.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.11.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,20 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.10.0
+    Version: 1.11.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.11.0:
+    - FIX: Bootstrap failed on every fresh machine because the official Scoop
+      installer refuses a non-empty target directory, and C:\usr already
+      contains bin\ and etc\ in the scoop-boot layout. The downloaded
+      installer is now patched at that single check (Get-ScoopInstaller).
+    - Installer output is captured and shown when the installation fails
+    - Bootstrap verification checks apps\scoop\current and the shims directory
+      instead of only Get-Command
+    - ListRemove (VAR-=value) only writes and reports when the value was
+      actually present; the change counter no longer counts no-ops
 
     Changes in v1.10.0:
     - List operations (+=, =+, -=) now work for ALL variables (not just PATH)
@@ -68,7 +79,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.10.0"
+$global:ScriptVersion = "1.11.0"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -307,6 +318,39 @@ function Show-Version {
 # BOOTSTRAP FUNCTIONS
 # ============================================================================
 
+function Get-ScoopInstaller {
+    <#
+    .SYNOPSIS
+        Downloads the official Scoop installer and removes its non-empty-directory check.
+    .DESCRIPTION
+        The official installer (https://get.scoop.sh) aborts when the target directory
+        contains any file. In the scoop-boot layout C:\usr already holds bin\ and etc\
+        before Scoop exists, so that check would block every fresh installation.
+        The check is a single Deny-Install line; it is replaced by an informational
+        message. Nothing else in the installer is changed. If the line is not found
+        (installer changed upstream), the installer runs unpatched and a warning is shown.
+    .OUTPUTS
+        Path of the installer script to execute.
+    #>
+    param([string]$OutFile)
+
+    Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $OutFile -UseBasicParsing
+
+    $content = [System.IO.File]::ReadAllText($OutFile)
+    $check = 'Deny-Install "''$SCOOP_DIR'' exists and is not empty, please specify another path."'
+    $info  = 'Write-Host "[INFO] ''$SCOOP_DIR'' is not empty (scoop-boot layout: bin\ and etc\ are expected), continuing"'
+
+    if ($content.Contains($check)) {
+        $content = $content.Replace($check, $info)
+        [System.IO.File]::WriteAllText($OutFile, $content)
+        Write-Success "Installer prepared (non-empty directory check removed)"
+    } else {
+        Write-Warning "Installer layout changed upstream; non-empty directory check not found, running unpatched"
+    }
+
+    return $OutFile
+}
+
 function Invoke-Bootstrap {
     Write-Section "Scoop Bootstrap"
 
@@ -337,23 +381,33 @@ function Invoke-Bootstrap {
 
     # Install Scoop
     Write-Info "Installing Scoop core..."
+    $installerOutput = @()
     try {
-        $scoopInstaller = "$env:TEMP\scoop-install.ps1"
-        Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $scoopInstaller
-        & $scoopInstaller -ScoopDir $global:BaseDir -ScoopGlobalDir "$global:BaseDir\global" -NoProxy
-        Remove-Item $scoopInstaller -Force
-        Write-Success "Scoop core installed"
+        $scoopInstaller = Get-ScoopInstaller -OutFile "$env:TEMP\scoop-install.ps1"
+        $installerOutput = & $scoopInstaller -ScoopDir $global:BaseDir -ScoopGlobalDir "$global:BaseDir\global" -NoProxy 2>&1
+        Remove-Item $scoopInstaller -Force -ErrorAction SilentlyContinue
     }
     catch {
         Write-ErrorMsg "Failed to install Scoop: $_"
         return $false
     }
 
-    # Verify installation
-    $env:Path = "$global:BaseDir\shims;$env:Path"
+    # Verify installation on the file system, then on the PATH
+    $scoopCore  = Join-Path $global:BaseDir "apps\scoop\current\bin\scoop.ps1"
+    $scoopShims = Join-Path $global:BaseDir "shims"
+    if (-not (Test-Path $scoopCore) -or -not (Test-Path $scoopShims)) {
+        Write-ErrorMsg "Scoop installation verification failed"
+        Write-Host "  Expected: $scoopCore" -ForegroundColor Gray
+        Write-Host "  Installer output:" -ForegroundColor Gray
+        foreach ($line in $installerOutput) { Write-Host "    $line" -ForegroundColor DarkGray }
+        return $false
+    }
+    Write-Success "Scoop core installed"
+
+    $env:Path = "$scoopShims;$env:Path"
     $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
     if (-not $scoopCommand) {
-        Write-ErrorMsg "Scoop installation verification failed"
+        Write-ErrorMsg "scoop command not found on PATH after installation ($scoopShims)"
         return $false
     }
 
@@ -620,15 +674,21 @@ function Apply-EnvironmentOperations {
 
             "ListRemove" {
                 $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
+                $currentParts = @()
                 if ($currentValue) {
-                    $parts = $currentValue -split ';' | Where-Object { $_ -and $_ -ne $expandedValue }
-                    $newValue = $parts -join ';'
+                    $currentParts = @($currentValue -split ';' | Where-Object { $_ })
+                }
+                $parts = @($currentParts | Where-Object { $_ -ne $expandedValue })
 
+                if ($parts.Count -eq $currentParts.Count) {
+                    Write-Host "[SKIP] Not in $($op.Name): $expandedValue [$Scope]" -ForegroundColor DarkGray
+                } else {
+                    $newValue = $parts -join ';'
                     if ($DryRun) {
                         Write-DryRun "Remove from $($op.Name): $expandedValue [$Scope from $fileName]"
                     } else {
                         [Environment]::SetEnvironmentVariable($op.Name, $newValue, $Scope)
-                        Write-Success "Removed from $($op.Name) [$Scope]"
+                        Write-Success "Removed from $($op.Name): $expandedValue [$Scope]"
                     }
                     $changes++
                 }
