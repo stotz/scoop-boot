@@ -14,8 +14,11 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
 
 .NOTES
-    Version: 2.3.0
+    Version: 2.3.1
     Date: 2025-01-29
+
+    Changes in v2.3.1:
+    - jetbrainsd (Toolbox 3.x daemon) added to the tray-app stop list
 
     Changes in v2.3.0:
     - FIX: handle64.exe scan failed with "Cannot overwrite variable PID"
@@ -256,7 +259,8 @@ Write-Host ""
 
 # Method 1: Kill known system tray apps first (they always block)
 Write-Host "[INFO] Stopping known system tray applications..." -ForegroundColor Gray
-$systemTrayApps = @('greenshot', 'jetbrains-toolbox', 'everything', 'mousejiggler', 'keyboxd', 'gpg-agent', 'ssh-agent')
+# jetbrainsd: background daemon of JetBrains Toolbox 3.x, separate from the GUI process
+$systemTrayApps = @('greenshot', 'jetbrains-toolbox', 'jetbrainsd', 'everything', 'mousejiggler', 'keyboxd', 'gpg-agent', 'ssh-agent')
 $killedCount = 0
 foreach ($appName in $systemTrayApps) {
     $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue
