@@ -14,8 +14,15 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
 
 .NOTES
-    Version: 2.3.1
+    Version: 2.4.0
     Date: 2025-01-29
+
+    Changes in v2.4.0:
+    - handle64 scan only terminates processes whose image lives under the Scoop
+      directory, plus explorer.exe (shell extensions); explorer.exe is restarted
+      after the directories are removed. Other processes with open handles
+      (Teams, Outlook, Edge) are reported and left running.
+    - The reset's own PowerShell process is never a kill candidate
 
     Changes in v2.3.1:
     - jetbrainsd (Toolbox 3.x daemon) added to the tray-app stop list
@@ -261,6 +268,7 @@ Write-Host ""
 Write-Host "[INFO] Stopping known system tray applications..." -ForegroundColor Gray
 # jetbrainsd: background daemon of JetBrains Toolbox 3.x, separate from the GUI process
 $systemTrayApps = @('greenshot', 'jetbrains-toolbox', 'jetbrainsd', 'everything', 'mousejiggler', 'keyboxd', 'gpg-agent', 'ssh-agent')
+$script:explorerStopped = $false
 $killedCount = 0
 foreach ($appName in $systemTrayApps) {
     $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue
@@ -304,16 +312,36 @@ if (Test-Path $handle64Path) {
         }
 
         if ($processesToKill.Count -gt 0) {
+            # Only processes that belong to Scoop (image under $ScoopDir) are terminated.
+            # explorer.exe is the exception: shell extensions (7-Zip, TortoiseSVN, ...) load
+            # DLLs from $ScoopDir into it, so it must go, and it is restarted after the
+            # directories are gone. Anything else (Teams, Outlook, Edge with a file dialog
+            # open) keeps running; if it blocks the deletion, that is reported below.
             Write-Host "  [FOUND] $($processesToKill.Count) processes with open handles:" -ForegroundColor Yellow
             foreach ($processId in $processesToKill.Keys) {
                 $exeName = $processesToKill[$processId]
-                Write-Host "    - $exeName (PID: $processId)" -ForegroundColor Yellow
+                if ($processId -eq $PID) { continue }
+
+                $imagePath = $null
+                try { $imagePath = (Get-Process -Id $processId -ErrorAction Stop).Path } catch { }
+                $isScoopApp = $imagePath -and ($imagePath -like "$ScoopDir\*")
+                $isExplorer = $exeName -ieq 'explorer.exe'
+
+                if ($isExplorer) {
+                    Write-Host "    - $exeName (PID: $processId): Windows shell, holds Scoop shell extensions; restarted after cleanup" -ForegroundColor Yellow
+                } elseif ($isScoopApp) {
+                    Write-Host "    - $exeName (PID: $processId): Scoop application" -ForegroundColor Yellow
+                } else {
+                    Write-Host "    - $exeName (PID: $processId): not a Scoop application, left running" -ForegroundColor DarkGray
+                    continue
+                }
 
                 try {
                     Stop-Process -Id $processId -Force -ErrorAction Stop
-                    Write-Host "      [OK] Killed PID $processId" -ForegroundColor Green
+                    Write-Host "      [OK] Stopped PID $processId" -ForegroundColor Green
+                    if ($isExplorer) { $script:explorerStopped = $true }
                 } catch {
-                    Write-Host "      [FAIL] Could not kill PID $processId" -ForegroundColor Red
+                    Write-Host "      [FAIL] Could not stop PID $processId" -ForegroundColor Red
                 }
             }
             Start-Sleep -Seconds 2
@@ -482,6 +510,16 @@ if (-not $KeepPersist) {
 
 foreach ($dir in $dirsToRemove) {
     $null = Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
+}
+
+# Bring the desktop back if explorer.exe had to be stopped for the cleanup
+if ($script:explorerStopped) {
+    if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+        Start-Process -FilePath "$env:SystemRoot\explorer.exe"
+        Write-Host "[OK] explorer.exe restarted" -ForegroundColor Green
+    } else {
+        Write-Host "[OK] explorer.exe already running again" -ForegroundColor Gray
+    }
 }
 
 # 8. Clean registry
