@@ -14,8 +14,14 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
 
 .NOTES
-    Version: 2.4.0
+    Version: 2.5.0
     Date: 2025-01-29
+
+    Changes in v2.5.0:
+    - Scoop owns only apps, buckets, cache, persist, shims, global. Variable and
+      PATH cleanup now match those subdirectories instead of everything under
+      C:\usr, so other software installed under C:\usr keeps its environment.
+    - Backups go to C:\usr\backups\<timestamp>; the newest 5 are kept.
 
     Changes in v2.4.0:
     - handle64 scan only terminates processes whose image lives under the Scoop
@@ -61,7 +67,24 @@ param(
 )
 
 $ScoopDir = "C:\usr"
-$BackupDir = "C:\usr_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+$BackupRoot = "$ScoopDir\backups"
+$BackupDir = "$BackupRoot\$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+$BackupsToKeep = 5
+
+# Scoop owns only these subdirectories of $ScoopDir. Everything else under
+# C:\usr (bin, etc, or software the user installed there, e.g. C:\usr\PostgreSQL)
+# is left alone: not deleted, and its PATH entries and variables are kept.
+$ScoopOwnedDirs = @('apps', 'buckets', 'cache', 'persist', 'shims', 'global')
+
+function Test-ScoopOwnedPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    foreach ($dir in $ScoopOwnedDirs) {
+        $prefix = "$ScoopDir\$dir"
+        if ($Path -eq $prefix -or $Path -like "$prefix\*") { return $true }
+    }
+    return $false
+}
 
 Write-Host ""
 Write-Host "=== Scoop Complete Reset ===" -ForegroundColor Red
@@ -417,6 +440,13 @@ Write-Host ">>> Creating backup..." -ForegroundColor Cyan
 if (-not (Test-Path $BackupDir)) {
     New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 }
+# Keep the newest $BackupsToKeep snapshots, drop the rest
+$oldBackups = Get-ChildItem -Path $BackupRoot -Directory -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending | Select-Object -Skip $BackupsToKeep
+foreach ($old in $oldBackups) {
+    Remove-Item $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "[OK] Removed old backup: $($old.Name)" -ForegroundColor Gray
+}
 
 $envVars = @{}
 [System.Environment]::GetEnvironmentVariables("User").Keys | ForEach-Object {
@@ -434,11 +464,13 @@ Write-Host "[OK] Backup created: $BackupDir" -ForegroundColor Green
 
 # 3./4. Clean User and Machine environment variables
 # Two criteria: a fixed list of names that scoop-boot or Scoop set without a path
-# value (options, locale), plus every variable whose value points into $ScoopDir.
-# The second criterion catches env_set entries from any manifest (OPENSSL_*,
-# CATALINA_*, AZURE_CLI_PATH, ...) without maintaining a list per package.
+# value (options, locale), plus every variable whose value points into one of
+# Scoop's own subdirectories (apps, shims, ...). The second criterion catches
+# env_set entries from any manifest (OPENSSL_*, CATALINA_*, AZURE_CLI_PATH, ...)
+# without a list per package, and leaves variables of other software that lives
+# under C:\usr (e.g. an EDB PostgreSQL in C:\usr\PostgreSQL) untouched.
 $varsToRemove = @(
-    'SCOOP', 'SCOOP_GLOBAL', 'SCOOP_CACHE',
+    'SCOOP', 'SCOOP_GLOBAL', 'SCOOP_CACHE', 'USR',
     'JAVA_OPTS', 'GRADLE_OPTS', 'MAVEN_OPTS',
     'GRADLE_USER_HOME', 'M2_REPO',
     'LANG', 'LC_ALL', 'LANGUAGE'
@@ -456,7 +488,7 @@ function Remove-ScoopEnvironmentVariables {
         if ($varsToKeep -contains $name) { continue }
         $value = [string]$all[$name]
         $byName  = $varsToRemove -contains $name
-        $byValue = $value -like "$ScoopDir*" -or $value -like "*;$ScoopDir*"
+        $byValue = @($value -split ';' | Where-Object { Test-ScoopOwnedPath $_ }).Count -gt 0
         if ($byName -or $byValue) {
             [System.Environment]::SetEnvironmentVariable($name, $null, $Scope)
             Write-Host "[OK] Removed $Scope variable: $name" -ForegroundColor Green
@@ -476,7 +508,7 @@ Write-Host ""
 Write-Host ">>> Cleaning User PATH..." -ForegroundColor Cyan
 $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath) {
-    $pathArray = $userPath -split ';' | Where-Object { $_ -notlike "*$ScoopDir*" -and $_ -ne '' }
+    $pathArray = $userPath -split ';' | Where-Object { $_ -ne '' -and -not (Test-ScoopOwnedPath $_) }
     $newPath = $pathArray -join ';'
     [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
     Write-Host "[OK] User PATH cleaned" -ForegroundColor Green
@@ -487,7 +519,7 @@ Write-Host ""
 Write-Host ">>> Cleaning Machine PATH..." -ForegroundColor Cyan
 $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
 if ($machinePath) {
-    $pathArray = $machinePath -split ';' | Where-Object { $_ -notlike "*$ScoopDir*" -and $_ -ne '' }
+    $pathArray = $machinePath -split ';' | Where-Object { $_ -ne '' -and -not (Test-ScoopOwnedPath $_) }
     $newPath = $pathArray -join ';'
     [System.Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
     Write-Host "[OK] Machine PATH cleaned" -ForegroundColor Green

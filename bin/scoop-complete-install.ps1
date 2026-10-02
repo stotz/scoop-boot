@@ -8,8 +8,17 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.7.11
-    Date: 2026-09-30
+    Version: 2.8.0
+    Date: 2026-10-02
+
+    Changes in v2.8.0:
+    - Step 7 delegates to scoop-boot.ps1 --clean-user-scope (removes Scoop's
+      User-scope overrides of variables the system.* file sets, sweeps User PATH
+      entries inside Scoop's subdirectories, applies user.* files)
+    - Phase 1 writes C:\usr\README_scoop_dir_warnings.md explaining which
+      subdirectories belong to Scoop and what a reset removes
+    - Phase 1 no longer sets User-level TMP/TEMP (Machine value is enough and
+      User copies are removed as overrides anyway)
 
     Changes in v2.7.11:
     - Step 4: GCC compile-and-run smoke test with distinct messages for DLL
@@ -225,15 +234,55 @@ function Set-DevelopmentEnvironment {
     [Environment]::SetEnvironmentVariable("TEMP", "C:\tmp", "Machine")
     Write-Host "[OK] Set Machine-level: TMP=C:\tmp, TEMP=C:\tmp" -ForegroundColor Green
 
-    # Set TMP and TEMP at User level (for redundancy)
-    [Environment]::SetEnvironmentVariable("TMP", "C:\tmp", "User")
-    [Environment]::SetEnvironmentVariable("TEMP", "C:\tmp", "User")
-    Write-Host "[OK] Set User-level: TMP=C:\tmp, TEMP=C:\tmp" -ForegroundColor Green
+    # User-level TMP/TEMP are deliberately not set: the .env file sets them at
+    # Machine scope and --clean-user-scope removes User overrides of managed names.
 
     # Apply to current session
     $env:TMP = "C:\tmp"
     $env:TEMP = "C:\tmp"
     Write-Host "[OK] Applied to current session" -ForegroundColor Green
+
+    # Explain the directory layout to whoever looks into C:\usr later
+    $dirReadme = "$ScoopDir\README_scoop_dir_warnings.md"
+    @'
+# C:\usr - read before putting anything here
+
+This directory is the base of a Scoop-managed developer environment set up by
+scoop-boot (https://github.com/stotz/scoop-boot). Scoop is NOT the owner of
+C:\usr; it owns only these subdirectories:
+
+    apps\       installed applications (one folder per app, "current" junction)
+    buckets\    manifest repositories
+    cache\      downloaded installers
+    persist\    application data that survives updates
+    shims\      the executables that are on PATH
+    global\     globally installed apps (rarely used)
+
+scoop-complete-reset.ps1 DELETES all of them. It also removes every environment
+variable whose value points into them and every PATH entry inside them. Nothing
+else is touched.
+
+scoop-boot itself uses:
+
+    bin\        the three scripts
+    etc\        environments\*.env (the source of truth for PATH and variables)
+    backups\    environment backups written by every reset (last 5 kept)
+
+Rules:
+
+- Do not install or copy software into apps\, shims\ or persist\ by hand;
+  the next scoop update or reset will remove or break it.
+- Other software may live in its own directory directly under C:\usr (for
+  example C:\usr\PostgreSQL). scoop-boot leaves it alone, but its PATH entries
+  and variables are then yours to maintain, not the .env file's.
+- Do not set JAVA_HOME, PATH and friends by hand in the Windows dialog. Edit
+  etc\environments\system.<hostname>.<username>.env and run
+  scoop-complete-install.ps1 -SetEnvironment (as Administrator). After
+  scoop update or scoop install, run scoop-boot.ps1 --clean-user-scope.
+- Keep anything you cannot rebuild out of C:\usr or back it up elsewhere;
+  C:\usr\backups holds environment snapshots only, not application data.
+'@ | Set-Content -Path $dirReadme -Encoding ASCII
+    Write-Host "[OK] Wrote $dirReadme" -ForegroundColor Green
     Write-Host ""
     Write-Host ">>> Applying environment configuration..." -ForegroundColor White
     Write-Host ""
@@ -904,95 +953,15 @@ function Install-ScoopTools {
     }
 
     # ============================================================================
-    # STEP 7: CLEANUP USER-SCOPE DUPLICATES
+    # STEP 7: CLEAN USER SCOPE
+    # Scoop wrote JAVA_HOME, GRADLE_USER_HOME, ... and PATH entries into the User
+    # scope during Step 3; User values override the Machine values from the .env
+    # file. scoop-boot.ps1 --clean-user-scope removes them and applies user.* files.
     # ============================================================================
     Write-Host ""
-    Write-Host ">>> Step 7: Cleaning up User-Scope duplicates..." -ForegroundColor White
+    Write-Host ">>> Step 7: Cleaning User scope (Scoop overrides, user.* files)..." -ForegroundColor White
     Write-Host ""
-
-    # Get Machine-scope PATH
-    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
-    $machineEntries = $machinePath -split ';' | Where-Object { $_ -ne '' }
-
-    # Get User-scope PATH
-    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-    $userEntries = $userPath -split ';' | Where-Object { $_ -ne '' }
-
-    # Find entries to remove
-    $toRemove = @()
-
-    # 1. Remove exact duplicates (same in Machine and User)
-    foreach ($userEntry in $userEntries) {
-        foreach ($machineEntry in $machineEntries) {
-            if ($userEntry -eq $machineEntry) {
-                $toRemove += $userEntry
-                break
-            }
-        }
-    }
-
-    # 2. Remove every Scoop-added entry under $ScoopDir. The Machine PATH built from
-    #    the .env file is authoritative and orders the directories deliberately
-    #    (compiler before Git/Perl DLLs, shims first); User entries that Scoop
-    #    prepends (env_add_path) would otherwise take precedence or shadow DLLs.
-    #    Everything Scoop installs is reachable through shims anyway.
-    foreach ($userEntry in $userEntries) {
-        $shouldRemove = $userEntry -like "$ScoopDir\*"
-
-        if ($shouldRemove -and ($toRemove -notcontains $userEntry)) {
-            $toRemove += $userEntry
-        }
-    }
-
-    if ($toRemove.Count -gt 0) {
-        Write-Host "[INFO] Found $($toRemove.Count) entries to remove from User-PATH:" -ForegroundColor Gray
-        foreach ($entry in $toRemove) {
-            Write-Host "  - $entry" -ForegroundColor DarkGray
-        }
-
-        # Remove unwanted entries from User-PATH
-        $cleanedUserEntries = $userEntries | Where-Object { $toRemove -notcontains $_ }
-        $cleanedUserPath = ($cleanedUserEntries -join ';')
-
-        [System.Environment]::SetEnvironmentVariable("Path", $cleanedUserPath, "User")
-        Write-Host "[OK] Removed $($toRemove.Count) entries from User-PATH" -ForegroundColor Green
-    } else {
-        Write-Host "[OK] No entries to remove from User-PATH" -ForegroundColor Green
-    }
-
-    # Get all Machine-scope environment variables
-    $machineVars = @{}
-    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
-    Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
-        $name = $_.Name
-        if ($name -ne 'PSPath' -and $name -ne 'PSParentPath' -and $name -ne 'PSChildName' -and $name -ne 'PSDrive' -and $name -ne 'PSProvider') {
-            $machineVars[$name] = $true
-        }
-    }
-
-    # Get all User-scope environment variables that exist in Machine-scope
-    $userRegPath = "HKCU:\Environment"
-    $duplicateVars = @()
-    Get-ItemProperty -Path $userRegPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | ForEach-Object {
-        $name = $_.Name
-        if ($name -ne 'PSPath' -and $name -ne 'PSParentPath' -and $name -ne 'PSChildName' -and $name -ne 'PSDrive' -and $name -ne 'PSProvider' -and $name -ne 'Path') {
-            if ($machineVars.ContainsKey($name)) {
-                $duplicateVars += $name
-            }
-        }
-    }
-
-    if ($duplicateVars.Count -gt 0) {
-        Write-Host ""
-        Write-Host "[INFO] Found $($duplicateVars.Count) duplicate environment variables in User-Scope:" -ForegroundColor Gray
-        foreach ($varName in $duplicateVars) {
-            Write-Host "  - $varName" -ForegroundColor DarkGray
-            [System.Environment]::SetEnvironmentVariable($varName, $null, "User")
-        }
-        Write-Host "[OK] Removed $($duplicateVars.Count) duplicate variables from User-Scope" -ForegroundColor Green
-    } else {
-        Write-Host "[OK] No duplicate environment variables found" -ForegroundColor Green
-    }
+    & "$ScoopDir\bin\scoop-boot.ps1" --clean-user-scope
 
     Write-Host ""
     if ($failedApps.Count -gt 0) {

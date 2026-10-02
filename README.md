@@ -8,9 +8,9 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.11.1  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.7.11  | Two-phase installation of the full tool set          |
-| `bin/scoop-complete-reset.ps1`     | 2.4.0   | Remove everything again (processes, files, registry) |
+| `bin/scoop-boot.ps1`               | 1.12.0  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.8.0   | Two-phase installation of the full tool set          |
+| `bin/scoop-complete-reset.ps1`     | 2.5.0   | Remove everything again (processes, files, registry) |
 
 ---
 
@@ -41,9 +41,13 @@ Invoke-WebRequest -Uri "$base/bin/scoop-boot.ps1"             -OutFile C:\usr\bi
 Invoke-WebRequest -Uri "$base/bin/scoop-complete-install.ps1" -OutFile C:\usr\bin\scoop-complete-install.ps1
 Invoke-WebRequest -Uri "$base/bin/scoop-complete-reset.ps1"   -OutFile C:\usr\bin\scoop-complete-reset.ps1
 
-# Machine-scope environment file, named after this host and user (lowercase)
-$envFile = "C:\usr\etc\environments\system.$($env:COMPUTERNAME.ToLower()).$($env:USERNAME.ToLower()).env"
+# Environment files, named after this host and user (lowercase):
+# system.* = Machine scope (the source of truth), user.* = User scope (your additions)
+$envName  = "$($env:COMPUTERNAME.ToLower()).$($env:USERNAME.ToLower()).env"
+$envFile  = "C:\usr\etc\environments\system.$envName"
+$userFile = "C:\usr\etc\environments\user.$envName"
 Invoke-WebRequest -Uri "$base/etc/environments/system.hostname.username.env" -OutFile $envFile
+Invoke-WebRequest -Uri "$base/etc/environments/user.hostname.username.env"   -OutFile $userFile
 
 # Optional: review paths and tool versions before applying.
 # Full path on purpose: Git's usr\bin (in PATH once Git is installed) contains an
@@ -84,6 +88,31 @@ node --version     # v26.x
 scoop-boot.ps1 --env-status
 ```
 
+### Keeping it correct: after scoop update / scoop install
+
+Scoop writes `JAVA_HOME`, `GRADLE_USER_HOME`, `ANT_HOME`, ... and PATH entries into the
+User scope on every install and update. Windows resolves User variables before Machine
+variables, so the last installed JDK silently wins over the `.env` file. One command
+restores the file as the source of truth (no admin needed):
+
+```powershell
+scoop update -a
+scoop-boot.ps1 --clean-user-scope
+```
+
+It removes User PATH entries inside Scoop's directories, removes User variables whose
+name the `system.*` file sets, and applies the `user.*` file. When the `system.*` file
+itself changed, run Phase 1 again instead (`-SetEnvironment`, as Administrator); it
+sweeps and rebuilds the Machine PATH and then cleans the User scope as well.
+
+### What belongs to Scoop under C:\usr
+
+Only `apps`, `buckets`, `cache`, `persist`, `shims` and `global`. `bin` and `etc` belong
+to scoop-boot. Anything else you put under `C:\usr` (an EDB PostgreSQL, OSGeo4W, your
+own `workspace`) is left alone by every script, including the reset; its PATH entries
+and variables are yours to maintain. Phase 1 writes `C:\usr\README_scoop_dir_warnings.md`
+with the same rules for whoever looks into the directory later.
+
 ### Start over
 
 ```powershell
@@ -117,13 +146,13 @@ The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
-### Version: 1.11.1
+### Version: 1.12.0
 ### Lines of Code:
 | lines | program                        |
 |------:|:-------------------------------|
-|  1621 | bin/scoop-boot.ps1             |
-|  1039 | bin/scoop-complete-install.ps1 |
-|   595 | bin/scoop-complete-reset.ps1   |
+|  1765 | bin/scoop-boot.ps1             |
+|  1008 | bin/scoop-complete-install.ps1 |
+|   627 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
 - **Bootstrap Scoop** with essential tools
@@ -148,12 +177,19 @@ The sections below describe each script in detail.
 
 ### Environment File System:
 ```
-Load Order (later overrides earlier):
+Load Order:
 1. system.default.env              # Machine scope (needs admin)
-2. system.HOSTNAME.USERNAME.env    # Machine scope (needs admin)
-3. user.default.env                # User scope (RECOMMENDED)
-4. user.HOSTNAME.USERNAME.env      # User scope (highest priority)
+2. system.HOSTNAME.USERNAME.env    # Machine scope (needs admin) - the source of truth
+3. user.default.env                # User scope
+4. user.HOSTNAME.USERNAME.env      # User scope - additions, applied by --clean-user-scope
 ```
+
+Before the Machine files are applied, every Machine PATH entry inside Scoop's
+directories (apps, buckets, cache, persist, shims, global) is swept, so the files
+rebuild the PATH order from scratch. Afterwards the User scope is cleaned: Scoop's
+User PATH entries inside those directories and User variables whose name a system
+file sets are removed (they would override the Machine value), then the user files
+are applied. `--clean-user-scope` runs that last part alone, without admin.
 
 ### Environment File Syntax:
 ```ini
@@ -207,7 +243,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.7.11
+### Version: 2.8.0
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
@@ -310,10 +346,10 @@ What it does:
 - JetBrains Toolbox
 - Greenshot
 
-#### Step 7: Cleanup User-Scope Duplicates
-- Removes duplicate PATH entries
-- Removes duplicate environment variables
-- Optimizes Machine vs User scope variables
+#### Step 7: Clean User Scope
+- Runs `scoop-boot.ps1 --clean-user-scope`: removes the User PATH entries and the
+  User variables (JAVA_HOME, GRADLE_USER_HOME, ...) that Scoop wrote during Step 3
+  wherever the system file sets the same name, then applies the user.* file
 
 ### Key Features:
 - **Automatic fallback** when scoop-boot.ps1 fails
@@ -326,7 +362,7 @@ What it does:
 
 ## 3. scoop-complete-reset.ps1 (Safe Cleanup)
 
-### Version: 2.4.0
+### Version: 2.5.0
 ### Lines of Code: see table above
 
 ### Purpose:
@@ -350,7 +386,7 @@ Complete cleanup and removal of Scoop installation
 #### 2. Creates Backup
 - User environment variables → user_env_backup.json
 - Machine environment variables → machine_env_backup.json
-- Location: C:\usr_backup_[timestamp]
+- Location: C:\usr\backups\[timestamp] (newest 5 kept)
 
 #### 3. Cleans Environment Variables
 **Removes from User and Machine scope:**

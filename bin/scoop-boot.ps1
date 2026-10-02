@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.11.1 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.12.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,23 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.11.1
+    Version: 1.12.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.12.0:
+    - NEW: --clean-user-scope. Scoop writes JAVA_HOME, GRADLE_USER_HOME, ANT_HOME,
+      ... and PATH entries into the User scope on every install/update; User
+      values override Machine values, so the system.* file was silently defeated.
+      The command removes User PATH entries inside Scoop's subdirectories and
+      User variables whose name the system.* files set, then applies user.* files.
+      No admin needed; run after scoop update / scoop install.
+    - --apply-env sweeps Scoop entries from the Machine PATH before applying the
+      system.* files (the manual PATH-= cleanup block is no longer needed for
+      Scoop directories) and runs --clean-user-scope afterwards.
+    - Scoop's subdirectories are apps, buckets, cache, persist, shims, global;
+      nothing else under the base directory is treated as Scoop's.
+    - WARN on unresolved $VAR references instead of writing the literal text
 
     Changes in v1.11.1:
     - Bootstrap: 7zip before git (git depends on 7zip; avoids the duplicate install)
@@ -84,10 +98,15 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.11.1"
+$global:ScriptVersion = "1.12.0"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
+
+# Subdirectories of the base directory that belong to Scoop. Only these are
+# cleaned up, swept from PATH or deleted; everything else under the base
+# directory (bin, etc, or whatever the user installs there) is not Scoop's.
+$global:ScoopOwnedDirs = @('apps', 'buckets', 'cache', 'persist', 'shims', 'global')
 $global:BackupDir = Join-Path $global:EnvDir "backups"
 $global:TemplateUrl = "https://raw.githubusercontent.com/stotz/scoop-boot/refs/heads/main/etc/environments/template-default.env"
 
@@ -106,6 +125,7 @@ $global:ParsedArgs = @{
     EnvStatus = $false
     InitEnv = $null
     ApplyEnv = $false
+    CleanUserScope = $false
     DryRun = $false
     Rollback = $false
     Install = @()
@@ -137,6 +157,7 @@ function Parse-Arguments {
                 }
             }
             '^--apply-env$' { $global:ParsedArgs.ApplyEnv = $true }
+            '^--clean-user-scope$' { $global:ParsedArgs.CleanUserScope = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
             '^--rollback$' { $global:ParsedArgs.Rollback = $true }
             '^--install$' {
@@ -291,7 +312,8 @@ function Show-Help {
     Write-Host "  --environment        Show environment variables"
     Write-Host "  --env-status         Show environment configuration status"
     Write-Host "  --init-env=FILE      Create environment configuration file"
-    Write-Host "  --apply-env          Apply environment configuration"
+    Write-Host "  --apply-env          Apply environment configuration (system.* needs admin)"
+    Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no admin)"
     Write-Host "  --dry-run            Show what would be changed"
     Write-Host "  --rollback           Rollback to previous configuration"
     Write-Host "  --install APP...     Install applications"
@@ -620,6 +642,9 @@ function Apply-EnvironmentOperations {
 
     foreach ($op in $Operations) {
         $expandedValue = if ($op.Value) { Expand-EnvironmentVariables -Value $op.Value } else { $null }
+        if ($expandedValue -and $expandedValue -match '\$\{?[A-Z_][A-Z0-9_]*\}?') {
+            Write-Warning "$($op.Name): unresolved variable reference in '$expandedValue' [$fileName]; define it earlier in the file or write the value out"
+        }
 
         switch ($op.Type) {
             "Set" {
@@ -707,6 +732,111 @@ function Apply-EnvironmentOperations {
     return $changes
 }
 
+function Test-ScoopOwnedPath {
+    <#
+    .SYNOPSIS
+        True when a path lies inside one of Scoop's own subdirectories (apps, shims, ...).
+    #>
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    foreach ($dir in $global:ScoopOwnedDirs) {
+        $prefix = Join-Path $global:BaseDir $dir
+        if ($Path -eq $prefix -or $Path -like "$prefix\*") { return $true }
+    }
+    return $false
+}
+
+function Remove-ScoopPathEntries {
+    <#
+    .SYNOPSIS
+        Removes every PATH entry inside Scoop's own subdirectories from one scope.
+    .DESCRIPTION
+        Scoop prepends env_add_path entries to the User PATH on every install and
+        update; scoop reset does the same. The .env files are the single source of
+        truth for these directories, so stale entries are swept before (Machine)
+        or after (User) the files are applied. Entries outside the Scoop
+        subdirectories (other software installed under the base directory) are
+        never touched.
+    #>
+    param([string]$Scope, [bool]$DryRun = $false)
+
+    $current = [Environment]::GetEnvironmentVariable('Path', $Scope)
+    if (-not $current) { return 0 }
+    $parts = @($current -split ';' | Where-Object { $_ })
+    $keep = @($parts | Where-Object { -not (Test-ScoopOwnedPath $_) })
+    $removed = @($parts | Where-Object { Test-ScoopOwnedPath $_ })
+    foreach ($entry in $removed) {
+        if ($DryRun) { Write-DryRun "Remove from PATH: $entry [$Scope]" }
+        else { Write-Success "Removed from PATH: $entry [$Scope]" }
+    }
+    if ($removed.Count -gt 0 -and -not $DryRun) {
+        [Environment]::SetEnvironmentVariable('Path', ($keep -join ';'), $Scope)
+    }
+    return $removed.Count
+}
+
+function Get-SystemManagedVariableNames {
+    <#
+    .SYNOPSIS
+        Names of all variables that the system.* files set at Machine scope.
+    #>
+    $names = @()
+    foreach ($file in (Get-EnvironmentFiles | Where-Object { $_.Scope -eq 'Machine' })) {
+        foreach ($op in (Read-EnvironmentFile -FilePath $file.Path)) {
+            if ($op.Type -eq 'Set' -and $op.Name -ne 'Path') { $names += $op.Name }
+        }
+    }
+    return @($names | Select-Object -Unique)
+}
+
+function Invoke-CleanUserScope {
+    <#
+    .SYNOPSIS
+        Removes Scoop's User-scope overrides and applies the user.* files.
+    .DESCRIPTION
+        Windows resolves a variable from the User scope before the Machine scope
+        (PATH is the exception: Machine first, then User appended). Scoop writes
+        JAVA_HOME, GRADLE_USER_HOME, ANT_HOME, ... and PATH entries into the User
+        scope on install and update, which silently overrides the values from the
+        system.* file. This command restores the file as the source of truth:
+          1. User PATH entries inside Scoop's subdirectories are removed
+          2. User variables whose name the system.* files set at Machine scope are removed
+          3. user.* files are applied (User scope)
+        Needs no administrator rights. Run it after scoop update / scoop install.
+    #>
+    param([bool]$DryRun = $false)
+
+    if ($DryRun) { Write-Section "Clean User Scope (DRY RUN)" } else { Write-Section "Clean User Scope" }
+    Write-Info "User scope of: $([Environment]::UserName)"
+
+    $changes = 0
+    $changes += Remove-ScoopPathEntries -Scope 'User' -DryRun $DryRun
+
+    $managed = Get-SystemManagedVariableNames
+    foreach ($name in $managed) {
+        $userValue = [Environment]::GetEnvironmentVariable($name, 'User')
+        if ($null -ne $userValue) {
+            if ($DryRun) { Write-DryRun "Remove User override: $name = $userValue (Machine value from system.* wins)" }
+            else {
+                [Environment]::SetEnvironmentVariable($name, $null, 'User')
+                Write-Success "Removed User override: $name (was: $userValue)"
+            }
+            $changes++
+        }
+    }
+
+    foreach ($file in (Get-EnvironmentFiles | Where-Object { $_.Scope -eq 'User' })) {
+        $fileName = Split-Path -Leaf $file.Path
+        Write-Info "Processing: $fileName"
+        $operations = Read-EnvironmentFile -FilePath $file.Path
+        $changes += Apply-EnvironmentOperations -Operations $operations -Scope 'User' -SourceFile $file.Path -DryRun $DryRun
+    }
+
+    if ($changes -eq 0) { Write-Success "User scope is clean" }
+    else { Write-Info "User scope: $changes change(s)" }
+    return $changes
+}
+
 function Invoke-ApplyEnv {
     param(
         [bool]$DryRun = $false,
@@ -744,9 +874,15 @@ function Invoke-ApplyEnv {
         return
     }
 
-    # Process each file
+    # Process each file. Before the Machine files, every Machine PATH entry inside
+    # Scoop's subdirectories is swept so that the files rebuild the order from
+    # scratch; stale entries from earlier file versions cannot survive.
     $totalChanges = 0
-    foreach ($file in $envFiles) {
+    if ($hasSystemFiles) {
+        Write-Info "Sweeping Scoop entries from Machine PATH (rebuilt from the system.* files)"
+        $totalChanges += Remove-ScoopPathEntries -Scope 'Machine' -DryRun $DryRun
+    }
+    foreach ($file in ($envFiles | Where-Object { $_.Scope -eq 'Machine' })) {
         $fileName = Split-Path -Leaf $file.Path
         Write-Info "Processing: $fileName"
 
@@ -754,6 +890,9 @@ function Invoke-ApplyEnv {
         $changes = Apply-EnvironmentOperations -Operations $operations -Scope $file.Scope -SourceFile $file.Path -DryRun $DryRun
         $totalChanges += $changes
     }
+
+    # User scope: Scoop's overrides go, then the user.* files are applied
+    $totalChanges += Invoke-CleanUserScope -DryRun $DryRun
 
     if ($DryRun) {
         Write-Info "DRY RUN: Would apply $totalChanges changes"
@@ -1602,6 +1741,11 @@ if ($null -ne $global:ParsedArgs.InitEnv) {
 
 if ($global:ParsedArgs.ApplyEnv) {
     Invoke-ApplyEnv -DryRun $global:ParsedArgs.DryRun -Rollback $global:ParsedArgs.Rollback
+    exit 0
+}
+
+if ($global:ParsedArgs.CleanUserScope) {
+    $null = Invoke-CleanUserScope -DryRun $global:ParsedArgs.DryRun
     exit 0
 }
 
