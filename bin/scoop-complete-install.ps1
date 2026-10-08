@@ -8,8 +8,18 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.8.0
-    Date: 2026-10-02
+    Version: 2.9.0
+    Date: 2026-10-08
+
+    Changes in v2.9.0:
+    - Version banner and daily log via scoop-boot.ps1 (library mode):
+      C:\usr\logs\scoopboot\<yyyyMMdd>.log
+    - FIX: bootstrap success was judged by apps\git existing; a failed
+      extraction leaves that directory. Now apps\git\current\cmd\git.exe is
+      required, and Phase 2 stops with FATAL when git is not usable instead of
+      producing one error per package.
+    - FIX: bucket add and the Temurin reset reported [OK] regardless of the
+      result; both are verified now, a missing bucket is listed as failure.
 
     Changes in v2.8.0:
     - Step 7 delegates to scoop-boot.ps1 --clean-user-scope (removes Scoop's
@@ -103,6 +113,19 @@ param(
 )
 
 $ScoopDir = "C:\usr"
+$InstallVersion = "2.9.0"
+
+# Logging and version banner come from scoop-boot.ps1 (library mode). Without it
+# the script still works, but only prints to the console.
+$global:ScoopBootLibraryOnly = $true
+try { . "$ScoopDir\bin\scoop-boot.ps1" } catch { } finally { $global:ScoopBootLibraryOnly = $false }
+$installMode = if ($SetEnvironment) { '-SetEnvironment' } elseif ($InstallTools) { '-InstallTools' } else { '' }
+if (Get-Command Initialize-ScoopBootLog -ErrorAction SilentlyContinue) {
+    Initialize-ScoopBootLog -ScriptName 'scoop-complete-install.ps1' -Version $InstallVersion -Mode $installMode -ScriptPath $PSCommandPath -Arguments @($PSBoundParameters.Keys)
+} else {
+    Write-Host "scoop-complete-install.ps1 $InstallVersion" -ForegroundColor DarkCyan
+    Write-Host "[WARN] $ScoopDir\bin\scoop-boot.ps1 not found: no log file, console output only" -ForegroundColor Yellow
+}
 
 # ============================================================================
 # HELPER: Robust WSL2 Detection
@@ -267,6 +290,7 @@ scoop-boot itself uses:
     bin\        the three scripts
     etc\        environments\*.env (the source of truth for PATH and variables)
     backups\    environment backups written by every reset (last 5 kept)
+    logs\       daily logs of the three scripts (60 days kept)
 
 Rules:
 
@@ -504,10 +528,13 @@ function Install-ScoopTools {
             & "$ScoopDir\bin\scoop-boot.ps1" --bootstrap
             Write-Host ""
 
-            # Verify bootstrap success
-            if ((Test-Path "$ScoopDir\apps\scoop") -and (Test-Path "$ScoopDir\apps\git")) {
+            # Verify bootstrap success: scoop core and a usable git (apps\git\current is the
+            # junction Scoop creates only after a successful extraction)
+            if ((Test-Path "$ScoopDir\apps\scoop\current") -and (Test-Path "$ScoopDir\apps\git\current\cmd\git.exe")) {
                 Write-Host "[OK] Bootstrap via scoop-boot.ps1 successful!" -ForegroundColor Green
                 $bootstrapSuccess = $true
+            } else {
+                Write-Host "[ERROR] Bootstrap via scoop-boot.ps1 did not produce a usable git" -ForegroundColor Red
             }
         } catch {
             Write-Host "[WARN] scoop-boot.ps1 bootstrap failed, using fallback..." -ForegroundColor Yellow
@@ -615,8 +642,10 @@ function Install-ScoopTools {
         exit 1
     }
 
-    if (-not (Test-Path "$ScoopDir\apps\git")) {
-        Write-Host "[ERROR] Git not found after bootstrap!" -ForegroundColor Red
+    if (-not (Test-Path "$ScoopDir\apps\git\current\cmd\git.exe")) {
+        Write-Host "[FATAL] git could not be installed. Scoop cannot add buckets or install anything without it." -ForegroundColor Red
+        Write-Host "        See the bootstrap messages above. If 7z.exe or git.exe were refused by Windows," -ForegroundColor Gray
+        Write-Host "        endpoint security blocks newly released binaries (Defender event 1121)." -ForegroundColor Gray
         exit 1
     }
 
@@ -637,14 +666,20 @@ function Install-ScoopTools {
     Write-Host ""
 
     # Bootstrap already added main + extras, we add java + versions
+    $failedApps = @()
     $additionalBuckets = @('java', 'versions')
     foreach ($bucket in $additionalBuckets) {
         Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
-        $output = scoop bucket add $bucket 2>&1
-        if ($output -match 'already exists') {
+        if (Test-Path "$ScoopDir\buckets\$bucket\bucket") {
             Write-Host "[OK] Bucket already exists: $bucket" -ForegroundColor Gray
-        } else {
+            continue
+        }
+        scoop bucket add $bucket
+        if (Test-Path "$ScoopDir\buckets\$bucket\bucket") {
             Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Bucket not added: $bucket (packages from it will fail below)" -ForegroundColor Red
+            $failedApps += "bucket $bucket"
         }
     }
 
@@ -732,7 +767,6 @@ function Install-ScoopTools {
         $apps = $apps | Where-Object { $_ -ne 'vcredist2022' }
     }
 
-    $failedApps = @()
     foreach ($app in $apps) {
         $appDir = "$ScoopDir\apps\$app\current"
         if (Test-Path $appDir) {
@@ -763,9 +797,13 @@ function Install-ScoopTools {
     Write-Host ""
 
     # Set default Java version
-    Write-Host "[INFO] Setting default Java to Temurin 25..." -ForegroundColor Gray
-    scoop reset temurin25-jdk 2>&1 | Out-Null
-    Write-Host "[OK] Default Java set to Temurin 25" -ForegroundColor Green
+    if (Test-Path "$ScoopDir\apps\temurin25-jdk\current\bin\java.exe") {
+        Write-Host "[INFO] Setting default Java to Temurin 25..." -ForegroundColor Gray
+        scoop reset temurin25-jdk 2>&1 | Out-Null
+        Write-Host "[OK] Default Java set to Temurin 25" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] temurin25-jdk is not installed, default Java not set" -ForegroundColor Yellow
+    }
 
     # VC++ runtime: verify the result of the vcredist2022 post_install (needs elevation)
     $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue

@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.12.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.13.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,20 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.12.0
+    Version: 1.13.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.13.0:
+    - Logging: every Write-Host is mirrored to C:\usr\logs\scoopboot\<yyyyMMdd>.log
+      with timestamp, script, version and level; session header with host, user,
+      admin, Windows and PowerShell version, script hash and arguments; logs older
+      than 60 days are pruned. The other two scripts dot-source this file in
+      library mode ($global:ScoopBootLibraryOnly) and share the same log.
+    - Version banner with the script's SHA-256 (first 8 digits) on every start
+    - Bootstrap: 7z.exe and git.exe are started once right after their install;
+      "Access is denied" (endpoint security blocking a new release) is reported
+      as FATAL with the cause, instead of 60 follow-up extraction errors
 
     Changes in v1.12.0:
     - NEW: --clean-user-scope. Scoop writes JAVA_HOME, GRADLE_USER_HOME, ANT_HOME,
@@ -83,8 +94,15 @@
 
 param ()  # Required for custom parsing - no positional parameters
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+# Library mode: scoop-complete-install.ps1 and scoop-complete-reset.ps1 dot-source
+# this file with $global:ScoopBootLibraryOnly = $true to get the logging functions.
+# In that case nothing below the function definitions runs, and the strict mode /
+# error preference of this script must not leak into the caller.
+$script:LibraryOnly = (Test-Path variable:global:ScoopBootLibraryOnly) -and $global:ScoopBootLibraryOnly
+if (-not $script:LibraryOnly) {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = "Stop"
+}
 
 # Validate PowerShell version
 if ($PSVersionTable.PSVersion.Major -lt 5 -or
@@ -98,7 +116,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.12.0"
+$global:ScriptVersion = "1.13.0"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -107,6 +125,107 @@ $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
 # cleaned up, swept from PATH or deleted; everything else under the base
 # directory (bin, etc, or whatever the user installs there) is not Scoop's.
 $global:ScoopOwnedDirs = @('apps', 'buckets', 'cache', 'persist', 'shims', 'global')
+
+# ============================================================================
+# LOGGING
+# Shared by all three scripts (the other two dot-source this file in library
+# mode). Every Write-Host call is mirrored into a daily log file:
+#   C:\usr\logs\scoopboot\<yyyyMMdd>.log
+#   <timestamp> <script [mode]> (<version>) [INFO|WARN|ERROR|FATAL] <text>
+# The level is derived from the message prefix ([OK]/[INFO] -> INFO, [WARN] ->
+# WARN, [ERROR]/[FAIL] -> ERROR, [FATAL] -> FATAL). Console output is unchanged.
+# Scoop itself runs in-process (scoop.ps1), so its messages are logged as well;
+# output of external tools (pacman, msiexec, reg) is not.
+# ============================================================================
+$global:ScoopBootLogDir = Join-Path $global:BaseDir "logs\scoopboot"
+$global:ScoopBootLogRetentionDays = 60
+if (-not (Test-Path variable:global:ScoopBootLogFile)) { $global:ScoopBootLogFile = $null }
+$script:ScoopBootLogScript  = 'scoop-boot.ps1'
+$script:ScoopBootLogVersion = '?'
+
+function Get-FileSha256Short {
+    param([string]$Path)
+    try { return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.Substring(0, 8).ToLower() } catch { return 'unknown' }
+}
+
+function Get-ScoopBootLogLevel {
+    param([string]$Text)
+    if ($Text -match '^\s*\[FATAL\]') { return 'FATAL' }
+    if ($Text -match '^\s*(\[ERROR\]|\[FAIL\]|ERROR\b)') { return 'ERROR' }
+    if ($Text -match '^\s*(\[WARN\]|WARN\b)') { return 'WARN' }
+    return 'INFO'
+}
+
+function Write-ScoopBootLogLine {
+    param([string]$Text, [string]$Level = '')
+    if (-not $global:ScoopBootLogFile) { return }
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    if (-not $Level) { $Level = Get-ScoopBootLogLevel -Text $Text }
+    $stamp = Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'
+    foreach ($line in ($Text -split "`r?`n")) {
+        if (-not $line.Trim()) { continue }
+        $out = "$stamp $script:ScoopBootLogScript ($script:ScoopBootLogVersion) [$Level] $($line.TrimEnd())"
+        try { [System.IO.File]::AppendAllText($global:ScoopBootLogFile, $out + "`n", [System.Text.Encoding]::UTF8) } catch { }
+    }
+}
+
+function Write-Host {
+    <#
+    .SYNOPSIS
+        Drop-in replacement for Write-Host that also appends the text to the daily log.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, ValueFromPipeline = $true, ValueFromRemainingArguments = $true)]
+        [object]$Object,
+        [switch]$NoNewline,
+        [object]$Separator,
+        [ConsoleColor]$ForegroundColor,
+        [ConsoleColor]$BackgroundColor
+    )
+    process {
+        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+        if ($null -ne $Object) { Write-ScoopBootLogLine -Text ([string]::Join(' ', @($Object))) }
+    }
+}
+
+function Initialize-ScoopBootLog {
+    <#
+    .SYNOPSIS
+        Opens today's log file, prunes old logs, prints the version banner and writes a session header.
+    .PARAMETER ScriptPath
+        Path of the running script; its SHA-256 (first 8 hex digits) goes into the banner so
+        that a log always tells which build of the script produced it.
+    #>
+    param(
+        [string]$ScriptName,
+        [string]$Version,
+        [string]$Mode = '',
+        [string]$ScriptPath = '',
+        [string[]]$Arguments = @()
+    )
+    $script:ScoopBootLogScript  = if ($Mode) { "$ScriptName $Mode" } else { $ScriptName }
+    $script:ScoopBootLogVersion = $Version
+
+    $hash = if ($ScriptPath) { Get-FileSha256Short -Path $ScriptPath } else { 'unknown' }
+    try {
+        if (-not (Test-Path $global:ScoopBootLogDir)) { New-Item -ItemType Directory -Path $global:ScoopBootLogDir -Force | Out-Null }
+        $global:ScoopBootLogFile = Join-Path $global:ScoopBootLogDir ("{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+        Get-ChildItem -Path $global:ScoopBootLogDir -Filter '*.log' -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$global:ScoopBootLogRetentionDays) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch {
+        $global:ScoopBootLogFile = $null
+    }
+
+    $logNote = if ($global:ScoopBootLogFile) { "log: $global:ScoopBootLogFile" } else { "log: not writable, console only" }
+    Microsoft.PowerShell.Utility\Write-Host "$ScriptName $Version (sha256 $hash) | $logNote" -ForegroundColor DarkCyan
+
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $os = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Version } catch { [Environment]::OSVersion.Version.ToString() }
+    Write-ScoopBootLogLine -Level 'INFO' -Text "=== session start: $script:ScoopBootLogScript $Version (sha256 $hash) ==="
+    Write-ScoopBootLogLine -Level 'INFO' -Text "host=$env:COMPUTERNAME user=$env:USERDOMAIN\$env:USERNAME admin=$isAdmin windows=$os powershell=$($PSVersionTable.PSVersion) script=$ScriptPath args=[$($Arguments -join ' ')]"
+}
 $global:BackupDir = Join-Path $global:EnvDir "backups"
 $global:TemplateUrl = "https://raw.githubusercontent.com/stotz/scoop-boot/refs/heads/main/etc/environments/template-default.env"
 
@@ -440,13 +559,30 @@ function Invoke-Bootstrap {
 
     # Install essential tools
     Write-Info "Installing essential tools..."
-    $essentialTools = @('7zip', 'git')
+    # After each install the main executable is started once. On managed machines
+    # endpoint security (Defender ASR rule 01443614, prevalence/age criterion) may
+    # refuse a freshly released binary; for 7z.exe that breaks every extraction
+    # that follows, so it is better to stop here with the real cause.
+    $essentialTools = @(
+        @{ Name = '7zip'; Exe = 'apps\7zip\current\7z.exe';      Args = @() },
+        @{ Name = 'git';  Exe = 'apps\git\current\cmd\git.exe';  Args = @('--version') }
+    )
     foreach ($tool in $essentialTools) {
-        & scoop install $tool 2>&1 | Out-Null
-        if (Test-Path (Join-Path $global:BaseDir "apps\$tool\current")) {
-            Write-Success "$tool installed"
-        } else {
-            Write-ErrorMsg "Failed to install $tool (required)"
+        & scoop install $tool.Name 2>&1 | Out-Null
+        if (-not (Test-Path (Join-Path $global:BaseDir "apps\$($tool.Name)\current"))) {
+            Write-ErrorMsg "Failed to install $($tool.Name) (required)"
+            return $false
+        }
+        $exe = Join-Path $global:BaseDir $tool.Exe
+        try {
+            & $exe @($tool.Args) 2>&1 | Out-Null
+            Write-Success "$($tool.Name) installed and runs"
+        } catch {
+            Write-Host "[FATAL] $($tool.Name) is installed but Windows refuses to start $exe" -ForegroundColor Red
+            Write-Host "        $($_.Exception.Message)" -ForegroundColor Gray
+            Write-Host "        Endpoint security (Defender ASR rule 01443614) blocks newly released binaries on this machine." -ForegroundColor Gray
+            Write-Host "        Nothing can be installed until C:\usr is excluded. Check the Defender log for event 1121:" -ForegroundColor Gray
+            Write-Host "        Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1121}" -ForegroundColor Gray
             return $false
         }
     }
@@ -1689,6 +1825,11 @@ function Invoke-Install {
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
+
+# Library mode: the caller only wanted the functions
+if ($script:LibraryOnly) { return }
+
+Initialize-ScoopBootLog -ScriptName 'scoop-boot.ps1' -Version $global:ScriptVersion -ScriptPath $PSCommandPath -Arguments $args
 
 # Parse arguments
 Parse-Arguments -Arguments $args

@@ -8,9 +8,9 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.12.0  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.8.0   | Two-phase installation of the full tool set          |
-| `bin/scoop-complete-reset.ps1`     | 2.5.0   | Remove everything again (processes, files, registry) |
+| `bin/scoop-boot.ps1`               | 1.13.0  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.9.0   | Two-phase installation of the full tool set          |
+| `bin/scoop-complete-reset.ps1`     | 2.6.0   | Remove everything again (processes, files, registry) |
 
 ---
 
@@ -105,6 +105,22 @@ name the `system.*` file sets, and applies the `user.*` file. When the `system.*
 itself changed, run Phase 1 again instead (`-SetEnvironment`, as Administrator); it
 sweeps and rebuilds the Machine PATH and then cleans the User scope as well.
 
+### Logs
+
+Every script prints a banner with its version and the first eight digits of its own
+SHA-256, and mirrors all console output into a daily log:
+
+```
+C:\usr\logs\scoopboot\<yyyyMMdd>.log
+2026-10-08T13:21:04 scoop-complete-install.ps1 -InstallTools (2.9.0) [INFO] [OK] Installed: maven
+```
+
+Phase 1 (admin) and Phase 2 (user) write to the same file; the script field carries
+the mode. Scoop's own messages are included (it runs in-process); output of pacman,
+msiexec and reg is not. Each session starts with host, user, admin flag, Windows and
+PowerShell version, script hash and arguments. Logs older than 60 days are removed.
+`C:\usr\logs` is not a Scoop directory; the reset leaves it alone.
+
 ### What belongs to Scoop under C:\usr
 
 Only `apps`, `buckets`, `cache`, `persist`, `shims` and `global`. `bin` and `etc` belong
@@ -146,13 +162,13 @@ The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
-### Version: 1.12.0
+### Version: 1.13.0
 ### Lines of Code:
 | lines | program                        |
 |------:|:-------------------------------|
-|  1765 | bin/scoop-boot.ps1             |
-|  1008 | bin/scoop-complete-install.ps1 |
-|   627 | bin/scoop-complete-reset.ps1   |
+|  1906 | bin/scoop-boot.ps1             |
+|  1045 | bin/scoop-complete-install.ps1 |
+|   642 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
 - **Bootstrap Scoop** with essential tools
@@ -243,7 +259,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.8.0
+### Version: 2.9.0
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
@@ -362,7 +378,7 @@ What it does:
 
 ## 3. scoop-complete-reset.ps1 (Safe Cleanup)
 
-### Version: 2.5.0
+### Version: 2.6.0
 ### Lines of Code: see table above
 
 ### Purpose:

@@ -14,8 +14,11 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
 
 .NOTES
-    Version: 2.5.0
+    Version: 2.6.0
     Date: 2025-01-29
+
+    Changes in v2.6.0:
+    - Version banner and daily log via scoop-boot.ps1 (library mode)
 
     Changes in v2.5.0:
     - Scoop owns only apps, buckets, cache, persist, shims, global. Variable and
@@ -67,6 +70,18 @@ param(
 )
 
 $ScoopDir = "C:\usr"
+$ResetVersion = "2.6.0"
+
+# Logging and version banner come from scoop-boot.ps1 (library mode)
+$global:ScoopBootLibraryOnly = $true
+try { . "$ScoopDir\bin\scoop-boot.ps1" } catch { } finally { $global:ScoopBootLibraryOnly = $false }
+if (Get-Command Initialize-ScoopBootLog -ErrorAction SilentlyContinue) {
+    Initialize-ScoopBootLog -ScriptName 'scoop-complete-reset.ps1' -Version $ResetVersion -ScriptPath $PSCommandPath -Arguments @($PSBoundParameters.Keys)
+} else {
+    Write-Host "scoop-complete-reset.ps1 $ResetVersion" -ForegroundColor DarkCyan
+    Write-Host "[WARN] $ScoopDir\bin\scoop-boot.ps1 not found: no log file, console output only" -ForegroundColor Yellow
+}
+
 $BackupRoot = "$ScoopDir\backups"
 $BackupDir = "$BackupRoot\$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 $BackupsToKeep = 5
