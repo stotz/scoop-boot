@@ -8,8 +8,8 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.13.0  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.9.0   | Two-phase installation of the full tool set          |
+| `bin/scoop-boot.ps1`               | 1.14.0  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.10.0  | Two-phase installation of the full tool set          |
 | `bin/scoop-complete-reset.ps1`     | 2.6.0   | Remove everything again (processes, files, registry) |
 
 ---
@@ -36,10 +36,10 @@ New-Item -ItemType Directory -Path C:\usr\etc\environments -Force
 New-Item -ItemType Directory -Path C:\tmp -Force
 New-Item -ItemType Directory -Path C:\devl -Force    # workspace for repositories, not used by scoop-boot
 
+# scoop-boot.ps1 fetches the other scripts and the scoop wrapper itself
 $base = "https://raw.githubusercontent.com/stotz/scoop-boot/main"
-Invoke-WebRequest -Uri "$base/bin/scoop-boot.ps1"             -OutFile C:\usr\bin\scoop-boot.ps1
-Invoke-WebRequest -Uri "$base/bin/scoop-complete-install.ps1" -OutFile C:\usr\bin\scoop-complete-install.ps1
-Invoke-WebRequest -Uri "$base/bin/scoop-complete-reset.ps1"   -OutFile C:\usr\bin\scoop-complete-reset.ps1
+Invoke-WebRequest -Uri "$base/bin/scoop-boot.ps1" -OutFile C:\usr\bin\scoop-boot.ps1
+C:\usr\bin\scoop-boot.ps1 --update
 
 # Environment files, named after this host and user (lowercase):
 # system.* = Machine scope (the source of truth), user.* = User scope (your additions)
@@ -88,22 +88,42 @@ node --version     # v26.x
 scoop-boot.ps1 --env-status
 ```
 
-### Keeping it correct: after scoop update / scoop install
+### Keeping it correct: the scoop wrapper
 
 Scoop writes `JAVA_HOME`, `GRADLE_USER_HOME`, `ANT_HOME`, ... and PATH entries into the
 User scope on every install and update. Windows resolves User variables before Machine
-variables, so the last installed JDK silently wins over the `.env` file. One command
-restores the file as the source of truth (no admin needed):
+variables, so the last installed JDK would silently win over the `.env` file.
 
-```powershell
-scoop update -a
-scoop-boot.ps1 --clean-user-scope
+`C:\usr\bin` is on PATH before `C:\usr\shims`, so `bin\scoop.ps1` (with `scoop.cmd` for
+cmd and `scoop` for Git Bash) is found before Scoop's own shim. It forwards every
+command to the real Scoop and, after `install`, `update`, `uninstall`, `reset`,
+`cleanup`, `hold` and `unhold`, runs `scoop-boot.ps1 --clean-user-scope --quiet`.
+You see one line only when something was cleaned:
+
+```
+[scoop-boot] user scope cleaned (3 change(s) after Scoop wrote to it; details in C:\usr\logs\scoopboot\20261009.log)
 ```
 
-It removes User PATH entries inside Scoop's directories, removes User variables whose
-name the `system.*` file sets, and applies the `user.*` file. When the `system.*` file
-itself changed, run Phase 1 again instead (`-SetEnvironment`, as Administrator); it
-sweeps and rebuilds the Machine PATH and then cleans the User scope as well.
+One extra command that Scoop does not have:
+
+```powershell
+scoop upgrade      # = scoop update; scoop update -a; scoop cleanup -a; clean user scope
+```
+
+Bypass when needed: `C:\usr\shims\scoop ...`, or `$env:SCOOP_BOOT_WRAPPER = 'off'`.
+Manual fallback is still `scoop-boot.ps1 --clean-user-scope`. When the `system.*` file
+itself changed, run Phase 1 again (`-SetEnvironment`, as Administrator).
+
+### Keeping scoop-boot current
+
+```powershell
+scoop-boot.ps1 --update        # downloads bin\* from GitHub; previous copies in backups\scripts-<ts>
+scoop-boot.ps1 --asr-report    # Defender/ASR rules, exclusions, blocks of the last 14 days
+```
+
+`--update` never touches `etc\environments`; those files are yours. `--asr-report`
+writes `logs\scoopboot\asr-report-<date>.txt`, the file to attach when asking the
+security team for an exclusion.
 
 ### Logs
 
@@ -119,6 +139,8 @@ Phase 1 (admin) and Phase 2 (user) write to the same file; the script field carr
 the mode. Scoop's own messages are included (it runs in-process); output of pacman,
 msiexec and reg is not. Each session starts with host, user, admin flag, Windows and
 PowerShell version, script hash and arguments. Logs older than 60 days are removed.
+Any `scoop install`, `scoop update` or `scoop reset` run by hand afterwards re-adds
+User-scope entries; run `scoop-boot.ps1 --clean-user-scope` after such commands.
 `C:\usr\logs` is not a Scoop directory; the reset leaves it alone.
 
 ### What belongs to Scoop under C:\usr
@@ -162,12 +184,12 @@ The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
-### Version: 1.13.0
+### Version: 1.14.0
 ### Lines of Code:
 | lines | program                        |
 |------:|:-------------------------------|
-|  1906 | bin/scoop-boot.ps1             |
-|  1045 | bin/scoop-complete-install.ps1 |
+|  2117 | bin/scoop-boot.ps1             |
+|  1062 | bin/scoop-complete-install.ps1 |
 |   642 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -259,7 +281,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.9.0
+### Version: 2.10.0
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 

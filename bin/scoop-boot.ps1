@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.13.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.14.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,28 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.13.0
+    Version: 1.14.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.14.0:
+    - NEW: --asr-report writes Defender/ASR rules, exclusions and the ASR blocks
+      of the last 14 days to logs\scoopboot\asr-report-<date>.txt
+    - NEW: --update downloads the current scripts and the scoop wrapper from
+      GitHub into bin\ (previous versions kept in backups\scripts-<timestamp>)
+    - NEW: --quiet for --clean-user-scope (used by the scoop wrapper): console
+      shows a one-line summary only when something changed
+    - scoop wrapper (bin\scoop.ps1, scoop.cmd, scoop): runs --clean-user-scope
+      after state-changing Scoop commands; "scoop upgrade" = update, update -a,
+      cleanup -a, clean user scope
+
+    Changes in v1.13.1:
+    - Logging: context (script, mode, version) is resolved from the call stack,
+      so output of child scripts (scoop.ps1, the Scoop installer) is attributed
+      to the invoking scoop-boot script instead of an empty "()".
+    - Logging: ANSI colour codes stripped, -NoNewline fragments joined into one
+      line, carriage-return progress bars reduced to their final state, aria2
+      progress lines dropped
 
     Changes in v1.13.0:
     - Logging: every Write-Host is mirrored to C:\usr\logs\scoopboot\<yyyyMMdd>.log
@@ -116,7 +135,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.13.0"
+$global:ScriptVersion = "1.14.0"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -140,8 +159,15 @@ $global:ScoopOwnedDirs = @('apps', 'buckets', 'cache', 'persist', 'shims', 'glob
 $global:ScoopBootLogDir = Join-Path $global:BaseDir "logs\scoopboot"
 $global:ScoopBootLogRetentionDays = 60
 if (-not (Test-Path variable:global:ScoopBootLogFile)) { $global:ScoopBootLogFile = $null }
-$script:ScoopBootLogScript  = 'scoop-boot.ps1'
-$script:ScoopBootLogVersion = '?'
+# Registered log contexts: script file name -> "label (version)". The context of a
+# log line is found by walking the call stack to the first frame that belongs to
+# one of the registered scripts; output of child scripts such as scoop.ps1 is
+# attributed to the scoop-boot script that invoked them.
+if (-not (Test-Path variable:global:ScoopBootLogContexts)) { $global:ScoopBootLogContexts = @{} }
+if (-not (Test-Path variable:global:ScoopBootLogPartial)) { $global:ScoopBootLogPartial = '' }
+# Quiet mode (--quiet): console shows only [scoop-boot] summaries, warnings and errors; the log gets everything
+if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
+$script:ScoopBootLogOwnFunctions = @('Write-Host', 'Write-ScoopBootLogLine', 'Get-ScoopBootLogContext', 'Initialize-ScoopBootLog')
 
 function Get-FileSha256Short {
     param([string]$Path)
@@ -156,15 +182,31 @@ function Get-ScoopBootLogLevel {
     return 'INFO'
 }
 
+function Get-ScoopBootLogContext {
+    foreach ($frame in (Get-PSCallStack)) {
+        if ($script:ScoopBootLogOwnFunctions -contains $frame.FunctionName) { continue }
+        if (-not $frame.ScriptName) { continue }
+        $name = Split-Path -Leaf $frame.ScriptName
+        if ($global:ScoopBootLogContexts.ContainsKey($name)) { return $global:ScoopBootLogContexts[$name] }
+    }
+    return 'unknown (?)'
+}
+
 function Write-ScoopBootLogLine {
     param([string]$Text, [string]$Level = '')
     if (-not $global:ScoopBootLogFile) { return }
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    # Console-only noise: ANSI colour codes, carriage-return progress updates
+    # (keep what is on screen after the last CR), aria2 progress lines
+    $Text = $Text -replace '\x1b\[[0-9;]*[A-Za-z]', ''
+    if ($Text.Contains("`r") -and -not $Text.Contains("`n")) { $Text = ($Text -split "`r")[-1] }
+    if ($Text -match '^\s*Download: \[#') { return }
     if (-not $Level) { $Level = Get-ScoopBootLogLevel -Text $Text }
     $stamp = Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'
+    $context = Get-ScoopBootLogContext
     foreach ($line in ($Text -split "`r?`n")) {
         if (-not $line.Trim()) { continue }
-        $out = "$stamp $script:ScoopBootLogScript ($script:ScoopBootLogVersion) [$Level] $($line.TrimEnd())"
+        $out = "$stamp $context [$Level] $($line.TrimEnd())"
         try { [System.IO.File]::AppendAllText($global:ScoopBootLogFile, $out + "`n", [System.Text.Encoding]::UTF8) } catch { }
     }
 }
@@ -184,8 +226,21 @@ function Write-Host {
         [ConsoleColor]$BackgroundColor
     )
     process {
-        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
-        if ($null -ne $Object) { Write-ScoopBootLogLine -Text ([string]::Join(' ', @($Object))) }
+        $text = if ($null -ne $Object) { [string]::Join(' ', @($Object)) } else { '' }
+        $important = $text -match '^\s*(\[scoop-boot\]|\[WARN\]|\[ERROR\]|\[FAIL\]|\[FATAL\])'
+        if (-not $global:ScoopBootQuiet -or $important) {
+            Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+        }
+        # -NoNewline fragments ("Checking hash of x... " + "OK.") are joined into one log line
+        if ($NoNewline) {
+            $global:ScoopBootLogPartial += $text
+            return
+        }
+        if ($global:ScoopBootLogPartial) {
+            $text = $global:ScoopBootLogPartial + $text
+            $global:ScoopBootLogPartial = ''
+        }
+        Write-ScoopBootLogLine -Text $text
     }
 }
 
@@ -204,8 +259,9 @@ function Initialize-ScoopBootLog {
         [string]$ScriptPath = '',
         [string[]]$Arguments = @()
     )
-    $script:ScoopBootLogScript  = if ($Mode) { "$ScriptName $Mode" } else { $ScriptName }
-    $script:ScoopBootLogVersion = $Version
+    $label = if ($Mode) { "$ScriptName $Mode" } else { $ScriptName }
+    $global:ScoopBootLogContexts[$ScriptName] = "$label ($Version)"
+    if ($Arguments -notcontains '--quiet') { $global:ScoopBootQuiet = $false }
 
     $hash = if ($ScriptPath) { Get-FileSha256Short -Path $ScriptPath } else { 'unknown' }
     try {
@@ -219,11 +275,13 @@ function Initialize-ScoopBootLog {
     }
 
     $logNote = if ($global:ScoopBootLogFile) { "log: $global:ScoopBootLogFile" } else { "log: not writable, console only" }
-    Microsoft.PowerShell.Utility\Write-Host "$ScriptName $Version (sha256 $hash) | $logNote" -ForegroundColor DarkCyan
+    if (-not $global:ScoopBootQuiet) {
+        Microsoft.PowerShell.Utility\Write-Host "$ScriptName $Version (sha256 $hash) | $logNote" -ForegroundColor DarkCyan
+    }
 
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $os = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Version } catch { [Environment]::OSVersion.Version.ToString() }
-    Write-ScoopBootLogLine -Level 'INFO' -Text "=== session start: $script:ScoopBootLogScript $Version (sha256 $hash) ==="
+    Write-ScoopBootLogLine -Level 'INFO' -Text "=== session start: $label $Version (sha256 $hash) ==="
     Write-ScoopBootLogLine -Level 'INFO' -Text "host=$env:COMPUTERNAME user=$env:USERDOMAIN\$env:USERNAME admin=$isAdmin windows=$os powershell=$($PSVersionTable.PSVersion) script=$ScriptPath args=[$($Arguments -join ' ')]"
 }
 $global:BackupDir = Join-Path $global:EnvDir "backups"
@@ -245,6 +303,9 @@ $global:ParsedArgs = @{
     InitEnv = $null
     ApplyEnv = $false
     CleanUserScope = $false
+    Quiet = $false
+    AsrReport = $false
+    Update = $false
     DryRun = $false
     Rollback = $false
     Install = @()
@@ -277,6 +338,9 @@ function Parse-Arguments {
             }
             '^--apply-env$' { $global:ParsedArgs.ApplyEnv = $true }
             '^--clean-user-scope$' { $global:ParsedArgs.CleanUserScope = $true }
+            '^--quiet$' { $global:ParsedArgs.Quiet = $true }
+            '^--asr-report$' { $global:ParsedArgs.AsrReport = $true }
+            '^--update$' { $global:ParsedArgs.Update = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
             '^--rollback$' { $global:ParsedArgs.Rollback = $true }
             '^--install$' {
@@ -433,6 +497,9 @@ function Show-Help {
     Write-Host "  --init-env=FILE      Create environment configuration file"
     Write-Host "  --apply-env          Apply environment configuration (system.* needs admin)"
     Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no admin)"
+    Write-Host "  --asr-report         Write Defender/ASR configuration and recent blocks to the log directory"
+    Write-Host "  --update             Download the current scoop-boot scripts and scoop wrapper from GitHub"
+    Write-Host "  --quiet              With --clean-user-scope: print only a summary when something changed"
     Write-Host "  --dry-run            Show what would be changed"
     Write-Host "  --rollback           Rollback to previous configuration"
     Write-Host "  --install APP...     Install applications"
@@ -499,6 +566,8 @@ function Get-ScoopInstaller {
 
 function Invoke-Bootstrap {
     Write-Section "Scoop Bootstrap"
+    # Talk to the real Scoop shim, not the wrapper in bin\ (no cleanup per package here)
+    $env:SCOOP_BOOT_WRAPPER = 'off'
 
     # Check current state
     Write-Info "Checking current state..."
@@ -968,9 +1037,142 @@ function Invoke-CleanUserScope {
         $changes += Apply-EnvironmentOperations -Operations $operations -Scope 'User' -SourceFile $file.Path -DryRun $DryRun
     }
 
+    if ($global:ScoopBootQuiet -and $changes -gt 0 -and -not $DryRun) {
+        Write-Host "[scoop-boot] user scope cleaned ($changes change(s) after Scoop wrote to it; details in $global:ScoopBootLogFile)" -ForegroundColor DarkCyan
+    }
     if ($changes -eq 0) { Write-Success "User scope is clean" }
     else { Write-Info "User scope: $changes change(s)" }
     return $changes
+}
+
+function Invoke-AsrReport {
+    <#
+    .SYNOPSIS
+        Writes the Defender / Attack Surface Reduction configuration and the ASR blocks
+        of the last 14 days to a report file, for tickets with the security team.
+    #>
+    Write-Section "ASR Report"
+    $report = Join-Path $global:ScoopBootLogDir ("asr-report-{0}.txt" -f (Get-Date -Format 'yyyyMMdd'))
+    try { $pref = Get-MpPreference; $status = Get-MpComputerStatus } catch {
+        Write-ErrorMsg "Get-MpPreference failed: $($_.Exception.Message)"
+        return $false
+    }
+    $ruleNames = @{
+        '01443614-cd74-433a-b99e-2ecdc07bfc25' = 'Block executable files from running unless they meet a prevalence, age, or trusted list criterion'
+        '26190899-1602-49e8-8b27-eb1d0a1ce869' = 'Block Office communication application from creating child processes'
+        '3b576869-a4ec-4529-8536-b80a7769e899' = 'Block Office applications from creating executable content'
+        '56a863a9-875e-4185-98a7-b882c64b5ce5' = 'Block abuse of exploited vulnerable signed drivers'
+        '5beb7efe-fd9a-4556-801d-275e5ffc04cc' = 'Block execution of potentially obfuscated scripts'
+        '75668c1f-73b5-4cf0-bb93-3ecf5cb7cc84' = 'Block Office applications from injecting code into other processes'
+        '7674ba52-37eb-4a4f-a9a1-f0f9a1619a2c' = 'Block Adobe Reader from creating child processes'
+        '92e97fa1-2edf-4476-bdd6-9dd0b4dddc7b' = 'Block Win32 API calls from Office macros'
+        '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2' = 'Block credential stealing from the Windows local security authority subsystem (lsass.exe)'
+        'b2b3f03d-6a65-4f7b-a9c7-1c7ef74a9ba4' = 'Block untrusted and unsigned processes that run from USB'
+        'be9ba2d9-53ea-4cdc-84e5-9b1eeee46550' = 'Block executable content from email client and webmail'
+        'c1db55ab-c21a-4637-bb3f-a12568109d35' = 'Use advanced protection against ransomware'
+        'd1e49aac-8f56-4280-b9ba-993a6d77406c' = 'Block process creations originating from PSExec and WMI commands'
+        'd3e037e1-3eb8-44c8-a917-57927947596d' = 'Block JavaScript or VBScript from launching downloaded executable content'
+        'd4f940ab-401b-4efc-aadc-ad5f3c50688a' = 'Block all Office applications from creating child processes'
+        'e6db77e5-3df2-4cf1-b95a-636979351e5b' = 'Block persistence through WMI event subscription'
+        'a8f5898e-1dc8-49a9-9878-85004b8a61e6' = 'Block Webshell creation for Servers'
+        '33ddedf1-c6e0-47cb-833e-de6133960387' = 'Block rebooting machine in Safe Mode'
+        'c0033c00-d16d-4114-a5a0-dc9b3a7d2ceb' = 'Block use of copied or impersonated system tools'
+    }
+    $actionNames = @{ 0 = 'Disabled'; 1 = 'Block'; 2 = 'Audit'; 6 = 'Warn' }
+    $lines = @()
+    $lines += "ASR report $(Get-Date -Format s)  host=$env:COMPUTERNAME  user=$env:USERDOMAIN\$env:USERNAME  scoop-boot $global:ScriptVersion"
+    $lines += "Defender AM engine $($status.AMEngineVersion), platform $($status.AMProductVersion), signatures $($status.AntivirusSignatureVersion)"
+    $lines += "RealTimeProtection=$($status.RealTimeProtectionEnabled)  Tamper=$($status.IsTamperProtected)  MAPS=$($pref.MAPSReporting)  CloudBlockLevel=$($pref.CloudBlockLevel)"
+    $lines += ""
+    $lines += "--- ASR rules (Id, Action, Name) ---"
+    $ids = @($pref.AttackSurfaceReductionRules_Ids); $acts = @($pref.AttackSurfaceReductionRules_Actions)
+    for ($i = 0; $i -lt $ids.Count; $i++) {
+        $id = "$($ids[$i])".ToLower()
+        $act = [int]$acts[$i]
+        $actName = if ($actionNames.ContainsKey($act)) { $actionNames[$act] } else { "$act" }
+        $name = if ($ruleNames.ContainsKey($id)) { $ruleNames[$id] } else { '(see Microsoft docs)' }
+        $lines += "{0}  {1,-8}  {2}" -f $id, $actName, $name
+    }
+    foreach ($section in @(
+        @{ Title = 'ASR-only exclusions (AttackSurfaceReductionOnlyExclusions)'; Values = $pref.AttackSurfaceReductionOnlyExclusions },
+        @{ Title = 'Per-rule exclusions (AttackSurfaceReductionRules_RuleSpecificExclusions)'; Values = $pref.AttackSurfaceReductionRules_RuleSpecificExclusions },
+        @{ Title = 'Defender path exclusions (ExclusionPath)'; Values = $pref.ExclusionPath }
+    )) {
+        $lines += ""
+        $lines += "--- $($section.Title) ---"
+        $lines += @($section.Values | ForEach-Object { "  $_" })
+    }
+    $lines += ""
+    $lines += "--- Blocked by ASR, last 14 days (event 1121) ---"
+    $events = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 1121; StartTime = (Get-Date).AddDays(-14) } -ErrorAction SilentlyContinue
+    $lines += @($events | ForEach-Object {
+        $m = $_.Message -split "`n"
+        $rule = (($m | Select-String '^\s*ID:') | Select-Object -First 1).Line -replace '^\s*ID:\s*', ''
+        $path = (($m | Select-String 'Path:') | Select-Object -First 1).Line.Trim()
+        "{0}  rule={1}  {2}" -f $_.TimeCreated.ToString('s'), $rule.Trim(), $path
+    } | Sort-Object -Unique)
+    if (-not (Test-Path $global:ScoopBootLogDir)) { New-Item -ItemType Directory -Path $global:ScoopBootLogDir -Force | Out-Null }
+    $lines | Set-Content -Path $report -Encoding UTF8
+    $lines | ForEach-Object { Write-Host $_ }
+    Write-Host ""
+    Write-Success "Report written: $report"
+    return $true
+}
+
+function Invoke-SelfUpdate {
+    <#
+    .SYNOPSIS
+        Downloads the current scoop-boot scripts and the scoop wrapper from GitHub into bin\.
+    .DESCRIPTION
+        Only files under bin\ are replaced: the three scripts and the scoop wrapper
+        (scoop.ps1, scoop.cmd, scoop). The environment files under etc\ belong to the
+        user and are never touched. Previous versions go to backups\scripts-<timestamp>\.
+    #>
+    Write-Section "scoop-boot Update"
+    $base = 'https://raw.githubusercontent.com/stotz/scoop-boot/main'
+    $files = @('bin/scoop-boot.ps1', 'bin/scoop-complete-install.ps1', 'bin/scoop-complete-reset.ps1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop')
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $backupDir = Join-Path $global:BaseDir "backups\scripts-$stamp"
+    $temp = Join-Path $env:TEMP "scoop-boot-update-$stamp"
+    New-Item -ItemType Directory -Path $temp -Force | Out-Null
+    $changed = 0
+    foreach ($rel in $files) {
+        $name = Split-Path -Leaf $rel
+        $target = Join-Path $global:BaseDir ($rel -replace '/', '\')
+        $download = Join-Path $temp $name
+        try {
+            Invoke-WebRequest -Uri "$base/$rel" -OutFile $download -UseBasicParsing
+        } catch {
+            Write-ErrorMsg "Download failed: $base/$rel ($($_.Exception.Message))"
+            continue
+        }
+        $newHash = Get-FileSha256Short -Path $download
+        $oldHash = if (Test-Path $target) { Get-FileSha256Short -Path $target } else { 'none' }
+        $newVer = (Select-String -Path $download -Pattern 'Version:\s*([0-9.]+)' | Select-Object -First 1)
+        $newVer = if ($newVer) { $newVer.Matches[0].Groups[1].Value } else { '' }
+        if ($newHash -eq $oldHash) {
+            Write-Host "[OK] $name unchanged ($oldHash$(if ($newVer) { ", $newVer" }))" -ForegroundColor Gray
+            continue
+        }
+        if (Test-Path $target) {
+            if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+            Copy-Item $target (Join-Path $backupDir $name) -Force
+        }
+        $targetDir = Split-Path -Parent $target
+        if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+        Copy-Item $download $target -Force
+        Write-Success "$name updated: $oldHash -> $newHash$(if ($newVer) { " ($newVer)" })"
+        $changed++
+    }
+    Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+    if ($changed -eq 0) {
+        Write-Info "Everything is current"
+    } else {
+        Write-Info "$changed file(s) updated; previous versions in $backupDir"
+        Write-Info "Environment files under etc\environments were not touched"
+    }
+    return $true
 }
 
 function Invoke-ApplyEnv {
@@ -1829,6 +2031,7 @@ function Invoke-Install {
 # Library mode: the caller only wanted the functions
 if ($script:LibraryOnly) { return }
 
+if ($args -contains '--quiet') { $global:ScoopBootQuiet = $true }
 Initialize-ScoopBootLog -ScriptName 'scoop-boot.ps1' -Version $global:ScriptVersion -ScriptPath $PSCommandPath -Arguments $args
 
 # Parse arguments
@@ -1888,6 +2091,14 @@ if ($global:ParsedArgs.ApplyEnv) {
 if ($global:ParsedArgs.CleanUserScope) {
     $null = Invoke-CleanUserScope -DryRun $global:ParsedArgs.DryRun
     exit 0
+}
+
+if ($global:ParsedArgs.AsrReport) {
+    if (Invoke-AsrReport) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.Update) {
+    if (Invoke-SelfUpdate) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.Install.Count -gt 0) {

@@ -1,6 +1,8 @@
 # Normalize all text files to LF in the repository and in the working tree.
 # Overrides any core.autocrlf setting of the client.
 * text=auto eol=lf
+# cmd.exe mis-parses some constructs in LF-only batch files; keep the wrapper CRLF
+bin/scoop.cmd text eol=crlf
 
 # Binary files: never normalize
 *.png  binary

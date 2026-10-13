@@ -8,8 +8,16 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.9.0
-    Date: 2026-10-08
+    Version: 2.10.0
+    Date: 2026-10-09
+
+    Changes in v2.10.0:
+    - Phase 2 sets SCOOP_BOOT_WRAPPER=off so that the scoop wrapper in bin\
+      does not run the user-scope cleanup after each package
+
+    Changes in v2.9.1:
+    - GCC compile test prints gcc's own messages and distinguishes DLL shadowing
+      from a compiler component refused by endpoint security
 
     Changes in v2.9.0:
     - Version banner and daily log via scoop-boot.ps1 (library mode):
@@ -113,7 +121,7 @@ param(
 )
 
 $ScoopDir = "C:\usr"
-$InstallVersion = "2.9.0"
+$InstallVersion = "2.10.0"
 
 # Logging and version banner come from scoop-boot.ps1 (library mode). Without it
 # the script still works, but only prints to the console.
@@ -287,7 +295,7 @@ else is touched.
 
 scoop-boot itself uses:
 
-    bin\        the three scripts
+    bin\        the three scripts and the scoop wrapper (scoop.ps1/.cmd/scoop)
     etc\        environments\*.env (the source of truth for PATH and variables)
     backups\    environment backups written by every reset (last 5 kept)
     logs\       daily logs of the three scripts (60 days kept)
@@ -497,6 +505,9 @@ function Install-ScoopTools {
     # ============================================================================
     Write-Host ""
     Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor White
+    # Use the real Scoop shim during Phase 2; the wrapper in bin\ would run the
+    # user-scope cleanup after every single package instead of once in Step 7
+    $env:SCOOP_BOOT_WRAPPER = 'off'
     Write-Host ""
 
     # Download scoop-boot.ps1 if not present
@@ -881,14 +892,19 @@ function Install-ScoopTools {
             Remove-Item $ccTestExe -Force -ErrorAction SilentlyContinue
             $savedPath = $env:Path
             $env:Path = "$ScoopDir\apps\msys2\current\ucrt64\bin;$env:Path"
-            & $gccPath $ccTestSrc -o $ccTestExe 2>&1 | Out-Null
+            $ccOutput = @(& $gccPath $ccTestSrc -o $ccTestExe 2>&1 | ForEach-Object { "$_" })
             $ccExit = $LASTEXITCODE
             $env:Path = $savedPath
             if (-not (Test-Path $ccTestExe)) {
                 Write-Host "[WARN] GCC is installed but cannot compile (gcc exit code $ccExit)" -ForegroundColor Yellow
-                if ($ccExit -eq -1073741511) {
+                foreach ($line in ($ccOutput | Select-Object -First 4)) { Write-Host "       gcc: $line" -ForegroundColor Gray }
+                $ccText = $ccOutput -join "`n"
+                if ($ccExit -eq -1073741511 -or $ccText -match 'entry point') {
                     Write-Host "       cc1.exe: STATUS_ENTRYPOINT_NOT_FOUND. A directory earlier in PATH ships older" -ForegroundColor Gray
                     Write-Host "       libstdc++/libgcc DLLs. Check: where.exe libstdc++-6.dll" -ForegroundColor Gray
+                } elseif ($ccText -match 'Access is denied|cannot execute') {
+                    Write-Host "       A compiler component (cc1.exe, as.exe or ld.exe) was refused by Windows: endpoint" -ForegroundColor Gray
+                    Write-Host "       security (Defender ASR rule 01443614) blocks newly released binaries. Defender event 1121." -ForegroundColor Gray
                 }
                 $failedApps += 'gcc (compile test)'
             } else {
