@@ -1,0 +1,7 @@
+# AI workflow archives and working documents (kept locally, see docs/AI_Instruktion.md)
+scoop-boot.tar.bz2
+scoop-boot_v*.tar.bz2
+docs/AI_Instruktion.md
+docs/AI_TODO.md
+# IDE metadata
+.idea/

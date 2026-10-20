@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.14.1 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.14.2 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,14 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.14.1
+    Version: 1.14.2
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.14.2:
+    - Write-Warning prints "[WARN]" instead of "[!]": the log level detection and
+      the --quiet filter only know [WARN], so warnings were logged as INFO and
+      hidden by the wrapper
 
     Changes in v1.14.1:
     - FIX: log attribution after a child script returned. Get-PSCallStack reports
@@ -144,7 +149,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.14.1"
+$global:ScriptVersion = "1.14.2"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -392,7 +397,7 @@ function Write-Success {
 
 function Write-Warning {
     param([string]$Message)
-    Write-Host "[!] $Message" -ForegroundColor Yellow
+    Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
 
 function Write-ErrorMsg {
