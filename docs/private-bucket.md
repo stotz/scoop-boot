@@ -20,20 +20,20 @@ verification, extraction and shims work the same for every bucket.
 
 ## Setup
 
-1. Create a repository, for example `entrisbanking/scoop-bucket`, with a `bucket\`
+1. Create a repository, for example `<org>/scoop-bucket`, with a `bucket\`
    directory. Copy the manifests of the tools the team uses from the public buckets at
    the versions you want (`C:\usr\buckets\main\bucket\gradle.json`, ...). Keep the
    `checkver` and `autoupdate` sections; they are what `checkver.ps1` uses later.
 2. Add the bucket on each machine and install from it:
 
    ```powershell
-   scoop bucket add entb https://github.com/entrisbanking/scoop-bucket
-   scoop install entb/gradle
+   scoop bucket add company https://github.com/<org>/scoop-bucket
+   scoop install company/gradle
    ```
 
-   An app installed from `entb/gradle` follows the `entb` manifest from then on. An app
+   An app installed from `company/gradle` follows the `company` manifest from then on. An app
    already installed from `main` keeps following `main` until it is reinstalled from
-   `entb` (`scoop uninstall gradle; scoop install entb/gradle`, `persist` data survives).
+   `company` (`scoop uninstall gradle; scoop install company/gradle`, `persist` data survives).
 3. To raise a version, run Scoop's own tooling in the bucket repository and commit the
    result; a pull request is the review:
 
@@ -48,7 +48,7 @@ verification, extraction and shims work the same for every bucket.
 
 Phase 2 of `scoop-complete-install.ps1` adds the buckets `extras`, `java` and `versions`
 and installs its package list from them. Pointing the package list at a private bucket
-(`entb/gradle` instead of `gradle`) and adding that bucket in Step 2 is a change in the
+(`company/gradle` instead of `gradle`) and adding that bucket in Step 2 is a change in the
 package list of the install script. Private buckets over HTTPS work on networks where
 SSH is blocked; the bucket URL is cloned with Git's credential helper like any other
 repository.
@@ -63,6 +63,26 @@ repository.
 - A private bucket is about reproducibility, not about endpoint security. If a security
   update of a tool is blocked on a machine, that is a question for whoever manages the
   endpoint policy, not a reason to stay on the old version.
+
+## Next step: scanned packages from an artifact repository
+
+A manifest names a download `url` and its `hash`. Nothing requires the URL to point at
+GitHub or the vendor: pointing it at an artifact repository (JFrog Artifactory, Sonatype
+Nexus or similar) makes the repository the only host a workplace talks to, and makes the
+upload the moment where a binary is scanned and approved.
+
+- Download once from upstream, scan, upload to a local repository; put the repository
+  URL and the hash of the approved file into the manifest in the private bucket.
+- `autoupdate.url` in the manifest can use the same `$version` placeholders with the
+  repository URL, so `checkver.ps1 -Update` keeps working once the new file is uploaded.
+- Scoop verifies the hash on every install exactly as it does for public buckets; a file
+  replaced on the repository without a manifest change fails the hash check.
+- Scoop itself is fetched with Git, not by download; it needs a Git mirror
+  (`scoop config scoop_repo <mirror url>`), as do the buckets.
+
+Together with the bucket this gives three properties that rolling updates lack: every
+machine runs the same reviewed version, every binary was scanned before the first
+install, and the install works on a network that allows only one internal host.
 
 ---
 

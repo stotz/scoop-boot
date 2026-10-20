@@ -237,8 +237,6 @@ Environment file syntax, load order and version pinning: [docs/environment-files
 
 - [docs/environment-files.md](docs/environment-files.md) - environment files: load order, syntax, list operations, `C:\usr` layout, version pinning, known issues
 - [docs/private-bucket.md](docs/private-bucket.md) - fixed releases instead of rolling updates: a private bucket with reviewed manifests
-- [docs/AI_Instruktion.md](docs/AI_Instruktion.md) - workflow rules between developer and AI (German)
-- [docs/AI_TODO.md](docs/AI_TODO.md) - AI working state, decisions and version history (German)
 
 ## Requirements
 
