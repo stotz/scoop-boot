@@ -8,8 +8,15 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.10.0
-    Date: 2026-10-09
+    Version: 2.10.1
+    Date: 2026-10-20
+
+    Changes in v2.10.1:
+    - sliksvn removed from the package list (TortoiseSVN ships the same svn.exe
+      and overwrote all ten shims anyway)
+    - Phase 2 sets SCOOP_BOOT_CALLER=install so --bootstrap skips its manual guide
+    - End of Phase 2: fetches the scoop wrapper via --update when bin\scoop.ps1
+      is missing (Quick Setup done with the old three-download sequence)
 
     Changes in v2.10.0:
     - Phase 2 sets SCOOP_BOOT_WRAPPER=off so that the scoop wrapper in bin\
@@ -121,7 +128,7 @@ param(
 )
 
 $ScoopDir = "C:\usr"
-$InstallVersion = "2.10.0"
+$InstallVersion = "2.10.1"
 
 # Logging and version banner come from scoop-boot.ps1 (library mode). Without it
 # the script still works, but only prints to the console.
@@ -506,8 +513,10 @@ function Install-ScoopTools {
     Write-Host ""
     Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor White
     # Use the real Scoop shim during Phase 2; the wrapper in bin\ would run the
-    # user-scope cleanup after every single package instead of once in Step 7
+    # user-scope cleanup after every single package instead of once in Step 7.
+    # SCOOP_BOOT_CALLER tells --bootstrap to skip its manual "Next steps" guide.
     $env:SCOOP_BOOT_WRAPPER = 'off'
+    $env:SCOOP_BOOT_CALLER = 'install'
     Write-Host ""
 
     # Download scoop-boot.ps1 if not present
@@ -726,7 +735,7 @@ function Install-ScoopTools {
         'python314', 'perl', 'nodejs', 'msys2',
 
         # Version control
-        'sliksvn', 'tortoisesvn', 'gh', 'lazygit',
+        'tortoisesvn', 'gh', 'lazygit',
 
         # Editors & IDEs
         'vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox',
@@ -1016,6 +1025,15 @@ function Install-ScoopTools {
     Write-Host ">>> Step 7: Cleaning User scope (Scoop overrides, user.* files)..." -ForegroundColor White
     Write-Host ""
     & "$ScoopDir\bin\scoop-boot.ps1" --clean-user-scope
+
+    # The scoop wrapper (bin\scoop.ps1, scoop.cmd, scoop) is not part of the Quick
+    # Setup download; without it every manual "scoop update" writes to the User
+    # scope again. --update fetches it (and reports the scripts as unchanged).
+    if (-not (Test-Path "$ScoopDir\bin\scoop.ps1")) {
+        Write-Host ""
+        Write-Host "[INFO] scoop wrapper missing in $ScoopDir\bin, fetching it with scoop-boot.ps1 --update" -ForegroundColor Gray
+        & "$ScoopDir\bin\scoop-boot.ps1" --update
+    }
 
     Write-Host ""
     if ($failedApps.Count -gt 0) {

@@ -8,8 +8,8 @@ Three PowerShell scripts that set up, configure and tear down a Windows developm
 
 | Script                             | Version | Purpose                                              |
 |------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.14.0  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.10.0  | Two-phase installation of the full tool set          |
+| `bin/scoop-boot.ps1`               | 1.14.1  | Bootstrap Scoop, manage environment variables (.env) |
+| `bin/scoop-complete-install.ps1`   | 2.10.1  | Two-phase installation of the full tool set          |
 | `bin/scoop-complete-reset.ps1`     | 2.6.0   | Remove everything again (processes, files, registry) |
 
 ---
@@ -35,6 +35,7 @@ New-Item -ItemType Directory -Path C:\usr\bin -Force
 New-Item -ItemType Directory -Path C:\usr\etc\environments -Force
 New-Item -ItemType Directory -Path C:\tmp -Force
 New-Item -ItemType Directory -Path C:\devl -Force    # workspace for repositories, not used by scoop-boot
+New-Item -ItemType Directory -Path C:\data -Force    # data and optional tool caches (DATA in the env file)
 
 # scoop-boot.ps1 fetches the other scripts and the scoop wrapper itself
 $base = "https://raw.githubusercontent.com/stotz/scoop-boot/main"
@@ -125,6 +126,16 @@ scoop-boot.ps1 --asr-report    # Defender/ASR rules, exclusions, blocks of the l
 writes `logs\scoopboot\asr-report-<date>.txt`, the file to attach when asking the
 security team for an exclusion.
 
+### Caches outside the user profile (optional)
+
+Gradle, Maven, npm, pip, NuGet, JetBrains indexes and WSL disks all default to
+`%USERPROFILE%`. On a roaming or container profile (FSLogix, size quotas) that is the
+wrong place. The `system.*` template ends with a commented block that moves them to
+`C:\data\caches\<tool>`: uncomment what you need, run Phase 1 again
+(`-SetEnvironment`, as Administrator), open a new shell. The block also lists the
+one-time commands for the things that are not environment variables (JetBrains
+properties files, `wsl --manage <distro> --move`, Docker's disk image location).
+
 ### Logs
 
 Every script prints a banner with its version and the first eight digits of its own
@@ -184,12 +195,12 @@ The sections below describe each script in detail.
 
 ## 1. scoop-boot.ps1 (Core Bootstrap)
 
-### Version: 1.14.0
+### Version: 1.14.1
 ### Lines of Code:
 | lines | program                        |
 |------:|:-------------------------------|
-|  2117 | bin/scoop-boot.ps1             |
-|  1062 | bin/scoop-complete-install.ps1 |
+|  2140 | bin/scoop-boot.ps1             |
+|  1080 | bin/scoop-complete-install.ps1 |
 |   642 | bin/scoop-complete-reset.ps1   |
 
 ### Primary Functions:
@@ -281,7 +292,7 @@ CLASSPATH-=old.jar         # Remove
 
 ## 2. scoop-complete-install.ps1 (Complete Installation)
 
-### Version: 2.10.0
+### Version: 2.10.1
 ### Lines of Code: see table above
 ### Two-Phase Installation: Admin + User
 
@@ -323,7 +334,7 @@ What it does:
 - python314, perl, nodejs, msys2
 
 **Version Control:**
-- sliksvn, tortoisesvn, gh, lazygit (git already from bootstrap)
+- tortoisesvn (svn.exe included), gh, lazygit (git already from bootstrap)
 
 **Editors & IDEs:**
 - vscode, neovim, notepadplusplus, jetbrains-toolbox

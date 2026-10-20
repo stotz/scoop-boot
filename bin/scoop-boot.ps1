@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.14.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.14.1 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,18 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.14.0
+    Version: 1.14.1
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.14.1:
+    - FIX: log attribution after a child script returned. Get-PSCallStack reports
+      the Write-Host override as "Write-Host<Process>", so it was not skipped and
+      its ScriptName (scoop-boot.ps1) won once that context existed
+    - FIX: --asr-report without Administrator printed a phantom rule line and
+      Defender's "N/A" strings; now says what needs elevation and keeps the events
+    - --bootstrap skips its "Next steps" guide when SCOOP_BOOT_CALLER=install
+    - sliksvn dropped from the templates (TortoiseSVN provides the same svn.exe)
 
     Changes in v1.14.0:
     - NEW: --asr-report writes Defender/ASR rules, exclusions and the ASR blocks
@@ -135,7 +144,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.14.0"
+$global:ScriptVersion = "1.14.1"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -184,7 +193,9 @@ function Get-ScoopBootLogLevel {
 
 function Get-ScoopBootLogContext {
     foreach ($frame in (Get-PSCallStack)) {
-        if ($script:ScoopBootLogOwnFunctions -contains $frame.FunctionName) { continue }
+        # Advanced functions appear as "Write-Host<Process>" in the call stack
+        $fn = $frame.FunctionName -replace '<[A-Za-z]+>$', ''
+        if ($script:ScoopBootLogOwnFunctions -contains $fn) { continue }
         if (-not $frame.ScriptName) { continue }
         $name = Split-Path -Leaf $frame.ScriptName
         if ($global:ScoopBootLogContexts.ContainsKey($name)) { return $global:ScoopBootLogContexts[$name] }
@@ -698,6 +709,9 @@ function Invoke-Bootstrap {
     }
 
     Write-Section "Bootstrap Complete!"
+    # Called from scoop-complete-install.ps1: the env file is already applied and
+    # the remaining steps follow in the same run, so the manual guide is noise
+    if ($env:SCOOP_BOOT_CALLER -eq 'install') { return $true }
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell for PATH changes to take effect!" -ForegroundColor Yellow
     Write-Host ""
@@ -1053,6 +1067,12 @@ function Invoke-AsrReport {
     #>
     Write-Section "ASR Report"
     $report = Join-Path $global:ScoopBootLogDir ("asr-report-{0}.txt" -f (Get-Date -Format 'yyyyMMdd'))
+    # Defender hides rule ids and exclusion lists from non-elevated callers
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Warning "Not running as Administrator: Defender hides ASR rules and exclusion lists."
+        Write-Warning "The event list below is complete; for the full report run from an elevated shell."
+    }
     try { $pref = Get-MpPreference; $status = Get-MpComputerStatus } catch {
         Write-ErrorMsg "Get-MpPreference failed: $($_.Exception.Message)"
         return $false
@@ -1085,7 +1105,8 @@ function Invoke-AsrReport {
     $lines += "RealTimeProtection=$($status.RealTimeProtectionEnabled)  Tamper=$($status.IsTamperProtected)  MAPS=$($pref.MAPSReporting)  CloudBlockLevel=$($pref.CloudBlockLevel)"
     $lines += ""
     $lines += "--- ASR rules (Id, Action, Name) ---"
-    $ids = @($pref.AttackSurfaceReductionRules_Ids); $acts = @($pref.AttackSurfaceReductionRules_Actions)
+    $ids = @($pref.AttackSurfaceReductionRules_Ids | Where-Object { $_ }); $acts = @($pref.AttackSurfaceReductionRules_Actions)
+    if ($ids.Count -eq 0) { $lines += $(if ($isAdmin) { "  (none configured)" } else { "  N/A: run as Administrator to list the rules" }) }
     for ($i = 0; $i -lt $ids.Count; $i++) {
         $id = "$($ids[$i])".ToLower()
         $act = [int]$acts[$i]
@@ -1100,7 +1121,9 @@ function Invoke-AsrReport {
     )) {
         $lines += ""
         $lines += "--- $($section.Title) ---"
-        $lines += @($section.Values | ForEach-Object { "  $_" })
+        $values = @($section.Values | Where-Object { $_ -and "$_" -notmatch '^N/A' })
+        if ($values.Count -eq 0) { $lines += $(if ($isAdmin) { "  (none)" } else { "  N/A: run as Administrator to list the exclusions" }) }
+        $lines += @($values | ForEach-Object { "  $_" })
     }
     $lines += ""
     $lines += "--- Blocked by ASR, last 14 days (event 1121) ---"
@@ -1454,7 +1477,7 @@ PATH+=`$SCOOP\shims
 #PATH+=`$GIT_HOME\cmd
 #GIT_SSH=`$SCOOP\apps\openssh\current\ssh.exe
 
-#SVN_HOME=`$SCOOP\apps\sliksvn\current
+#SVN_HOME=`$SCOOP\apps\tortoisesvn\current
 #PATH+=`$SVN_HOME\bin
 
 # ============================================================================
