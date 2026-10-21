@@ -20,7 +20,7 @@ user.default.env                User scope, all hosts
 user.<host>.<user>.env          User scope, this host and user        your additions
 ```
 
-`--apply-env` (Phase 1) applies the `system.*` files in that order, then calls
+`--apply-env` (what `--admin-setenv` runs) applies the `system.*` files in that order, then calls
 `--clean-user-scope`, which applies the `user.*` files. `--clean-user-scope` on its own
 applies only the `user.*` files and needs no Administrator.
 
@@ -57,16 +57,26 @@ PSModulePath+=$SCOOP\modules
 
 ### Variable expansion
 
-`$NAME` and `${NAME}` are expanded when the line is applied. `$SCOOP` is `C:\usr`,
-`$USERPROFILE`, `$USERNAME` and `$HOSTNAME` come from the running session, every other
-name is read from the registry: Machine first, then User, then the process. Two
-consequences:
+`$NAME` and `${NAME}` are expanded when the line is applied, in this order:
 
-- A variable must be set before it is used. `MSYS2_HOME=...` on one line,
-  `PATH+=$MSYS2_HOME\usr\bin` on a later line, works; the reverse order writes the
-  literal `$MSYS2_HOME` and a warning is printed.
-- `--dry-run` cannot expand a variable that the same file defines, because nothing is
-  written during a dry run. The warning there is expected.
+1. A `NAME=value` line of the files being applied (the `system.*` files for Machine
+   scope; for User scope the `user.*` files on top of them). The position of that line
+   does not matter: `SVN_HOME=$USR\apps\tortoisesvn\current` near the top and
+   `USR=C:\usr` at the bottom work, on a fresh machine and in `--dry-run` as well. When a
+   name is defined twice, the last definition is the one references see, which is also
+   the value that ends up in the registry.
+2. The built-in names `$SCOOP` (`C:\usr`), `$USERPROFILE`, `$USERNAME` and `$HOSTNAME`
+   from the running session.
+3. The registry: Machine first, then User, then the process.
+
+A definition that refers to itself (`PATH=$PATH;C:\x`) takes the old value from the
+registry and extends it. A name that none of the three sources knows stays in the value
+as written and is reported with a warning.
+
+`$$` gives a literal `$`: `PROMPT=$$P$$G` sets `$P$G`. A `$` not followed by a name
+(`$1`, `$-`, a trailing `$`) needs no escape. `%NAME%` is written as is, and because
+scoop-boot stores values as plain strings (REG_SZ), Windows does not expand it either:
+write such a value out, or use `$NAME`.
 
 ### PATH order
 
@@ -130,7 +140,7 @@ scoop install python313      # python313 and python314 can be installed side by 
 everywhere, a private bucket is the better tool: [private-bucket.md](private-bucket.md).
 
 Note that the environment file names the tool by its manifest (`temurin25-jdk`,
-`python314`); switching to another manifest means changing the file and running Phase 1
+`python314`); switching to another manifest means changing the file and running `--admin-setenv`
 again.
 
 ## Known issues

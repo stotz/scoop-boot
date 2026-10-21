@@ -22,7 +22,7 @@ $realScoop = Join-Path $PSScriptRoot '..\shims\scoop.ps1'
 $scoopBoot = Join-Path $PSScriptRoot 'scoop-boot.ps1'
 
 if (-not (Test-Path $realScoop)) {
-    Write-Host "[ERROR] Scoop is not installed: $realScoop not found. Run scoop-complete-install.ps1 -InstallTools" -ForegroundColor Red
+    Write-Host "[ERROR] Scoop is not installed: $realScoop not found. Run scoop-boot.ps1 --user-install" -ForegroundColor Red
     exit 1
 }
 

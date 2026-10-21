@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.14.2 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.15.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,57 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.14.2
+    Version: 1.15.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.15.0:
+    - One version for all three scripts: scoop-complete-install.ps1 (was 2.11.0)
+      and scoop-complete-reset.ps1 (was 2.6.0) carry 1.15.0 from now on
+    - Variable expansion resolves NAME=value definitions of the .env files first,
+      wherever the line stands (USR=C:\usr at the bottom, $USR above it works on a
+      fresh machine and in --dry-run); $$ is a literal $; self-tests 34 to 36.
+      The system template defines the base directories on top and uses $USR
+    - --admin-reset [--force] [--keep-persist] runs scoop-complete-reset.ps1 with
+      an admin check first; --list-packages runs the install script's -ListPackages;
+      the two helper scripts no longer appear in the user documentation; --self-test accepted next to --selfTest; help text
+      grouped by purpose, --rollback no longer listed (it does nothing)
+    - --update keeps the newest five backups\scripts-* directories (they
+      accumulated before, and the reset's retention tripped over them)
+    - FIX --admin-setenv, --user-install, --admin-reset, --list-packages ran the
+      helper scripts under this script's $ErrorActionPreference = Stop; a
+      manifest's Write-Error (Wireshark post_install) aborted Phase 2 at package
+      39 of 62. The entry points now run them with Continue
+    - FIX "-NAME" (unset) aborted --apply-env under Set-StrictMode: the parsed
+      operation had no Value key. Self-test 39
+    - FIX --dry-run failed under Set-StrictMode ("$global:SuppressDryRunOutput
+      cannot be retrieved") unless --selfTest had run in the same session; the
+      flag is now initialised. Self-test 37 checks every $global: name
+    - --branch=NAME is remembered in etc\scoop-boot.branch; --update and
+      --admin-init without the switch use it (--branch=main forgets it). Before,
+      --admin-init on a test machine silently downloaded main over the branch
+    - --bootstrap resumes when the Scoop core exists: the installer is skipped,
+      the essential tools are still checked (a run stopped by endpoint security
+      at 7z.exe can be repeated once the binary is allowed or pinned). Its
+      standalone "Next steps" name the setup commands
+    - FIX --bootstrap: the official installer refused to run ("Scoop is already
+      installed") because it found the scoop wrapper in bin\ on the PATH; bin\ and
+      shims\ are removed from the process PATH while the installer runs. Only
+      visible since --admin-init delivers the wrapper before Scoop exists
+    - FIX --bootstrap took the scoop wrapper in bin\ for an installed Scoop
+      (Get-Command scoop); after a reset that would have skipped the Scoop
+      install. Now checks apps\scoop\current\bin\scoop.ps1
+    - FIX self-test 8: user names with a dot (urs.stotz) failed the file name
+      pattern; the files themselves always worked
+    - Setup entry points: --admin-init (directories, --update, environment files
+      from the templates, Notepad), --admin-setenv (Phase 1) and --user-install
+      (Phase 2) call scoop-complete-install.ps1; the Quick Setup no longer names it
+    - Package lists: etc\packages\default.txt (delivered) or etc\packages\<host>.txt
+      (yours, replaces default.txt). Library functions Get-PackageListFile,
+      Read-PackageList, Get-ManifestAppName; self-tests 31 to 33
+    - --update also delivers etc\packages\default.txt, warns when the local copy
+      was edited (hash recorded in default.txt.sha256); --branch=NAME downloads
+      from a branch for testing
 
     Changes in v1.14.2:
     - Write-Warning prints "[WARN]" instead of "[!]": the log level detection and
@@ -149,10 +197,14 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.14.2"
+$global:ScriptVersion = "1.15.0"
 $global:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
+$global:PackagesDir = Join-Path $global:BaseDir "etc\packages"
+# Branch that --update downloads from; written by --update --branch=NAME, removed by
+# --branch=main. A test machine stays on its branch until it is switched back.
+$global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 
 # Subdirectories of the base directory that belong to Scoop. Only these are
 # cleaned up, swept from PATH or deleted; everything else under the base
@@ -322,6 +374,14 @@ $global:ParsedArgs = @{
     Quiet = $false
     AsrReport = $false
     Update = $false
+    Branch = ''
+    AdminInit = $false
+    AdminSetEnv = $false
+    UserInstall = $false
+    AdminReset = $false
+    ListPackages = $false
+    Force = $false
+    KeepPersist = $false
     DryRun = $false
     Rollback = $false
     Install = @()
@@ -339,7 +399,7 @@ function Parse-Arguments {
             '^--?v(ersion)?$' { $global:ParsedArgs.Version = $true }
             '^--bootstrap$' { $global:ParsedArgs.Bootstrap = $true }
             '^--status$' { $global:ParsedArgs.Status = $true }
-            '^--selfTest$' { $global:ParsedArgs.SelfTest = $true }
+            '^--(selfTest|self-test)$' { $global:ParsedArgs.SelfTest = $true }
             '^--suggest$' { $global:ParsedArgs.Suggest = $true }
             '^--environment$' { $global:ParsedArgs.Environment = $true }
             '^--env-status$' { $global:ParsedArgs.EnvStatus = $true }
@@ -357,6 +417,14 @@ function Parse-Arguments {
             '^--quiet$' { $global:ParsedArgs.Quiet = $true }
             '^--asr-report$' { $global:ParsedArgs.AsrReport = $true }
             '^--update$' { $global:ParsedArgs.Update = $true }
+            '^--branch=(.+)$' { $global:ParsedArgs.Branch = $Matches[1] }
+            '^--admin-init$' { $global:ParsedArgs.AdminInit = $true }
+            '^--admin-setenv$' { $global:ParsedArgs.AdminSetEnv = $true }
+            '^--user-install$' { $global:ParsedArgs.UserInstall = $true }
+            '^--admin-reset$' { $global:ParsedArgs.AdminReset = $true }
+            '^--list-packages$' { $global:ParsedArgs.ListPackages = $true }
+            '^--force$' { $global:ParsedArgs.Force = $true }
+            '^--keep-persist$' { $global:ParsedArgs.KeepPersist = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
             '^--rollback$' { $global:ParsedArgs.Rollback = $true }
             '^--install$' {
@@ -405,6 +473,10 @@ function Write-ErrorMsg {
     Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
+# Self-tests silence Write-DryRun while they exercise the apply path; the flag must exist
+# before the first --dry-run, because the script runs under Set-StrictMode
+if (-not (Test-Path variable:global:SuppressDryRunOutput)) { $global:SuppressDryRunOutput = $false }
+
 function Write-DryRun {
     param([string]$Message)
     # Suppress output during self-tests
@@ -429,10 +501,40 @@ function Get-Username {
     return [Environment]::UserName.ToLower()
 }
 
-function Expand-EnvironmentVariables {
-    param([string]$Value)
+# Definitions (NAME=value lines) of the .env files of the current run, name -> raw
+# value. Filled by Register-EnvFileDefinitions before any file is applied, so that a
+# reference resolves to the value the files define wherever the definition stands,
+# also on a machine where the name is not yet in the registry and in --dry-run.
+if (-not (Test-Path variable:global:EnvFileDefinitions)) { $global:EnvFileDefinitions = @{} }
 
-    $expandedValue = $Value
+function Register-EnvFileDefinitions {
+    param([array]$Operations)
+    foreach ($op in $Operations) {
+        if ($op.Type -eq 'Set') { $global:EnvFileDefinitions[$op.Name] = $op.Value }
+        elseif ($op.Type -eq 'Unset') { $global:EnvFileDefinitions.Remove($op.Name) }
+    }
+}
+
+function Expand-EnvironmentVariables {
+    <#
+    .SYNOPSIS
+        Expands $NAME and ${NAME}; "$$" gives a literal "$".
+    .DESCRIPTION
+        Lookup order: definitions of the .env files of this run, the built-in names
+        (SCOOP, SCOOP_ROOT, USERPROFILE, USERNAME, HOSTNAME), then the registry
+        (Machine, User, Process). A file definition that refers to itself
+        (PATH=$PATH;C:\x) or to a name currently being resolved falls through to the
+        registry, so the old value is extended instead of looping.
+    #>
+    param(
+        [string]$Value,
+        [string[]]$Resolving = @(),
+        [switch]$KeepEscapes
+    )
+
+    # "$$" must survive the expansion as "$"; a control character stands in for it
+    $escape = [string][char]1
+    $expandedValue = $Value -replace '\$\$', $escape
     $maxIterations = 10
     $iteration = 0
 
@@ -445,7 +547,10 @@ function Expand-EnvironmentVariables {
             $varName = $match.Groups[1].Value
 
             # Check various sources
-            if ($varName -eq "SCOOP") {
+            if ($global:EnvFileDefinitions.ContainsKey($varName) -and $Resolving -notcontains $varName) {
+                return (Expand-EnvironmentVariables -Value $global:EnvFileDefinitions[$varName] -Resolving ($Resolving + $varName))
+            }
+            elseif ($varName -eq "SCOOP") {
                 return $global:BaseDir
             }
             elseif ($varName -eq "SCOOP_ROOT") {
@@ -487,6 +592,8 @@ function Expand-EnvironmentVariables {
         $iteration++
     }
 
+    # Nested calls keep the placeholder so that the outer loop does not expand an escaped "$"
+    if ($Resolving.Count -eq 0 -and -not $KeepEscapes) { $expandedValue = $expandedValue.Replace($escape, '$') }
     return $expandedValue
 }
 
@@ -499,32 +606,46 @@ function Show-Help {
     Write-Host "scoop-boot.ps1 v$global:ScriptVersion - Portable Windows Development Environment Bootstrap" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "USAGE:" -ForegroundColor Yellow
-    Write-Host "  .\scoop-boot.ps1 [options] [apps...]"
+    Write-Host "  scoop-boot.ps1 <command> [options]"
     Write-Host ""
-    Write-Host "OPTIONS:" -ForegroundColor Yellow
-    Write-Host "  --help, -h           Show this help message"
-    Write-Host "  --version, -v        Show version"
-    Write-Host "  --bootstrap          Install Scoop and essential tools"
-    Write-Host "  --status             Show current environment status"
-    Write-Host "  --selfTest           Run comprehensive self-tests"
-    Write-Host "  --suggest            Show suggested applications"
-    Write-Host "  --environment        Show environment variables"
-    Write-Host "  --env-status         Show environment configuration status"
-    Write-Host "  --init-env=FILE      Create environment configuration file"
-    Write-Host "  --apply-env          Apply environment configuration (system.* needs admin)"
-    Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no admin)"
+    Write-Host "SETUP (Administrator shell unless noted; run in this order):" -ForegroundColor Yellow
+    Write-Host "  --admin-init         1: directories, --update, environment files from the templates, opens the system file"
+    Write-Host "  --admin-setenv       2: apply the environment files at Machine scope (Phase 1)"
+    Write-Host "  --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)"
+    Write-Host "  --admin-reset        Remove Scoop again: apps, variables, PATH entries, registry; bin, etc and logs stay"
+    Write-Host "      --force            no confirmation prompt"
+    Write-Host "      --keep-persist     keep C:\usr\persist (app data, settings)"
+    Write-Host ""
+    Write-Host "MAINTENANCE:" -ForegroundColor Yellow
+    Write-Host "  --update             Download the current scripts, scoop wrapper and etc\packages\default.txt from GitHub"
+    Write-Host "      --branch=NAME      download from this branch and remember it; --branch=main switches back"
+    Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply the user.* files (no admin)"
+    Write-Host "      --quiet            print only a summary when something changed"
+    Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
     Write-Host "  --asr-report         Write Defender/ASR configuration and recent blocks to the log directory"
-    Write-Host "  --update             Download the current scoop-boot scripts and scoop wrapper from GitHub"
-    Write-Host "  --quiet              With --clean-user-scope: print only a summary when something changed"
-    Write-Host "  --dry-run            Show what would be changed"
-    Write-Host "  --rollback           Rollback to previous configuration"
-    Write-Host "  --install APP...     Install applications"
     Write-Host ""
-    Write-Host "ENVIRONMENT FILES:" -ForegroundColor Yellow
-    Write-Host "  system.default.env              System-wide defaults"
-    Write-Host "  system.HOSTNAME.USERNAME.env    System-wide host-user specific"
-    Write-Host "  user.default.env                User defaults"
-    Write-Host "  user.HOSTNAME.USERNAME.env      User host-user specific"
+    Write-Host "ENVIRONMENT FILES (C:\usr\etc\environments):" -ForegroundColor Yellow
+    Write-Host "  --apply-env          Apply the files: system.* at Machine scope (admin), then --clean-user-scope"
+    Write-Host "      --dry-run          show the changes without applying them"
+    Write-Host "  --init-env=FILE      Create a file from the template (system.default.env, user.HOST.USER.env, ...)"
+    Write-Host "  --env-status         Which files exist and apply to this host and user"
+    Write-Host "  --environment        Show the environment variables of this session"
+    Write-Host ""
+    Write-Host "OTHER:" -ForegroundColor Yellow
+    Write-Host "  --bootstrap          Install Scoop and the bootstrap packages only (part of --user-install)"
+    Write-Host "  --install APP...     Install applications with Scoop"
+    Write-Host "  --status             Show Scoop and environment status"
+    Write-Host "  --suggest            Show suggested applications"
+    Write-Host "  --self-test          Run the self-tests (parser, expansion, package list)"
+    Write-Host "  --version, -v        Show version"
+    Write-Host "  --help, -h           Show this help message"
+    Write-Host ""
+    Write-Host "FILES:" -ForegroundColor Yellow
+    Write-Host "  system.default.env              Machine scope, all hosts"
+    Write-Host "  system.HOSTNAME.USERNAME.env    Machine scope, this host and user (source of truth)"
+    Write-Host "  user.default.env                User scope, all hosts"
+    Write-Host "  user.HOSTNAME.USERNAME.env      User scope, this host and user"
+    Write-Host "  etc\packages\default.txt        Package list (delivered); etc\packages\HOSTNAME.txt replaces it"
     Write-Host ""
     Write-Host "LIST OPERATIONS (work for ALL variables):" -ForegroundColor Yellow
     Write-Host "  VAR+=value          Prepend to list (PATH, PERL5LIB, etc.)"
@@ -532,10 +653,10 @@ function Show-Help {
     Write-Host "  VAR-=value          Remove from list"
     Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
-    Write-Host "  .\scoop-boot.ps1 --bootstrap"
-    Write-Host "  .\scoop-boot.ps1 --init-env=user.default.env"
-    Write-Host "  .\scoop-boot.ps1 --apply-env --dry-run"
-    Write-Host "  .\scoop-boot.ps1 --install git nodejs python"
+    Write-Host "  scoop-boot.ps1 --admin-init            # first command on a new machine (Administrator)"
+    Write-Host "  scoop-boot.ps1 --apply-env --dry-run   # check an edited system file before applying it"
+    Write-Host "  scoop-boot.ps1 --update                # after a scoop-boot release"
+    Write-Host "  scoop-boot.ps1 --admin-reset --force   # start over, then --admin-init again"
     Write-Host ""
 }
 
@@ -585,55 +706,62 @@ function Invoke-Bootstrap {
     # Talk to the real Scoop shim, not the wrapper in bin\ (no cleanup per package here)
     $env:SCOOP_BOOT_WRAPPER = 'off'
 
-    # Check current state
+    # Check current state. Look at the Scoop core itself, not at "Get-Command scoop":
+    # since v0012 that finds the scoop wrapper in bin\, which survives a reset and
+    # would make a fresh machine look as if Scoop were installed.
     Write-Info "Checking current state..."
-    $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
+    $scoopCore = Join-Path $global:BaseDir "apps\scoop\current\bin\scoop.ps1"
 
-    if ($scoopCommand) {
+    $scoopShims = Join-Path $global:BaseDir "shims"
+
+    if (Test-Path $scoopCore) {
+        # The core is there (a run that stopped at an essential tool, or a plain
+        # re-run): skip the installer, but still check the essential tools below,
+        # so that a bootstrap interrupted by endpoint security can be resumed.
         Write-Host "     SCOOP=$global:BaseDir"
         Write-Host "     SCOOP_GLOBAL=$global:BaseDir\global"
-        Write-Warning "Scoop is already installed at: $($scoopCommand.Source)"
-        Write-Host ""
-        Write-Host "To reinstall, use:" -ForegroundColor Yellow
-        Write-Host "  Uninstall Scoop first, then run --bootstrap again" -ForegroundColor White
-        Write-Host ""
-        Write-Host "To update Scoop, use:" -ForegroundColor Yellow
-        Write-Host "  scoop update" -ForegroundColor White
-        return $true
-    }
+        Write-Success "Scoop core already installed: $scoopCore (checking essential tools)"
+    } else {
+        # Set environment variables
+        Write-Info "Setting environment variables..."
+        [Environment]::SetEnvironmentVariable('SCOOP', $global:BaseDir, 'User')
+        [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$global:BaseDir\global", 'User')
+        $env:SCOOP = $global:BaseDir
+        $env:SCOOP_GLOBAL = "$global:BaseDir\global"
+        Write-Success "Environment variables set"
 
-    # Set environment variables
-    Write-Info "Setting environment variables..."
-    [Environment]::SetEnvironmentVariable('SCOOP', $global:BaseDir, 'User')
-    [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$global:BaseDir\global", 'User')
-    $env:SCOOP = $global:BaseDir
-    $env:SCOOP_GLOBAL = "$global:BaseDir\global"
-    Write-Success "Environment variables set"
+        # Install Scoop. The installer aborts with "Scoop is already installed" when a
+        # scoop command is on the PATH; the scoop wrapper in bin\ (delivered by --update
+        # before Scoop exists) is such a command, so bin\ and shims\ leave the PATH of
+        # this process while the installer runs.
+        Write-Info "Installing Scoop core..."
+        $installerOutput = @()
+        $savedPath = $env:Path
+        try {
+            $hidden = @((Join-Path $global:BaseDir 'bin'), $scoopShims) | ForEach-Object { $_.TrimEnd('\').ToLower() }
+            $env:Path = (@($env:Path -split ';') | Where-Object { $_ -and ($hidden -notcontains $_.TrimEnd('\').ToLower()) }) -join ';'
+            $scoopInstaller = Get-ScoopInstaller -OutFile "$env:TEMP\scoop-install.ps1"
+            $installerOutput = & $scoopInstaller -ScoopDir $global:BaseDir -ScoopGlobalDir "$global:BaseDir\global" -NoProxy 2>&1
+            Remove-Item $scoopInstaller -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-ErrorMsg "Failed to install Scoop: $_"
+            return $false
+        }
+        finally {
+            $env:Path = $savedPath
+        }
 
-    # Install Scoop
-    Write-Info "Installing Scoop core..."
-    $installerOutput = @()
-    try {
-        $scoopInstaller = Get-ScoopInstaller -OutFile "$env:TEMP\scoop-install.ps1"
-        $installerOutput = & $scoopInstaller -ScoopDir $global:BaseDir -ScoopGlobalDir "$global:BaseDir\global" -NoProxy 2>&1
-        Remove-Item $scoopInstaller -Force -ErrorAction SilentlyContinue
+        # Verify installation on the file system, then on the PATH
+        if (-not (Test-Path $scoopCore) -or -not (Test-Path $scoopShims)) {
+            Write-ErrorMsg "Scoop installation verification failed"
+            Write-Host "  Expected: $scoopCore" -ForegroundColor Gray
+            Write-Host "  Installer output:" -ForegroundColor Gray
+            foreach ($line in $installerOutput) { Write-Host "    $line" -ForegroundColor DarkGray }
+            return $false
+        }
+        Write-Success "Scoop core installed"
     }
-    catch {
-        Write-ErrorMsg "Failed to install Scoop: $_"
-        return $false
-    }
-
-    # Verify installation on the file system, then on the PATH
-    $scoopCore  = Join-Path $global:BaseDir "apps\scoop\current\bin\scoop.ps1"
-    $scoopShims = Join-Path $global:BaseDir "shims"
-    if (-not (Test-Path $scoopCore) -or -not (Test-Path $scoopShims)) {
-        Write-ErrorMsg "Scoop installation verification failed"
-        Write-Host "  Expected: $scoopCore" -ForegroundColor Gray
-        Write-Host "  Installer output:" -ForegroundColor Gray
-        foreach ($line in $installerOutput) { Write-Host "    $line" -ForegroundColor DarkGray }
-        return $false
-    }
-    Write-Success "Scoop core installed"
 
     $env:Path = "$scoopShims;$env:Path"
     $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
@@ -721,22 +849,8 @@ function Invoke-Bootstrap {
     Write-Host "IMPORTANT: Restart your shell for PATH changes to take effect!" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "1. Close and reopen your terminal"
-    Write-Host ""
-    Write-Host "2. Create environment configuration:" -ForegroundColor Cyan
-    Write-Host "   .\bin\scoop-boot.ps1 --init-env=user.default.env" -ForegroundColor White
-    Write-Host "   .\bin\scoop-boot.ps1 --init-env=user.$(Get-Hostname).$(Get-Username).env" -ForegroundColor White
-    Write-Host "   .\bin\scoop-boot.ps1 --init-env=system.default.env" -ForegroundColor White
-    Write-Host "   .\bin\scoop-boot.ps1 --init-env=system.$(Get-Hostname).$(Get-Username).env" -ForegroundColor White
-    Write-Host ""
-    Write-Host "3. Edit the configuration file in:" -ForegroundColor Cyan
-    Write-Host "   $global:EnvDir\" -ForegroundColor White
-    Write-Host ""
-    Write-Host "4. Apply configuration:" -ForegroundColor Cyan
-    Write-Host "   .\bin\scoop-boot.ps1 --apply-env" -ForegroundColor White
-    Write-Host ""
-    Write-Host "5. Install applications:" -ForegroundColor Cyan
-    Write-Host "   .\bin\scoop-boot.ps1 --install git nodejs python" -ForegroundColor White
+    Write-Host "  Administrator shell: scoop-boot.ps1 --admin-init, then --admin-setenv" -ForegroundColor White
+    Write-Host "  Normal shell:        scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""
 
     return $true
@@ -795,11 +909,12 @@ function Parse-EnvironmentLine {
         }
     }
 
-    # Parse unset
+    # Parse unset (Value present but empty: every operation carries the same keys)
     elseif ($Line -match '^-([A-Z_][A-Z0-9_]*)$') {
         return @{
             Type = "Unset"
             Name = $Matches[1]
+            Value = ''
         }
     }
 
@@ -865,10 +980,12 @@ function Apply-EnvironmentOperations {
     $fileName = Split-Path -Leaf $SourceFile
 
     foreach ($op in $Operations) {
-        $expandedValue = if ($op.Value) { Expand-EnvironmentVariables -Value $op.Value } else { $null }
+        # Escaped dollars are still placeholders here, so the check sees only real references
+        $expandedValue = if ($op.ContainsKey('Value') -and $op.Value) { Expand-EnvironmentVariables -Value $op.Value -KeepEscapes } else { $null }
         if ($expandedValue -and $expandedValue -match '\$\{?[A-Z_][A-Z0-9_]*\}?') {
-            Write-Warning "$($op.Name): unresolved variable reference in '$expandedValue' [$fileName]; define it earlier in the file or write the value out"
+            Write-Warning "$($op.Name): unresolved variable reference in '$expandedValue' [$fileName]; define it in a .env file, or write `$`$ for a literal dollar sign"
         }
+        if ($expandedValue) { $expandedValue = $expandedValue.Replace([string][char]1, '$') }
 
         switch ($op.Type) {
             "Set" {
@@ -1049,11 +1166,18 @@ function Invoke-CleanUserScope {
         }
     }
 
-    foreach ($file in (Get-EnvironmentFiles | Where-Object { $_.Scope -eq 'User' })) {
+    # Definitions of all user.* files first (on top of the system.* definitions when
+    # called from --apply-env), then the files are applied
+    $userFiles = @(Get-EnvironmentFiles | Where-Object { $_.Scope -eq 'User' })
+    $userOperations = @{}
+    foreach ($file in $userFiles) {
+        $userOperations[$file.Path] = Read-EnvironmentFile -FilePath $file.Path
+        Register-EnvFileDefinitions -Operations $userOperations[$file.Path]
+    }
+    foreach ($file in $userFiles) {
         $fileName = Split-Path -Leaf $file.Path
         Write-Info "Processing: $fileName"
-        $operations = Read-EnvironmentFile -FilePath $file.Path
-        $changes += Apply-EnvironmentOperations -Operations $operations -Scope 'User' -SourceFile $file.Path -DryRun $DryRun
+        $changes += Apply-EnvironmentOperations -Operations $userOperations[$file.Path] -Scope 'User' -SourceFile $file.Path -DryRun $DryRun
     }
 
     if ($global:ScoopBootQuiet -and $changes -gt 0 -and -not $DryRun) {
@@ -1062,6 +1186,254 @@ function Invoke-CleanUserScope {
     if ($changes -eq 0) { Write-Success "User scope is clean" }
     else { Write-Info "User scope: $changes change(s)" }
     return $changes
+}
+
+function Get-UpdateBranch {
+    <#
+    .SYNOPSIS
+        Resolves the branch for downloads: an explicit --branch=NAME wins and is
+        remembered in etc\scoop-boot.branch (removed again for main); without it the
+        remembered branch is used; without that, main.
+    #>
+    param(
+        [string]$Requested = ''
+    )
+    if ($Requested) {
+        if ($Requested -eq 'main') {
+            if (Test-Path $global:BranchFile) {
+                Remove-Item $global:BranchFile -Force
+                Write-Info "Back on main; $global:BranchFile removed"
+            }
+        } else {
+            $dir = Split-Path -Parent $global:BranchFile
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            Set-Content -Path $global:BranchFile -Value $Requested -Encoding ASCII
+        }
+        return $Requested
+    }
+    if (Test-Path $global:BranchFile) {
+        $saved = (Get-Content $global:BranchFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($saved -and $saved.Trim()) { return $saved.Trim() }
+    }
+    return 'main'
+}
+
+function Invoke-AdminInit {
+    <#
+    .SYNOPSIS
+        Setup step 1 (Administrator): directories, scripts, environment files.
+    .DESCRIPTION
+        Creates C:\usr\bin, C:\usr\etc\environments, C:\usr\etc\packages, C:\tmp,
+        C:\devl and C:\data, runs --update (scripts, scoop wrapper, package list),
+        writes system.<host>.<user>.env and user.<host>.<user>.env from the templates
+        when they do not exist yet, and opens the system file in Notepad. Running it
+        again changes nothing that already exists.
+    #>
+    param(
+        [string]$Branch = ''
+    )
+    Write-Section "Setup 1: Initialize"
+    if (-not (Test-AdminRights)) {
+        Write-ErrorMsg "--admin-init needs an elevated shell (Run as Administrator)"
+        return $false
+    }
+    # C:\devl (repositories) and C:\data (data, optional tool caches) are not used by
+    # scoop-boot; they are the conventional places the environment file refers to.
+    foreach ($dir in @((Join-Path $global:BaseDir 'bin'), $global:EnvDir, $global:PackagesDir, 'C:\tmp', 'C:\devl', 'C:\data')) {
+        if (Test-Path $dir) {
+            Write-Host "[OK] Directory exists: $dir" -ForegroundColor Gray
+        } else {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Write-Success "Directory created: $dir"
+        }
+    }
+
+    if (-not (Invoke-SelfUpdate -Branch $Branch)) { return $false }
+    $Branch = Get-UpdateBranch
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $base = "https://raw.githubusercontent.com/stotz/scoop-boot/$Branch"
+    $envName = "{0}.{1}.env" -f (Get-Hostname), (Get-Username)
+    $systemFile = Join-Path $global:EnvDir "system.$envName"
+    foreach ($scope in @('system', 'user')) {
+        $target = Join-Path $global:EnvDir "$scope.$envName"
+        if (Test-Path $target) {
+            Write-Host "[OK] Environment file exists, kept: $target" -ForegroundColor Gray
+            continue
+        }
+        try {
+            Invoke-WebRequest -Uri "$base/etc/environments/$scope.hostname.username.env" -OutFile $target -UseBasicParsing
+            Write-Success "Environment file created from template: $target"
+        } catch {
+            Write-ErrorMsg "Download failed: $base/etc/environments/$scope.hostname.username.env ($($_.Exception.Message))"
+            return $false
+        }
+    }
+
+    Write-Host ""
+    Write-Info "Review paths and tool versions in the system file, save, then run: scoop-boot.ps1 --admin-setenv"
+    # Full path on purpose: once Git is installed, its usr\bin holds an extensionless
+    # script named "notepad" that PowerShell would hand to ShellExecute.
+    Start-Process -FilePath "$env:SystemRoot\System32\notepad.exe" -ArgumentList "`"$systemFile`""
+    return $true
+}
+
+function Invoke-AdminSetEnv {
+    <#
+    .SYNOPSIS
+        Setup step 2 (Administrator): applies the environment files at Machine scope
+        by running scoop-complete-install.ps1 -SetEnvironment.
+    #>
+    if (-not (Test-AdminRights)) {
+        Write-ErrorMsg "--admin-setenv needs an elevated shell (Run as Administrator)"
+        return $false
+    }
+    $installer = Join-Path $global:BaseDir 'bin\scoop-complete-install.ps1'
+    if (-not (Test-Path $installer)) {
+        Write-ErrorMsg "$installer is missing. Run: scoop-boot.ps1 --admin-init"
+        return $false
+    }
+    # The helper scripts expect the shell default (Continue). This script runs under
+    # Stop, and a child scope inherits that: every Write-Error of a manifest script
+    # (Wireshark's post_install, for one) would then abort the whole run.
+    $ErrorActionPreference = 'Continue'
+    & $installer -SetEnvironment
+    return ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE)
+}
+
+function Invoke-UserInstall {
+    <#
+    .SYNOPSIS
+        Setup step 3 (normal shell): bootstraps Scoop and installs the package list
+        by running scoop-complete-install.ps1 -InstallTools.
+    .NOTES
+        Phase 1 must have run: it sets TMP at Machine scope, which is checked here.
+    #>
+    $installer = Join-Path $global:BaseDir 'bin\scoop-complete-install.ps1'
+    if (-not (Test-Path $installer)) {
+        Write-ErrorMsg "$installer is missing. Run: scoop-boot.ps1 --admin-init (Administrator)"
+        return $false
+    }
+    $machineTmp = [Environment]::GetEnvironmentVariable('TMP', 'Machine')
+    if ($machineTmp -ne 'C:\tmp') {
+        Write-ErrorMsg "Machine-scope TMP is '$machineTmp', expected C:\tmp: setup step 2 has not run. Run as Administrator: scoop-boot.ps1 --admin-setenv"
+        return $false
+    }
+    # The installer itself warns and asks when run from an elevated shell
+    # The helper scripts expect the shell default (Continue). This script runs under
+    # Stop, and a child scope inherits that: every Write-Error of a manifest script
+    # (Wireshark's post_install, for one) would then abort the whole run.
+    $ErrorActionPreference = 'Continue'
+    & $installer -InstallTools
+    return ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE)
+}
+
+function Invoke-AdminReset {
+    <#
+    .SYNOPSIS
+        Removes Scoop again (Administrator) by running scoop-complete-reset.ps1.
+    .DESCRIPTION
+        The reset removes Machine variables and PATH entries and may have to take
+        ownership of directories, so it needs an elevated shell; the reset script
+        itself does not check that and would fail halfway through. bin, etc and
+        logs under C:\usr stay, so --admin-init can follow directly.
+    #>
+    param(
+        [bool]$Force = $false,
+        [bool]$KeepPersist = $false
+    )
+    if (-not (Test-AdminRights)) {
+        Write-ErrorMsg "--admin-reset needs an elevated shell (Run as Administrator)"
+        return $false
+    }
+    $reset = Join-Path $global:BaseDir 'bin\scoop-complete-reset.ps1'
+    if (-not (Test-Path $reset)) {
+        Write-ErrorMsg "$reset is missing. Run: scoop-boot.ps1 --update"
+        return $false
+    }
+    $resetArgs = @{}
+    if ($Force) { $resetArgs['Force'] = $true }
+    if ($KeepPersist) { $resetArgs['KeepPersist'] = $true }
+    # The helper scripts expect the shell default (Continue). This script runs under
+    # Stop, and a child scope inherits that: every Write-Error of a manifest script
+    # (Wireshark's post_install, for one) would then abort the whole run.
+    $ErrorActionPreference = 'Continue'
+    & $reset @resetArgs
+    return ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE)
+}
+
+function Invoke-ListPackages {
+    <#
+    .SYNOPSIS
+        Shows the package list in use (scoop-complete-install.ps1 -ListPackages); installs nothing.
+    #>
+    $installer = Join-Path $global:BaseDir 'bin\scoop-complete-install.ps1'
+    if (-not (Test-Path $installer)) {
+        Write-ErrorMsg "$installer is missing. Run: scoop-boot.ps1 --update"
+        return $false
+    }
+    # The helper scripts expect the shell default (Continue). This script runs under
+    # Stop, and a child scope inherits that: every Write-Error of a manifest script
+    # (Wireshark's post_install, for one) would then abort the whole run.
+    $ErrorActionPreference = 'Continue'
+    & $installer -ListPackages
+    return ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE)
+}
+
+function Get-PackageListFile {
+    <#
+    .SYNOPSIS
+        Returns the package list file for this machine: etc\packages\<host>.txt when it
+        exists, otherwise etc\packages\default.txt. Returns $null when neither exists.
+    .NOTES
+        A host file replaces default.txt completely; the two are never merged.
+    #>
+    $hostFile = Join-Path $global:PackagesDir ("{0}.txt" -f (Get-Hostname))
+    if (Test-Path $hostFile) { return $hostFile }
+    $defaultFile = Join-Path $global:PackagesDir "default.txt"
+    if (Test-Path $defaultFile) { return $defaultFile }
+    return $null
+}
+
+function Read-PackageList {
+    <#
+    .SYNOPSIS
+        Reads a package list: one manifest per line, in install order; "#" starts a
+        comment; blank lines are ignored; "bucket/name" is passed to Scoop as written.
+    .OUTPUTS
+        [string[]] package names in file order (empty array for an empty file)
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [switch]$Silent
+    )
+    $packages = @()
+    foreach ($rawLine in (Get-Content -Path $Path -ErrorAction Stop)) {
+        $line = ($rawLine -replace '#.*$', '').Trim()
+        if (-not $line) { continue }
+        if ($line -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)?$') {
+            if (-not $Silent) { Write-Warning "Ignored line in $(Split-Path -Leaf $Path): '$rawLine' (expected: name or bucket/name)" }
+            continue
+        }
+        $packages += $line
+    }
+    # Plain return: callers wrap the result in @(). A "return ,$packages" would survive
+    # @() as a nested array (one element of type Object[]), which -ListPackages showed.
+    return $packages
+}
+
+function Get-ManifestAppName {
+    <#
+    .SYNOPSIS
+        Strips the bucket prefix: "java/temurin25-jdk" -> "temurin25-jdk". The app
+        directory under apps\ carries the bare name regardless of the bucket.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Package
+    )
+    return ($Package -split '/')[-1]
 }
 
 function Invoke-AsrReport {
@@ -1152,13 +1524,24 @@ function Invoke-SelfUpdate {
     .SYNOPSIS
         Downloads the current scoop-boot scripts and the scoop wrapper from GitHub into bin\.
     .DESCRIPTION
-        Only files under bin\ are replaced: the three scripts and the scoop wrapper
-        (scoop.ps1, scoop.cmd, scoop). The environment files under etc\ belong to the
-        user and are never touched. Previous versions go to backups\scripts-<timestamp>\.
+        Replaced: the three scripts and the scoop wrapper (scoop.ps1, scoop.cmd, scoop)
+        under bin\, and etc\packages\default.txt. The environment files and any
+        etc\packages\<host>.txt belong to the user and are never touched. Previous
+        versions go to backups\scripts-<timestamp>\. A locally edited default.txt is
+        reported before it is replaced (its hash is recorded in default.txt.sha256).
+    .PARAMETER Branch
+        Git branch to download from, for testing a branch on one machine:
+        --update --branch=feature/xyz. Remembered in etc\scoop-boot.branch until
+        --update --branch=main; without the switch the remembered branch, else main.
     #>
+    param(
+        [string]$Branch = ''
+    )
     Write-Section "scoop-boot Update"
-    $base = 'https://raw.githubusercontent.com/stotz/scoop-boot/main'
-    $files = @('bin/scoop-boot.ps1', 'bin/scoop-complete-install.ps1', 'bin/scoop-complete-reset.ps1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop')
+    $Branch = Get-UpdateBranch -Requested $Branch
+    $base = "https://raw.githubusercontent.com/stotz/scoop-boot/$Branch"
+    if ($Branch -ne 'main') { Write-Warning "Downloading from branch '$Branch', not from main (remembered in $global:BranchFile; back with --update --branch=main)" }
+    $files = @('bin/scoop-boot.ps1', 'bin/scoop-complete-install.ps1', 'bin/scoop-complete-reset.ps1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt')
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $backupDir = Join-Path $global:BaseDir "backups\scripts-$stamp"
@@ -1187,18 +1570,32 @@ function Invoke-SelfUpdate {
             if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
             Copy-Item $target (Join-Path $backupDir $name) -Force
         }
+        # default.txt: warn when the local copy differs from the version last delivered
+        $hashFile = "$target.sha256"
+        if ($rel -eq 'etc/packages/default.txt' -and (Test-Path $target) -and (Test-Path $hashFile)) {
+            $delivered = (Get-Content $hashFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($delivered -and $delivered.Trim() -ne $oldHash) {
+                Write-Warning "$name was edited locally; the edited copy is in $backupDir"
+                Write-Warning "Keep local changes in etc\packages\$(Get-Hostname).txt instead, it replaces default.txt and is never updated"
+            }
+        }
         $targetDir = Split-Path -Parent $target
         if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
         Copy-Item $download $target -Force
+        if ($rel -eq 'etc/packages/default.txt') { Set-Content -Path $hashFile -Value $newHash -Encoding ASCII }
         Write-Success "$name updated: $oldHash -> $newHash$(if ($newVer) { " ($newVer)" })"
         $changed++
     }
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+    # Keep the newest five scripts-* backups; the reset prunes its own snapshots the same way
+    Get-ChildItem -Path (Join-Path $global:BaseDir 'backups') -Directory -Filter 'scripts-*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $backupDir } | Sort-Object Name -Descending | Select-Object -Skip 4 |
+        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     if ($changed -eq 0) {
         Write-Info "Everything is current"
     } else {
         Write-Info "$changed file(s) updated; previous versions in $backupDir"
-        Write-Info "Environment files under etc\environments were not touched"
+        Write-Info "Environment files under etc\environments and host package lists were not touched"
     }
     return $true
 }
@@ -1248,11 +1645,19 @@ function Invoke-ApplyEnv {
         Write-Info "Sweeping Scoop entries from Machine PATH (rebuilt from the system.* files)"
         $totalChanges += Remove-ScoopPathEntries -Scope 'Machine' -DryRun $DryRun
     }
+    # Definitions of all Machine files first: a reference then resolves to the value
+    # the files define, wherever the definition stands and whatever the registry holds
+    $global:EnvFileDefinitions = @{}
+    $machineOperations = @{}
+    foreach ($file in ($envFiles | Where-Object { $_.Scope -eq 'Machine' })) {
+        $machineOperations[$file.Path] = Read-EnvironmentFile -FilePath $file.Path
+        Register-EnvFileDefinitions -Operations $machineOperations[$file.Path]
+    }
     foreach ($file in ($envFiles | Where-Object { $_.Scope -eq 'Machine' })) {
         $fileName = Split-Path -Leaf $file.Path
         Write-Info "Processing: $fileName"
 
-        $operations = Read-EnvironmentFile -FilePath $file.Path
+        $operations = $machineOperations[$file.Path]
         $changes = Apply-EnvironmentOperations -Operations $operations -Scope $file.Scope -SourceFile $file.Path -DryRun $DryRun
         $totalChanges += $changes
     }
@@ -1677,7 +2082,8 @@ function Test-ScoopBoot {
         $hostname = Get-Hostname
         $username = Get-Username
         $filename = "system.$hostname.$username.env"
-        $test.Result = $filename -match "^system\.[a-z0-9\-]+\.[a-z0-9\-]+\.env$"
+        # User names may contain dots (urs.stotz); host and user are lower case
+        $test.Result = ($filename -match "^system\.[a-z0-9.\-]+\.env$") -and ($filename -eq $filename.ToLower()) -and ($filename -eq "system.$hostname.$username.env")
     } catch {}
     $tests += $test
 
@@ -1897,6 +2303,111 @@ JAVA_HOME=C:\java
     try {
         $parsed = Parse-EnvironmentLine -Line "PSModulePath+=C:\modules"
         $test.Result = $parsed.Type -eq "ListPrepend" -and $parsed.Name -eq "PSModulePath" -and $parsed.Value -eq "C:\modules"
+    } catch {}
+    $tests += $test
+
+    # Test 31: package list parsing (comments, blanks, bucket/name, order)
+    $test = @{Name = "Read-PackageList: comments, blanks, bucket/name, order kept"; Result = $false}
+    try {
+        $listFile = Join-Path $env:TEMP "scoop-boot-selftest-packages.txt"
+        @('# header', '', 'vcredist2022', 'java/temurin25-jdk   # jdk', '  nmap  ', '# trailing') | Set-Content -Path $listFile -Encoding ASCII
+        $parsed = @(Read-PackageList -Path $listFile)
+        $test.Result = ($parsed.Count -eq 3) -and ($parsed[0] -eq 'vcredist2022') -and ($parsed[1] -eq 'java/temurin25-jdk') -and ($parsed[2] -eq 'nmap')
+        Remove-Item $listFile -Force -ErrorAction SilentlyContinue
+    } catch {}
+    $tests += $test
+
+    # Test 32: package list rejects malformed lines, empty file gives empty array
+    $test = @{Name = "Read-PackageList: malformed line ignored, empty file is empty"; Result = $false}
+    try {
+        $listFile = Join-Path $env:TEMP "scoop-boot-selftest-packages.txt"
+        @('good-name', 'bad name with spaces', 'also/bad/name') | Set-Content -Path $listFile -Encoding ASCII
+        $parsed = @(Read-PackageList -Path $listFile -Silent)
+        $ok1 = ($parsed.Count -eq 1) -and ($parsed[0] -eq 'good-name')
+        @('# only a comment') | Set-Content -Path $listFile -Encoding ASCII
+        $parsed = @(Read-PackageList -Path $listFile)
+        $ok2 = ($parsed.Count -eq 0)
+        Remove-Item $listFile -Force -ErrorAction SilentlyContinue
+        $test.Result = $ok1 -and $ok2
+    } catch {}
+    $tests += $test
+
+    # Test 33: bucket prefix stripped for the app directory name
+    $test = @{Name = "Get-ManifestAppName strips bucket prefix"; Result = $false}
+    try {
+        $test.Result = (Get-ManifestAppName -Package 'java/temurin25-jdk') -eq 'temurin25-jdk' -and (Get-ManifestAppName -Package 'nmap') -eq 'nmap'
+    } catch {}
+    $tests += $test
+
+    # Test 34: a reference resolves from the file definitions, whatever the order of the lines
+    $test = @{Name = "Expansion: reference before definition resolves from the file"; Result = $false}
+    try {
+        $savedDefs = $global:EnvFileDefinitions
+        $global:EnvFileDefinitions = @{}
+        $ops = @('PATH+=$T_SUB\bin', 'T_SUB=$T_USR\sub', 'T_USR=C:\t') | ForEach-Object { Parse-EnvironmentLine -Line $_ }
+        Register-EnvFileDefinitions -Operations $ops
+        $test.Result = (Expand-EnvironmentVariables -Value '$T_SUB\bin') -eq 'C:\t\sub\bin' -and
+            -not $global:EnvFileDefinitions.ContainsKey('PATH')
+        $global:EnvFileDefinitions = $savedDefs
+    } catch { $global:EnvFileDefinitions = $savedDefs }
+    $tests += $test
+
+    # Test 35: "$$" is a literal dollar sign and is not reported as unresolved
+    $test = @{Name = "Expansion: `$`$ gives a literal `$"; Result = $false}
+    try {
+        $plain = Expand-EnvironmentVariables -Value '$$P$$G $SCOOP'
+        $kept = Expand-EnvironmentVariables -Value '$$P$$G' -KeepEscapes
+        $test.Result = $plain -eq "`$P`$G $global:BaseDir" -and -not ($kept -match '\$\{?[A-Z_][A-Z0-9_]*\}?')
+    } catch {}
+    $tests += $test
+
+    # Test 36: a definition that refers to itself extends the registry value instead of looping
+    $test = @{Name = "Expansion: self-reference falls through to the registry"; Result = $false}
+    try {
+        $savedDefs = $global:EnvFileDefinitions
+        $global:EnvFileDefinitions = @{}
+        [Environment]::SetEnvironmentVariable("T_SELF", "old", "Process")
+        Register-EnvFileDefinitions -Operations @(Parse-EnvironmentLine -Line 'T_SELF=$T_SELF;new')
+        $test.Result = (Expand-EnvironmentVariables -Value '$T_SELF') -eq 'old;new'
+        [Environment]::SetEnvironmentVariable("T_SELF", $null, "Process")
+        $global:EnvFileDefinitions = $savedDefs
+    } catch { $global:EnvFileDefinitions = $savedDefs }
+    $tests += $test
+
+    # Test 37: every $global: name the script reads is initialised (Set-StrictMode fails on
+    # an unset one; --dry-run was broken this way until v0015)
+    $test = @{Name = "All global variables are initialised"; Result = $false}
+    try {
+        $names = [regex]::Matches((Get-Content $PSCommandPath -Raw), '\$global:([A-Za-z_][A-Za-z0-9_]*)') |
+            ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+        $missing = @($names | Where-Object { -not (Test-Path "variable:global:$_") -and $_ -ne 'ScoopBootLibraryOnly' })
+        if ($missing.Count -gt 0) { Write-Warning "Unset global variable(s): $($missing -join ', ')" }
+        $test.Result = $missing.Count -eq 0
+    } catch {}
+    $tests += $test
+
+    # Test 38: the three scripts carry one version (since v0015)
+    $test = @{Name = "Install and reset scripts carry the scoop-boot version"; Result = $false}
+    try {
+        $ok = $true
+        foreach ($name in @('scoop-complete-install.ps1', 'scoop-complete-reset.ps1')) {
+            $file = Join-Path $global:BaseDir "bin\$name"
+            if (-not (Test-Path $file)) { continue }
+            $m = Select-String -Path $file -Pattern 'Version:\s*([0-9.]+)' | Select-Object -First 1
+            $v = if ($m) { $m.Matches[0].Groups[1].Value } else { '' }
+            if ($v -ne $global:ScriptVersion) { Write-Warning "$name is $v, scoop-boot.ps1 is $global:ScriptVersion; run --update"; $ok = $false }
+        }
+        $test.Result = $ok
+    } catch {}
+    $tests += $test
+
+    # Test 39: -NAME (unset) parses and applies; it carried no Value key and failed under strict mode until v0015
+    $test = @{Name = "Unset (-NAME) parses and applies"; Result = $false}
+    try {
+        $op = Parse-EnvironmentLine -Line '-T_GONE'
+        [Environment]::SetEnvironmentVariable('T_GONE', 'x', 'Process')
+        $n = Apply-EnvironmentOperations -Operations @($op) -Scope 'Process' -SourceFile 'test.env' -DryRun $false
+        $test.Result = ($op.Type -eq 'Unset') -and ($n -eq 1) -and ($null -eq [Environment]::GetEnvironmentVariable('T_GONE', 'Process'))
     } catch {}
     $tests += $test
 
@@ -2126,7 +2637,27 @@ if ($global:ParsedArgs.AsrReport) {
 }
 
 if ($global:ParsedArgs.Update) {
-    if (Invoke-SelfUpdate) { exit 0 } else { exit 1 }
+    if (Invoke-SelfUpdate -Branch $global:ParsedArgs.Branch) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.AdminInit) {
+    if (Invoke-AdminInit -Branch $global:ParsedArgs.Branch) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.AdminSetEnv) {
+    if (Invoke-AdminSetEnv) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.UserInstall) {
+    if (Invoke-UserInstall) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.ListPackages) {
+    if (Invoke-ListPackages) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.AdminReset) {
+    if (Invoke-AdminReset -Force $global:ParsedArgs.Force -KeepPersist $global:ParsedArgs.KeepPersist) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.Install.Count -gt 0) {

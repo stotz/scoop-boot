@@ -8,8 +8,28 @@
     Phase 2 (User): Installs all tools + automatic cleanup + GCC verification
 
 .NOTES
-    Version: 2.10.1
-    Date: 2026-10-20
+    Version: 1.15.0
+    Date: 2026-10-21
+    Since v0015 the version follows scoop-boot.ps1 (one version for the whole
+    tool set; the previous own numbering ended with 2.11.0).
+
+    Changes in v1.15.0 (formerly 2.11.0):
+    - Step 3 catches an exception from "scoop install" and counts the package as
+      failed instead of ending the run
+    - Manual bootstrap fallback runs only when the Scoop core is missing; after a
+      [FATAL] from --bootstrap (binary refused by endpoint security) it stopped
+      adding "Access is denied" noise
+    - FIX manual bootstrap fallback: bin\ and shims\ leave the PATH while the
+      official installer runs (it refuses when it finds the scoop wrapper)
+    - Package list moved out of the script into etc\packages\default.txt
+      (delivered by --update) or etc\packages\<host>.txt (yours, replaces
+      default.txt). One manifest per line in install order, "bucket/name" allowed
+    - Post-install steps (Java reset, VC++ runtime check, MSYS2/GCC, ncat shims,
+      registry imports, tray apps) run only for packages in the list; the
+      $PackageHandlers table names them and -ListPackages shows list and handlers
+      without installing
+    - Bootstrap packages stay in Step 1; the list starts with vcredist2022
+    - Next-step texts name scoop-boot.ps1 --admin-setenv / --user-install
 
     Changes in v2.10.1:
     - sliksvn removed from the package list (TortoiseSVN ships the same svn.exe
@@ -124,11 +144,36 @@
 
 param(
     [switch]$SetEnvironment,
-    [switch]$InstallTools
+    [switch]$InstallTools,
+
+    [switch]$ListPackages
 )
 
 $ScoopDir = "C:\usr"
-$InstallVersion = "2.10.1"
+$InstallVersion = "1.15.0"   # same as scoop-boot.ps1, see .NOTES
+
+# Packages come from etc\packages\<host>.txt or etc\packages\default.txt (see
+# Get-PackageListFile in scoop-boot.ps1). The file decides WHICH packages are
+# installed, in which order. What a package needs beyond "scoop install" stays in
+# this script and runs only when the package is in the list; this table names
+# those packages so that -ListPackages can show them and the self-check can warn
+# about a handler whose package is missing from the list.
+# Installed by the bootstrap (Step 1) before any list is read; never listed in a package file
+$BootstrapPackages = @('7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
+
+$PackageHandlers = @{
+    'vcredist2022'      = 'skipped when the VC++ runtime is present; runtime verified in Step 4'
+    'temurin25-jdk'     = 'Step 4: scoop reset (default Java)'
+    'msys2'             = 'Step 4: pacman -Syu, GCC (UCRT64), compile-and-run smoke test'
+    'nmap'              = 'Step 4: shims nc and netcat -> ncat.exe'
+    '7zip'              = 'Step 5: reg import install-context.reg'
+    'notepadplusplus'   = 'Step 5: reg import install-context.reg'
+    'vscode'            = 'Step 5: reg import install-context.reg'
+    'git'               = 'Step 5: reg import install-context.reg'
+    'python314'         = 'Step 5: reg import install-pep-514.reg'
+    'jetbrains-toolbox' = 'Step 6: started (tray)'
+    'greenshot'         = 'Step 6: started (tray)'
+}
 
 # Logging and version banner come from scoop-boot.ps1 (library mode). Without it
 # the script still works, but only prints to the console.
@@ -360,7 +405,7 @@ Rules:
         Write-Host "  .\bin\scoop-boot.ps1 --apply-env" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Then re-run this installation:" -ForegroundColor Yellow
-        Write-Host "  .\scoop-complete-install.ps1 -SetEnvironment" -ForegroundColor White
+        Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
         exit 1
     }
@@ -406,7 +451,7 @@ Rules:
         Write-Host "  user.bootes.john.env" -ForegroundColor Green
         Write-Host ""
         Write-Host "After fixing, re-run:" -ForegroundColor Yellow
-        Write-Host "  .\scoop-complete-install.ps1 -SetEnvironment" -ForegroundColor White
+        Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
         exit 1
     }
@@ -443,7 +488,7 @@ Rules:
     Write-Host "Next step:" -ForegroundColor Yellow
     Write-Host "  Close this Administrator PowerShell" -ForegroundColor White
     Write-Host "  Open a NORMAL PowerShell (not Administrator)" -ForegroundColor White
-    Write-Host "  Run: .\scoop-complete-install.ps1 -InstallTools" -ForegroundColor White
+    Write-Host "  Run: C:\usr\bin\scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""
 }
 
@@ -561,8 +606,10 @@ function Install-ScoopTools {
         }
     }
 
-    # FALLBACK: Manual bootstrap if scoop-boot.ps1 failed
-    if (-not $bootstrapSuccess) {
+    # FALLBACK: Manual bootstrap only when the Scoop core itself is missing. When the
+    # core is there and --bootstrap still failed, an essential tool was refused (see
+    # its [FATAL] message); repeating the installs here only adds misleading errors.
+    if (-not $bootstrapSuccess -and -not (Test-Path "$ScoopDir\apps\scoop\current")) {
         Write-Host ""
         Write-Host "[INFO] Using manual bootstrap (scoop-boot.ps1 failed)..." -ForegroundColor Yellow
         Write-Host ""
@@ -607,13 +654,22 @@ function Install-ScoopTools {
             $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
             $isAdminContext = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-            if ($isAdminContext) {
-                # Running as admin - use -RunAsAdmin flag
-                Write-Host "[INFO] Installing with admin privileges..." -ForegroundColor Gray
-                & $tempInstaller -RunAsAdmin -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
-            } else {
-                # Running as normal user
-                & $tempInstaller -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
+            # The installer aborts when a scoop command is on the PATH; the scoop
+            # wrapper in bin\ is one. bin\ and shims\ leave the PATH while it runs.
+            $savedPath = $env:Path
+            $hidden = @("$ScoopDir\bin", "$ScoopDir\shims") | ForEach-Object { $_.ToLower() }
+            $env:Path = (@($env:Path -split ';') | Where-Object { $_ -and ($hidden -notcontains $_.TrimEnd('\').ToLower()) }) -join ';'
+            try {
+                if ($isAdminContext) {
+                    # Running as admin - use -RunAsAdmin flag
+                    Write-Host "[INFO] Installing with admin privileges..." -ForegroundColor Gray
+                    & $tempInstaller -RunAsAdmin -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
+                } else {
+                    # Running as normal user
+                    & $tempInstaller -ScoopDir $ScoopDir -ScoopGlobalDir "$ScoopDir\global" -NoProxy
+                }
+            } finally {
+                $env:Path = $savedPath
             }
 
             Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
@@ -712,89 +768,51 @@ function Install-ScoopTools {
     Write-Host "This will take 15-30 minutes depending on internet speed." -ForegroundColor Gray
     Write-Host ""
 
-    # Essential tools already installed by bootstrap: 7zip, git, aria2, sudo, innounp, dark, lessmsi, wget, cacert
-    # We install everything else
-
-    $apps = @(
-    # Browsers
-        'firefox', 'googlechrome',
-
-        # Java JDKs
-        'temurin25-jdk',
-
-        # Build tools
-        'maven', 'gradle', 'ant', 'cmake', 'make', 'ninja', 'kotlin',
-
-        # Documentation
-        'graphviz', 'doxygen', 'pandoc', 'ghostscript',
-
-        # C++ package manager
-        'vcpkg',
-
-        # Programming languages
-        'python314', 'perl', 'nodejs', 'msys2',
-
-        # Version control
-        'tortoisesvn', 'gh', 'lazygit',
-
-        # Editors & IDEs
-        'vscode', 'neovim', 'notepadplusplus', 'jetbrains-toolbox',
-
-        # Terminal
-        'windows-terminal',
-
-        # GUI applications
-        'winmerge', 'freecommander', 'greenshot', 'everything', 'postman', 'dbeaver',
-
-        # Security tools
-        'keepass', 'gnupg', 'openssl',
-
-        # Network tools
-        'nmap', 'wireshark',
-
-        # CLI tools
-        'jq', 'yq', 'curl', 'openssh', 'putty', 'winscp', 'filezilla', 'ripgrep', 'fd', 'bat', 'jid',
-        'btop', 'less', 'sudo', 'wget', 'cacert', 'innounp', 'dark', 'lessmsi',
-
-        # System tools
-        'sysinternals', 'mousejiggler',
-
-        # Database tools
-        'sqlite', 'mariadb', 'tomcat',
-
-        # Cloud tools
-        'azure-cli',
-
-        # Media tools
-        'ffmpeg', 'irfanview', 'krita',
-
-        # System libraries
-        'vcredist2022', 'systeminformer'
-
-    # NOTE: Docker alternatives (Rancher Desktop, Docker Desktop) are not included
-    # Install manually if needed:
-    #   - Docker Desktop: https://www.docker.com/products/docker-desktop
-    #   - Rancher Desktop: https://rancherdesktop.io
-    #   - Podman Desktop: https://podman-desktop.io
-    )
+    # Bootstrap (Step 1) installed 7zip, git, aria2, sudo, innounp, dark, lessmsi, wget,
+    # cacert and the main and extras buckets. Everything else comes from the package list.
+    $packageFile = Get-PackageListFile
+    if (-not $packageFile) {
+        Write-Host "[INFO] No package list under $global:PackagesDir, fetching default.txt with scoop-boot.ps1 --update" -ForegroundColor Gray
+        & "$ScoopDir\bin\scoop-boot.ps1" --update
+        $packageFile = Get-PackageListFile
+    }
+    if (-not $packageFile) {
+        Write-Host "[FATAL] No package list: $global:PackagesDir\default.txt is missing. Run: $ScoopDir\bin\scoop-boot.ps1 --update" -ForegroundColor Red
+        exit 1
+    }
+    $apps = @(Read-PackageList -Path $packageFile)
+    $requestedNames = @($apps | ForEach-Object { Get-ManifestAppName -Package $_ })
+    Write-Host "[INFO] Package list: $packageFile ($($apps.Count) packages)" -ForegroundColor Gray
+    foreach ($handlerApp in ($PackageHandlers.Keys | Sort-Object)) {
+        if ($BootstrapPackages -contains $handlerApp) { continue }
+        if ($requestedNames -notcontains $handlerApp -and -not (Test-Path "$ScoopDir\apps\$handlerApp\current")) {
+            Write-Host "[WARN] $handlerApp is not in the package list; its post-install step ($($PackageHandlers[$handlerApp])) will not run" -ForegroundColor Yellow
+        }
+    }
+    if ($apps.Count -eq 0) {
+        Write-Host "[FATAL] Package list is empty: $packageFile" -ForegroundColor Red
+        exit 1
+    }
 
     # VC++ 2015-2022 runtime: the vcredist2022 post_install needs elevation.
     # Skip it when the runtime is already present (usual on managed images).
     $vcRuntimeKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
     $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue
-    if ($vcRuntime -and $vcRuntime.Installed -eq 1) {
+    if ($vcRuntime -and $vcRuntime.Installed -eq 1 -and $requestedNames -contains 'vcredist2022') {
         Write-Host "[OK] VC++ runtime already present ($($vcRuntime.Version)), skipping vcredist2022" -ForegroundColor Gray
-        $apps = $apps | Where-Object { $_ -ne 'vcredist2022' }
+        $apps = @($apps | Where-Object { (Get-ManifestAppName -Package $_) -ne 'vcredist2022' })
     }
 
     foreach ($app in $apps) {
-        $appDir = "$ScoopDir\apps\$app\current"
+        $appDir = "$ScoopDir\apps\$(Get-ManifestAppName -Package $app)\current"
         if (Test-Path $appDir) {
             Write-Host "[OK] Already installed: $app" -ForegroundColor Gray
             continue
         }
         Write-Host "[INFO] Installing $app..." -ForegroundColor Gray
-        scoop install $app
+        # A manifest script may throw (Write-Error under a Stop preference, a failing
+        # installer); that is this package's failure, not the end of the run
+        try { scoop install $app } catch { Write-Host "[ERROR] $app`: $($_.Exception.Message)" -ForegroundColor Red }
         if (Test-Path $appDir) {
             Write-Host "[OK] Installed: $app" -ForegroundColor Green
         } else {
@@ -816,18 +834,24 @@ function Install-ScoopTools {
     Write-Host ">>> Step 4: Post-installation tasks..." -ForegroundColor White
     Write-Host ""
 
+    # Handlers below run only for packages in the list (or already on disk from an
+    # earlier run); a package that is not listed is simply not touched.
+    $listed = $requestedNames + $BootstrapPackages + @($PackageHandlers.Keys | Where-Object { Test-Path "$ScoopDir\apps\$_\current" })
+
     # Set default Java version
-    if (Test-Path "$ScoopDir\apps\temurin25-jdk\current\bin\java.exe") {
+    if ($listed -contains 'temurin25-jdk' -and (Test-Path "$ScoopDir\apps\temurin25-jdk\current\bin\java.exe")) {
         Write-Host "[INFO] Setting default Java to Temurin 25..." -ForegroundColor Gray
         scoop reset temurin25-jdk 2>&1 | Out-Null
         Write-Host "[OK] Default Java set to Temurin 25" -ForegroundColor Green
-    } else {
+    } elseif ($listed -contains 'temurin25-jdk') {
         Write-Host "[WARN] temurin25-jdk is not installed, default Java not set" -ForegroundColor Yellow
     }
 
     # VC++ runtime: verify the result of the vcredist2022 post_install (needs elevation)
     $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue
-    if ($vcRuntime -and $vcRuntime.Installed -eq 1) {
+    if ($listed -notcontains 'vcredist2022') {
+        # not managed by this list; nothing to verify
+    } elseif ($vcRuntime -and $vcRuntime.Installed -eq 1) {
         Write-Host "[OK] VC++ runtime installed ($($vcRuntime.Version))" -ForegroundColor Green
         $vcredistInstaller = Get-ChildItem "$ScoopDir\apps\vcredist2022\current" -Filter "VC_redist*.exe" -ErrorAction SilentlyContinue
         if ($vcredistInstaller) {
@@ -842,7 +866,7 @@ function Install-ScoopTools {
     }
 
     # Initialize MSYS2 and install GCC
-    if (Test-Path "$ScoopDir\apps\msys2\current") {
+    if ($listed -contains 'msys2' -and (Test-Path "$ScoopDir\apps\msys2\current")) {
         Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
         Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
         Write-Host "     (core update plus GCC download, several minutes)" -ForegroundColor DarkGray
@@ -944,7 +968,7 @@ function Install-ScoopTools {
             Write-Host ""
             Write-Host "NOTE: Use ucrt64.exe (modern), NOT msys2.exe (legacy)" -ForegroundColor Yellow
         }
-    } else {
+    } elseif ($listed -contains 'msys2') {
         Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
     }
 
@@ -952,7 +976,7 @@ function Install-ScoopTools {
     # netcat point to ncat from nmap. "scoop shim add" re-adds shims to the User PATH,
     # which Step 7 cleans up again; that is why this runs before Step 7.
     $ncat = "$ScoopDir\apps\nmap\current\ncat.exe"
-    if (Test-Path $ncat) {
+    if ($listed -contains 'nmap' -and (Test-Path $ncat)) {
         foreach ($alias in @('nc', 'netcat')) {
             if (Test-Path "$ScoopDir\shims\$alias.exe") {
                 Write-Host "[OK] Shim already present: $alias -> ncat" -ForegroundColor Gray
@@ -965,7 +989,7 @@ function Install-ScoopTools {
                 }
             }
         }
-    } else {
+    } elseif ($listed -contains 'nmap') {
         Write-Host "[WARN] nmap not found, skipping nc/netcat shims" -ForegroundColor Yellow
     }
 
@@ -982,6 +1006,7 @@ function Install-ScoopTools {
     )
 
     foreach ($item in $regFiles) {
+        if ($listed -notcontains $item.App) { continue }
         $regPath = "$ScoopDir\apps\$($item.App)\current\$($item.File)"
         if (Test-Path $regPath) {
             Start-Process reg -ArgumentList "import `"$regPath`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
@@ -994,7 +1019,7 @@ function Install-ScoopTools {
     Write-Host ""
 
     $toolboxPath = "$ScoopDir\apps\jetbrains-toolbox\current\jetbrains-toolbox.exe"
-    if (Test-Path $toolboxPath) {
+    if ($listed -contains 'jetbrains-toolbox' -and (Test-Path $toolboxPath)) {
         $toolboxRunning = Get-Process -Name "jetbrains-toolbox" -ErrorAction SilentlyContinue
         if (-not $toolboxRunning) {
             Start-Process -FilePath $toolboxPath -ErrorAction SilentlyContinue
@@ -1005,7 +1030,7 @@ function Install-ScoopTools {
     }
 
     $greenshotPath = "$ScoopDir\apps\greenshot\current\Greenshot.exe"
-    if (Test-Path $greenshotPath) {
+    if ($listed -contains 'greenshot' -and (Test-Path $greenshotPath)) {
         $greenshotRunning = Get-Process -Name "Greenshot" -ErrorAction SilentlyContinue
         if (-not $greenshotRunning) {
             Start-Process -FilePath $greenshotPath -ErrorAction SilentlyContinue
@@ -1063,6 +1088,38 @@ function Install-ScoopTools {
 # ============================================================================
 # MAIN
 # ============================================================================
+if ($ListPackages) {
+    # Show the package list this machine would install, and the handlers, without installing
+    $packageFile = Get-PackageListFile
+    if (-not $packageFile) {
+        Write-Host "[ERROR] No package list under $global:PackagesDir. Run: $ScoopDir\bin\scoop-boot.ps1 --update" -ForegroundColor Red
+        exit 1
+    }
+    $apps = @(Read-PackageList -Path $packageFile)
+    Write-Host ""
+    Write-Host "Package list: $packageFile" -ForegroundColor Cyan
+    Write-Host "Bootstrap (always, Step 1): 7zip git aria2 sudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
+    Write-Host "Buckets added in Step 2: java versions" -ForegroundColor Gray
+    Write-Host ""
+    $n = 0
+    foreach ($app in $apps) {
+        $n++
+        $name = Get-ManifestAppName -Package $app
+        $state = if (Test-Path "$ScoopDir\apps\$name\current") { 'installed' } else { 'missing' }
+        $handler = if ($PackageHandlers.ContainsKey($name)) { "  <- $($PackageHandlers[$name])" } else { '' }
+        Write-Host ("{0,3}  {1,-22} {2,-10}{3}" -f $n, $app, $state, $handler)
+    }
+    Write-Host ""
+    foreach ($handlerApp in ($PackageHandlers.Keys | Sort-Object)) {
+        if ($BootstrapPackages -contains $handlerApp) { continue }
+        if (@($apps | ForEach-Object { Get-ManifestAppName -Package $_ }) -notcontains $handlerApp) {
+            Write-Host "[WARN] $handlerApp has a post-install step but is not in the list" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "$($apps.Count) packages. To change the list on this machine, create $global:PackagesDir\$(Get-Hostname).txt (it replaces default.txt)." -ForegroundColor Gray
+    exit 0
+}
+
 if ($SetEnvironment) {
     Set-DevelopmentEnvironment
 } elseif ($InstallTools) {
@@ -1072,9 +1129,9 @@ if ($SetEnvironment) {
     Write-Host "=== Scoop Complete Installation ===" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Phase 1 (Administrator):" -ForegroundColor Yellow
-    Write-Host "  .\scoop-complete-install.ps1 -SetEnvironment" -ForegroundColor White
+    Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
     Write-Host ""
     Write-Host "Phase 2 (Normal user):" -ForegroundColor Yellow
-    Write-Host "  .\scoop-complete-install.ps1 -InstallTools" -ForegroundColor White
+    Write-Host "  C:\usr\bin\scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""
 }

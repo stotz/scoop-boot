@@ -46,10 +46,9 @@ verification, extraction and shims work the same for every bucket.
 
 ## Where scoop-boot fits
 
-Phase 2 of `scoop-complete-install.ps1` adds the buckets `extras`, `java` and `versions`
-and installs its package list from them. Pointing the package list at a private bucket
-(`company/gradle` instead of `gradle`) and adding that bucket in Step 2 is a change in the
-package list of the install script. Private buckets over HTTPS work on networks where
+`--user-install` adds the buckets `extras`, `java` and `versions` and installs the
+package list from them. Pointing the list at a private bucket (`company/gradle` instead
+of `gradle`) and adding that bucket next to the three is a small change in scoop-boot. Private buckets over HTTPS work on networks where
 SSH is blocked; the bucket URL is cloned with Git's credential helper like any other
 repository.
 

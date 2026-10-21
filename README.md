@@ -4,13 +4,7 @@
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-lightgrey.svg)](#support-matrix)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#author--license)
 
-Three PowerShell scripts that set up, configure and tear down a Windows development environment based on the [Scoop](https://scoop.sh) package manager. Everything lives under `C:\usr`.
-
-| Script                             | Version | Purpose                                              |
-|------------------------------------|---------|------------------------------------------------------|
-| `bin/scoop-boot.ps1`               | 1.14.2  | Bootstrap Scoop, manage environment variables (.env) |
-| `bin/scoop-complete-install.ps1`   | 2.10.1  | Two-phase installation of the full tool set          |
-| `bin/scoop-complete-reset.ps1`     | 2.6.0   | Remove everything again (processes, files, registry) |
+One PowerShell script, `scoop-boot.ps1`, that sets up, configures and tears down a Windows development environment based on the [Scoop](https://scoop.sh) package manager: three commands from a fresh machine to a working tool set, environment variables managed through files, and a reset that leaves your files alone. Everything lives under `C:\usr`.
 
 ---
 
@@ -23,61 +17,48 @@ From a fresh Windows machine (for example an Azure Virtual Desktop) to a working
 - Windows display language: **English (United States)**.
   Settings > Time & Language > Language & region > Windows display language.
   Error messages in English are searchable; localized ones are not.
-- Administrator rights for phase 1. Phase 2 runs as a normal user.
+- Administrator rights for steps 1 and 2. Step 3 runs as a normal user.
 - Internet access to `github.com`, `raw.githubusercontent.com` and the download hosts of the Scoop manifests.
   HTTPS is enough; nothing here needs SSH.
 
-### 1. Directories, scripts and environment file (PowerShell as Administrator)
+### 1. Initialize (PowerShell as Administrator)
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-
 New-Item -ItemType Directory -Path C:\usr\bin -Force
-New-Item -ItemType Directory -Path C:\usr\etc\environments -Force
-New-Item -ItemType Directory -Path C:\tmp -Force
-New-Item -ItemType Directory -Path C:\devl -Force    # workspace for repositories, not used by scoop-boot
-New-Item -ItemType Directory -Path C:\data -Force    # data and optional tool caches (DATA in the env file)
-
-# scoop-boot.ps1 fetches the other scripts and the scoop wrapper itself
-$base = "https://raw.githubusercontent.com/stotz/scoop-boot/main"
-Invoke-WebRequest -Uri "$base/bin/scoop-boot.ps1" -OutFile C:\usr\bin\scoop-boot.ps1
-C:\usr\bin\scoop-boot.ps1 --update
-
-# Environment files, named after this host and user (lowercase):
-# system.* = Machine scope (the source of truth), user.* = User scope (your additions)
-$envName  = "$($env:COMPUTERNAME.ToLower()).$($env:USERNAME.ToLower()).env"
-$envFile  = "C:\usr\etc\environments\system.$envName"
-$userFile = "C:\usr\etc\environments\user.$envName"
-Invoke-WebRequest -Uri "$base/etc/environments/system.hostname.username.env" -OutFile $envFile
-Invoke-WebRequest -Uri "$base/etc/environments/user.hostname.username.env"   -OutFile $userFile
-
-# Optional: review paths and tool versions before applying.
-# Full path on purpose: Git's usr\bin (in PATH once Git is installed) contains an
-# extensionless script named 'notepad', and PowerShell would hand it to ShellExecute
-# ("Select an app to open 'notepad'").
-C:\Windows\System32\notepad.exe $envFile
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1 -OutFile C:\usr\bin\scoop-boot.ps1
+C:\usr\bin\scoop-boot.ps1 --admin-init
 ```
 
-Notes:
+`--admin-init` creates `C:\usr\etc\environments`, `C:\usr\etc\packages`, `C:\tmp`, `C:\devl`
+(repositories) and `C:\data` (data, optional tool caches), downloads the other scripts, the
+scoop wrapper and the package list (`--update`), writes `system.<host>.<user>.env` and
+`user.<host>.<user>.env` from the templates when they do not exist yet, and opens the
+system file in Notepad: review paths and tool versions, then save. `system.*` is applied at
+Machine scope and is the source of truth; `user.*` holds your additions at User scope.
+Running `--admin-init` again keeps everything that exists.
 
-- `$env:USERNAME` is the account running this shell. If you run PowerShell as a separate admin account ("run as"), replace it with your regular user name.
-- The file name must start with `system.` (Machine scope) or `user.` (User scope). Other names are rejected by phase 1.
+If you run PowerShell as a separate admin account ("run as"), the files are named after that
+account; rename them to your regular user name.
 
-### 2. Phase 1: environment (PowerShell as Administrator)
+### 2. Environment (PowerShell as Administrator)
 
 ```powershell
-C:\usr\bin\scoop-complete-install.ps1 -SetEnvironment
+C:\usr\bin\scoop-boot.ps1 --admin-setenv
 ```
 
-Sets `TMP`/`TEMP` to `C:\tmp`, then applies the `.env` file(s) from `C:\usr\etc\environments` at Machine scope.
+Sets `TMP`/`TEMP` to `C:\tmp`, applies the `system.*` file at Machine scope, then cleans
+the User scope and applies the `user.*` file.
 
-### 3. Phase 2: tools (new PowerShell window, normal user)
+### 3. Tools (new PowerShell window, normal user)
 
 ```powershell
-C:\usr\bin\scoop-complete-install.ps1 -InstallTools
+C:\usr\bin\scoop-boot.ps1 --user-install
 ```
 
-Bootstraps Scoop, adds the `extras`, `java` and `versions` buckets, installs the tool set (JDK 25, Python 3.14, Node.js, Kotlin, Maven, Gradle, MSYS2/GCC, editors, CLI tools), imports registry files and cleans up duplicate User-scope PATH entries. Takes 15-30 minutes.
+Bootstraps Scoop, adds the `extras`, `java` and `versions` buckets, installs the package
+list (JDK 25, Python 3.14, Node.js, Kotlin, Maven, Gradle, MSYS2/GCC, editors, CLI tools),
+imports registry files and cleans the User scope. Takes 15-30 minutes.
 
 ### 4. Verify (new shell)
 
@@ -92,7 +73,7 @@ scoop-boot.ps1 --env-status
 
 A compiler that runs is not the same as a program that runs. On machines with endpoint
 security that blocks unknown executables (Defender ASR rule 01443614), the build works and
-the start is refused; Phase 2 reports this as `Failed: gcc (running built exe blocked by ASR)`:
+the start is refused; `--user-install` reports this as `Failed: gcc (running built exe blocked by ASR)`:
 
 ```powershell
 'int main(void){return 42;}' | Set-Content C:\tmp\hello.c
@@ -124,7 +105,7 @@ scoop upgrade      # = scoop update; scoop update -a; scoop cleanup -a; clean us
 
 Bypass when needed: `C:\usr\shims\scoop ...`, or `$env:SCOOP_BOOT_WRAPPER = 'off'`.
 Manual fallback is still `scoop-boot.ps1 --clean-user-scope`. When the `system.*` file
-itself changed, run Phase 1 again (`-SetEnvironment`, as Administrator).
+itself changed, run `--admin-setenv` again (Administrator).
 
 ### Keeping scoop-boot current
 
@@ -137,13 +118,30 @@ scoop-boot.ps1 --asr-report    # Defender/ASR rules, exclusions, blocks of the l
 writes `logs\scoopboot\asr-report-<date>.txt`, the file to attach when asking the
 security team for an exclusion.
 
+### Package list
+
+`--user-install` installs what `C:\usr\etc\packages\default.txt` lists, one manifest per line in
+install order, `#` for comments, `bucket/name` allowed. `--update` delivers that file; do
+not edit it. To change the list on one machine, copy it to
+`C:\usr\etc\packages\<hostname>.txt` (lower case): that file replaces `default.txt`
+completely and is never touched by `--update`. The bootstrap packages (7-Zip, Git, aria2
+and the extractors) are installed before the list and are not part of it.
+
+```powershell
+scoop-boot.ps1 --list-packages   # which file, which packages, which have post-install steps; installs nothing
+```
+
+A few packages need more than `scoop install` (the VC++ runtime check, the MSYS2/GCC
+setup, the `nc`/`netcat` shims, registry imports, tray apps). Those steps run only when
+their package is in the list; `--list-packages` marks them.
+
 ### Caches outside the user profile (optional)
 
 Gradle, Maven, npm, pip, NuGet, JetBrains indexes and WSL disks all default to
 `%USERPROFILE%`. On a roaming or container profile (FSLogix, size quotas) that is the
 wrong place. The `system.*` template ends with a commented block that moves them to
-`C:\data\caches\<tool>`: uncomment what you need, run Phase 1 again
-(`-SetEnvironment`, as Administrator), open a new shell. The block also lists the
+`C:\data\caches\<tool>`: uncomment what you need, run `--admin-setenv` again
+(Administrator), open a new shell. The block also lists the
 one-time commands for the things that are not environment variables (JetBrains
 properties files, `wsl --manage <distro> --move`, Docker's disk image location).
 
@@ -157,8 +155,9 @@ C:\usr\logs\scoopboot\<yyyyMMdd>.log
 2026-10-08T13:21:04 scoop-complete-install.ps1 -InstallTools (2.9.0) [INFO] [OK] Installed: maven
 ```
 
-Phase 1 (admin) and Phase 2 (user) write to the same file; the script field carries
-the mode. Scoop's own messages are included (it runs in-process); output of pacman,
+All commands write to the same file; the second field names the script and mode that
+produced the line (`--admin-setenv` and `--user-install` run the install script in
+its two phases). Scoop's own messages are included (it runs in-process); output of pacman,
 msiexec and reg is not. Each session starts with host, user, admin flag, Windows and
 PowerShell version, script hash and arguments. Logs older than 60 days are removed.
 `C:\usr\logs` is not a Scoop directory; the reset leaves it alone.
@@ -168,28 +167,31 @@ PowerShell version, script hash and arguments. Logs older than 60 days are remov
 Only `apps`, `buckets`, `cache`, `persist`, `shims` and `global`. `bin` and `etc` belong
 to scoop-boot. Anything else you put under `C:\usr` (an EDB PostgreSQL, OSGeo4W, your
 own `workspace`) is left alone by every script, including the reset; its PATH entries
-and variables are yours to maintain. Phase 1 writes `C:\usr\README_scoop_dir_warnings.md`
+and variables are yours to maintain. `--admin-setenv` writes `C:\usr\README_scoop_dir_warnings.md`
 with the same rules for whoever looks into the directory later.
 
 ### Start over
 
+In an Administrator shell:
+
 ```powershell
-C:\usr\bin\scoop-complete-reset.ps1               # full cleanup, asks for confirmation
-C:\usr\bin\scoop-complete-reset.ps1 -Force        # no prompts
-C:\usr\bin\scoop-complete-reset.ps1 -KeepPersist  # keep C:\usr\persist (app data, settings)
+scoop-boot.ps1 --admin-reset                 # full cleanup, asks for confirmation
+scoop-boot.ps1 --admin-reset --force         # no prompts
+scoop-boot.ps1 --admin-reset --keep-persist  # keep C:\usr\persist (app data, settings)
 ```
 
 The reset stops processes running from `C:\usr\apps` (and Explorer, which holds shell
 extensions; it is restarted), writes a backup to `C:\usr\backups\<timestamp>` (the last
 five are kept), removes Scoop's variables and PATH entries, the Scoop directories, registry
-entries and shortcuts. `bin`, `etc`, `logs` and everything that is not Scoop's stay.
+entries and shortcuts. `bin`, `etc`, `logs` and everything that is not Scoop's stay, so
+the setup starts again at `--admin-init`.
 
 ---
 
 ## How it works
 
 Two environment files per machine, both in `C:\usr\etc\environments`:
-`system.<host>.<user>.env` is applied at Machine scope by Phase 1 (Administrator) and is
+`system.<host>.<user>.env` is applied at Machine scope by `--admin-setenv` (Administrator) and is
 the source of truth for `JAVA_HOME`, `PATH` order and the rest; `user.<host>.<user>.env`
 is applied at User scope by `--clean-user-scope` (no Administrator) and holds your
 additions. Before the Machine file is applied, every Machine PATH entry inside Scoop's
@@ -199,8 +201,8 @@ Scoop itself writes `JAVA_HOME`, `GRADLE_USER_HOME` and PATH entries into the Us
 on every install and update, and Windows resolves User variables before Machine
 variables. `--clean-user-scope` removes those entries again (User PATH entries inside
 Scoop's directories, User variables whose name the `system.*` file sets) and the scoop
-wrapper runs it after every state-changing Scoop command. Phase 2 runs it once as its
-last step.
+wrapper runs it after every state-changing Scoop command. `--user-install` runs it once
+as its last step.
 
 Everything a script prints goes to the daily log, with the script name, mode and
 version in front of each line, so that a question about a machine can be answered from
@@ -210,28 +212,42 @@ Environment file syntax, load order and version pinning: [docs/environment-files
 
 ## Commands
 
-`scoop-boot.ps1`:
+`scoop-boot.ps1`, grouped as in `--help`:
 
 ```
---bootstrap          Install Scoop, Git, 7-Zip, aria2, extractors, main and extras buckets
---apply-env          Apply the environment files (system.* needs Administrator), then clean the User scope
+Setup (Administrator shell unless noted)
+--admin-init         1: directories, --update, environment files from the templates, opens the system file
+--admin-setenv       2: apply the environment files at Machine scope (Phase 1)
+--user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)
+--admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
+
+Maintenance
+--update             Download the current scripts, the scoop wrapper and etc\packages\default.txt from GitHub
+--branch=NAME        With --update: download from a branch and remember it (etc\scoop-boot.branch); --branch=main switches back
 --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no Administrator)
 --quiet              With --clean-user-scope: one summary line, and only when something changed
---dry-run            With --apply-env: show the changes without applying them
---update             Download the current scripts and the scoop wrapper from GitHub (bin\ only)
+--list-packages      Package list in use, status of each package and its post-install steps; installs nothing
 --asr-report         Defender/ASR rules, exclusions and blocks of the last 14 days to logs\scoopboot\
---status             Scoop and environment overview
+
+Environment files
+--apply-env          Apply the files (system.* needs Administrator), then clean the User scope
+--dry-run            With --apply-env: show the changes without applying them
+--init-env=FILE      Create an environment file from the template
 --env-status         Environment files found and their load order
 --environment        Current environment variables
---init-env=FILE      Create an environment file from the template
+
+Other
+--bootstrap          Install Scoop and the bootstrap packages only (part of --user-install)
 --install APP...     Install applications through Scoop
+--status             Scoop and environment overview
 --suggest            Suggested applications
---selfTest           Self-tests of the environment file parser
+--self-test          Self-tests (parser, expansion, package list)
 --version, --help
 ```
 
-`scoop-complete-install.ps1 -SetEnvironment` (Administrator) and `-InstallTools` (user);
-`scoop-complete-reset.ps1 [-Force] [-KeepPersist]`; and the wrapper's `scoop upgrade`.
+The wrapper adds `scoop upgrade`. Two helper scripts in `C:\usr\bin` do the installation
+and the reset; the commands above call them, `--update` keeps them current, and there is
+no reason to run them yourself.
 
 ## Documents
 
@@ -240,8 +256,8 @@ Environment file syntax, load order and version pinning: [docs/environment-files
 
 ## Requirements
 
-Windows 10 or 11 (x64), PowerShell 5.1 or newer, local Administrator rights for Phase 1
-and the reset. Tested on Windows 11 (Azure Virtual Desktop).
+Windows 10 or 11 (x64), PowerShell 5.1 or newer, local Administrator rights for the
+`--admin-*` commands. Tested on Windows 11 (Azure Virtual Desktop).
 
 ## Author & License
 

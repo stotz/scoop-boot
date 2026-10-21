@@ -14,8 +14,15 @@
     - PRESERVES: C:\usr\bin\ and C:\usr\etc\
 
 .NOTES
-    Version: 2.6.0
-    Date: 2025-01-29
+    Version: 1.15.0
+    Date: 2026-10-21
+    Since v0015 the version follows scoop-boot.ps1 (one version for the whole
+    tool set; the previous own numbering ended with 2.6.0).
+
+    Changes in v1.15.0:
+    - FIX backup retention counted the scripts-* directories of --update and
+      deleted the snapshot it had just created (letters sort after digits);
+      now only reset snapshots are pruned, the current one never
 
     Changes in v2.6.0:
     - Version banner and daily log via scoop-boot.ps1 (library mode)
@@ -70,7 +77,7 @@ param(
 )
 
 $ScoopDir = "C:\usr"
-$ResetVersion = "2.6.0"
+$ResetVersion = "1.15.0"   # same as scoop-boot.ps1, see .NOTES
 
 # Logging and version banner come from scoop-boot.ps1 (library mode)
 $global:ScoopBootLibraryOnly = $true
@@ -455,9 +462,12 @@ Write-Host ">>> Creating backup..." -ForegroundColor Cyan
 if (-not (Test-Path $BackupDir)) {
     New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 }
-# Keep the newest $BackupsToKeep snapshots, drop the rest
+# Keep the newest $BackupsToKeep reset snapshots (yyyyMMdd_HHmmss), drop the rest.
+# Only those: --update prunes its scripts-* directories itself, and sorting them
+# in here once pushed the snapshot just created past the limit.
 $oldBackups = Get-ChildItem -Path $BackupRoot -Directory -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending | Select-Object -Skip $BackupsToKeep
+    Where-Object { $_.Name -match '^\d{8}_\d{6}$' -and $_.FullName -ne $BackupDir } |
+    Sort-Object Name -Descending | Select-Object -Skip ($BackupsToKeep - 1)
 foreach ($old in $oldBackups) {
     Remove-Item $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "[OK] Removed old backup: $($old.Name)" -ForegroundColor Gray
@@ -635,8 +645,8 @@ if ($remainingDirs.Count -gt 0) {
 
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1. Restart PowerShell for clean environment" -ForegroundColor White
-Write-Host "  2. Check: gci env: | ? { `$_.Value -like '*usr*' }" -ForegroundColor White
-Write-Host "  3. Reinstall Scoop if needed" -ForegroundColor White
+Write-Host "  1. Check in a new shell: gci env: | ? { `$_.Value -like '*usr*' }" -ForegroundColor White
+Write-Host "  2. Set up again (Administrator): scoop-boot.ps1 --admin-init, then --admin-setenv" -ForegroundColor White
+Write-Host "  3. Normal shell: scoop-boot.ps1 --user-install" -ForegroundColor White
 Write-Host ""
 Write-Host "Backup location: $BackupDir" -ForegroundColor Gray

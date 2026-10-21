@@ -1,0 +1,107 @@
+# scoop-boot package list (delivered by scoop-boot.ps1 --update; do not edit).
+# One manifest per line in install order; "#" starts a comment; "bucket/name" is
+# passed to Scoop as written. To change the list on one machine, copy this file to
+# etc\packages\<hostname>.txt (lower case host name): it replaces this file completely
+# and is never touched by --update. Bootstrap packages (7zip, git, aria2, sudo,
+# innounp, dark, lessmsi, wget, cacert) are installed before this list and are not
+# listed here. Packages with a post-install step in scoop-complete-install.ps1:
+# vcredist2022 temurin25-jdk msys2 nmap 7zip notepadplusplus vscode python314
+# jetbrains-toolbox greenshot (see -ListPackages).
+
+# System libraries (first: VC++ runtime, post_install asks for elevation once)
+vcredist2022
+
+# Browsers
+firefox
+googlechrome
+
+# Java
+temurin25-jdk
+
+# Build tools
+maven
+gradle
+ant
+cmake
+make
+ninja
+kotlin
+
+# Documentation
+graphviz
+doxygen
+pandoc
+ghostscript
+
+# C++ package manager
+vcpkg
+
+# Languages
+python314
+perl
+nodejs
+msys2
+
+# Version control
+tortoisesvn
+gh
+lazygit
+
+# Editors and IDEs
+vscode
+neovim
+notepadplusplus
+jetbrains-toolbox
+
+# Terminal
+windows-terminal
+
+# GUI applications
+winmerge
+freecommander
+greenshot
+everything
+postman
+dbeaver
+
+# Security tools
+keepass
+gnupg
+openssl
+
+# Network tools
+nmap
+wireshark
+
+# CLI tools
+jq
+yq
+curl
+openssh
+putty
+winscp
+filezilla
+ripgrep
+fd
+bat
+jid
+btop
+less
+
+# System tools
+sysinternals
+mousejiggler
+systeminformer
+
+# Databases and servers
+sqlite
+mariadb
+tomcat
+
+# Cloud
+azure-cli
+
+# Media
+ffmpeg
+irfanview
+krita
