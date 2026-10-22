@@ -4,9 +4,9 @@
 # etc\packages\<hostname>.txt (lower case host name): it replaces this file completely
 # and is never touched by --update. Bootstrap packages (7zip, git, aria2, sudo,
 # innounp, dark, lessmsi, wget, cacert) are installed before this list and are not
-# listed here. Packages with a post-install step in scoop-complete-install.ps1:
+# listed here. Packages with a post-install step in --user-install (Step 4 to 6):
 # vcredist2022 temurin25-jdk msys2 nmap 7zip notepadplusplus vscode python314
-# jetbrains-toolbox greenshot (see -ListPackages).
+# jetbrains-toolbox greenshot (see scoop-boot.ps1 --list-packages).
 
 # System libraries (first: VC++ runtime, post_install asks for elevation once)
 vcredist2022

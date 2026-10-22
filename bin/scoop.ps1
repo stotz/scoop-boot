@@ -14,7 +14,7 @@
                                then clean the user scope
 
     Bypass: call C:\usr\shims\scoop directly, or set SCOOP_BOOT_WRAPPER=off
-    (scoop-complete-install.ps1 does that during Phase 2).
+    (--user-install does that during Phase 2).
 #>
 param()
 

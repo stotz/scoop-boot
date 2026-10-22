@@ -58,7 +58,9 @@ C:\usr\bin\scoop-boot.ps1 --user-install
 
 Bootstraps Scoop, adds the `extras`, `java` and `versions` buckets, installs the package
 list (JDK 25, Python 3.14, Node.js, Kotlin, Maven, Gradle, MSYS2/GCC, editors, CLI tools),
-imports registry files and cleans the User scope. Takes 15-30 minutes.
+imports registry files and cleans the User scope. Takes 15-30 minutes; the window title shows
+the progress (`scoop-boot [12/70] kotlin`). If your account can only open elevated shells
+(local administrator), add `--force` to skip the question about running as Administrator.
 
 ### 4. Verify (new shell)
 
@@ -152,12 +154,11 @@ SHA-256, and mirrors all console output into a daily log:
 
 ```
 C:\usr\logs\scoopboot\<yyyyMMdd>.log
-2026-10-08T13:21:04 scoop-complete-install.ps1 -InstallTools (2.9.0) [INFO] [OK] Installed: maven
+2026-10-22T09:21:04 scoop-boot.ps1 --user-install (1.16.0) [INFO] [OK] Installed: maven
 ```
 
-All commands write to the same file; the second field names the script and mode that
-produced the line (`--admin-setenv` and `--user-install` run the install script in
-its two phases). Scoop's own messages are included (it runs in-process); output of pacman,
+All commands write to the same file; the second field names the command that produced
+the line. Scoop's own messages are included (it runs in-process); output of pacman,
 msiexec and reg is not. Each session starts with host, user, admin flag, Windows and
 PowerShell version, script hash and arguments. Logs older than 60 days are removed.
 `C:\usr\logs` is not a Scoop directory; the reset leaves it alone.
@@ -218,7 +219,7 @@ Environment file syntax, load order and version pinning: [docs/environment-files
 Setup (Administrator shell unless noted)
 --admin-init         1: directories, --update, environment files from the templates, opens the system file
 --admin-setenv       2: apply the environment files at Machine scope (Phase 1)
---user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)
+--user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2); --force: no question in an elevated shell
 --admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
 
 Maintenance
@@ -245,9 +246,10 @@ Other
 --version, --help
 ```
 
-The wrapper adds `scoop upgrade`. Two helper scripts in `C:\usr\bin` do the installation
-and the reset; the commands above call them, `--update` keeps them current, and there is
-no reason to run them yourself.
+The wrapper adds `scoop upgrade`. The logic lives in `C:\usr\bin\scoop-boot.psm1`;
+`scoop-boot.ps1` is the command line and `--update` keeps both current. `--update`,
+`--version` and `--help` work even when the module does not load, so a bad download can
+always be repaired with `--update`.
 
 ## Documents
 
