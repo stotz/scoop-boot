@@ -80,7 +80,7 @@ the start is refused; `--user-install` reports this as `Failed: gcc (running bui
 ```powershell
 'int main(void){return 42;}' | Set-Content C:\tmp\hello.c
 gcc C:\tmp\hello.c -o C:\tmp\hello.exe; C:\tmp\hello.exe; $LASTEXITCODE   # 42 when allowed
-scoop-boot.ps1 --asr-report                                                  # evidence for the security team (Administrator for the full report)
+scoop-boot.ps1 --platform-report                                             # evidence for the platform team (Administrator for the full report)
 ```
 
 ### Keeping it correct: the scoop wrapper
@@ -113,12 +113,24 @@ itself changed, run `--admin-setenv` again (Administrator).
 
 ```powershell
 scoop-boot.ps1 --update        # downloads bin\* from GitHub; previous copies in backups\scripts-<ts>
-scoop-boot.ps1 --asr-report    # Defender/ASR rules, exclusions, blocks of the last 14 days
+scoop-boot.ps1 --platform-report    # what the platform does to the setup: ASR, profile container, TMP
 ```
 
-`--update` never touches `etc\environments`; those files are yours. `--asr-report`
-writes `logs\scoopboot\asr-report-<date>.txt`, the file to attach when asking the
-security team for an exclusion.
+`--update` never touches `etc\environments`; those files are yours.
+
+### Checking the platform first
+
+On a managed machine (AVD, VDI, a corporate image) two things outside scoop-boot
+decide whether the setup works: Defender's ASR rules, which can refuse every build
+output and every new tool version, and a profile container (FSLogix), which limits the
+profile size and keeps developer caches on a file share. `--platform-report` reads both
+before anything is installed and writes `logs\scoopboot\platform-report-<date>.txt`:
+Defender version, ASR rules, exclusions and the blocks of the last 14 days; the profile
+container with policy, path, fill level and `redirections.xml` exclusions; TMP in
+process, User and Machine scope; the developer caches inside the profile with their
+sizes. A Findings block at the end names what to ask the platform team for; with
+findings the exit code is 1. The report changes nothing. Run it as Administrator for
+the rule and exclusion lists; `--asr-report` still works as an alias.
 
 ### Package list
 
@@ -228,7 +240,7 @@ Maintenance
 --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no Administrator)
 --quiet              With --clean-user-scope: one summary line, and only when something changed
 --list-packages      Package list in use, status of each package and its post-install steps; installs nothing
---asr-report         Defender/ASR rules, exclusions and blocks of the last 14 days to logs\scoopboot\
+--platform-report    Defender/ASR, profile container, TMP: what the platform does to the setup; exit 1 on findings
 
 Environment files
 --apply-env          Apply the files (system.* needs Administrator), then clean the User scope

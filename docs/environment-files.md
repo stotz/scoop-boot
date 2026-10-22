@@ -153,8 +153,8 @@ again.
   was lost.
 - `gcc` compiles but the program does not start, Windows reports "Your administrator
   caused Windows Security to block this action": Defender ASR rule 01443614 on this
-  machine. `scoop-boot.ps1 --asr-report` collects the evidence; the fix is a path
-  exclusion by whoever manages Defender.
+  machine. `scoop-boot.ps1 --platform-report` collects the evidence; the fix is a
+  rule-specific exclusion by whoever manages Defender.
 - `gcc` produces nothing and `cc1.exe` exits with -1073741511: DLL shadowing, see PATH
   order above; `where.exe libstdc++-6.dll` must list `ucrt64\bin` first.
 - "The file cannot be accessed by the system" from `wsl`: the image has the inbox stub

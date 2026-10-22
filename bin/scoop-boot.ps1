@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.16.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.17.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Order-independent parameter parsing
@@ -20,9 +20,24 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.16.0
+    Version: 1.17.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.17.0:
+    - --platform-report replaces --asr-report (kept as alias): the Defender/ASR
+      part as before, plus the user profile (FSLogix profile container: policy,
+      container path, fill level, redirections.xml exclusions), TMP in process,
+      User and Machine scope, the developer caches inside the profile with their
+      sizes, and FSLogix container errors. A Findings block at the end names
+      what the platform team has to change (ASR rule 01443614 without exclusion
+      for C:\usr, blocks on developer files, container without developer-cache
+      exclusions, container over 80 percent, SetTempToLocalPath, a User-scope
+      TMP override); with findings the exit code is 1. Report file
+      logs\scoopboot\platform-report-<date>.txt. Read-only, works without
+      elevation except for the Defender rule and exclusion lists
+    - Template: the cache section describes FSLogix correctly (the container is
+      attached, not copied; the costs are the size limit and network I/O)
 
     Changes in v1.16.0:
     - The library moved to bin\scoop-boot.psm1 (logging, environment files,
@@ -232,7 +247,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.16.0"
+$global:ScriptVersion = "1.17.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -545,8 +560,9 @@ if ($global:ParsedArgs.CleanUserScope) {
     exit 0
 }
 
-if ($global:ParsedArgs.AsrReport) {
-    if (Invoke-AsrReport) { exit 0 } else { exit 1 }
+if ($global:ParsedArgs.PlatformReport) {
+    # exit 1 when the report lists findings, so the command can gate a setup
+    if (Invoke-PlatformReport) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.Update) {

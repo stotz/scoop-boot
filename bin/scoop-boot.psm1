@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.16.0
+    Version: 1.17.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.16.0"
+$global:ScriptVersion = "1.17.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -207,7 +207,7 @@ $global:ParsedArgs = @{
     ApplyEnv = $false
     CleanUserScope = $false
     Quiet = $false
-    AsrReport = $false
+    PlatformReport = $false
     Update = $false
     Branch = ''
     AdminInit = $false
@@ -250,7 +250,7 @@ function Parse-Arguments {
             '^--apply-env$' { $global:ParsedArgs.ApplyEnv = $true }
             '^--clean-user-scope$' { $global:ParsedArgs.CleanUserScope = $true }
             '^--quiet$' { $global:ParsedArgs.Quiet = $true }
-            '^--asr-report$' { $global:ParsedArgs.AsrReport = $true }
+            '^--(platform-report|asr-report)$' { $global:ParsedArgs.PlatformReport = $true }
             '^--update$' { $global:ParsedArgs.Update = $true }
             '^--branch=(.+)$' { $global:ParsedArgs.Branch = $Matches[1] }
             '^--admin-init$' { $global:ParsedArgs.AdminInit = $true }
@@ -476,7 +476,7 @@ function Show-Help {
     Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply the user.* files (no admin)"
     Write-Host "      --quiet            print only a summary when something changed"
     Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
-    Write-Host "  --asr-report         Write Defender/ASR configuration and recent blocks to the log directory"
+    Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
     Write-Host ""
     Write-Host "ENVIRONMENT FILES (C:\usr\etc\environments):" -ForegroundColor Yellow
     Write-Host "  --apply-env          Apply the files: system.* at Machine scope (admin), then --clean-user-scope"
@@ -1188,19 +1188,49 @@ function Get-ManifestAppName {
     return ($Package -split '/')[-1]
 }
 
-function Invoke-AsrReport {
+function Get-RegistryValue {
     <#
     .SYNOPSIS
-        Writes the Defender / Attack Surface Reduction configuration and the ASR blocks
-        of the last 14 days to a report file, for tickets with the security team.
+        One registry value, or $null when the key or the value does not exist (strict-mode safe).
     #>
-    Write-Section "ASR Report"
-    $report = Join-Path $global:ScoopBootLogDir ("asr-report-{0}.txt" -f (Get-Date -Format 'yyyyMMdd'))
-    # Defender hides rule ids and exclusion lists from non-elevated callers
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    try {
+        $item = Get-ItemProperty -Path $Path -ErrorAction Stop
+        if ($item.PSObject.Properties.Name -contains $Name) { return $item.$Name }
+    } catch { }
+    return $null
+}
+
+function Get-DirectorySizeMB {
+    param([string]$Path)
+    try {
+        $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($null -eq $sum) { return 0 }
+        return [math]::Round($sum / 1MB)
+    } catch { return 0 }
+}
+
+function Invoke-PlatformReport {
+    <#
+    .SYNOPSIS
+        Writes what the platform does to a developer setup, before anything is installed:
+        Defender / ASR rules, exclusions and blocks; the user profile (FSLogix profile
+        container, size, exclusions, TMP handling). Findings are listed at the end and
+        make the command exit with 1. Called by --platform-report (and --asr-report).
+    .DESCRIPTION
+        Read-only. Everything the report says can be checked by the platform team with
+        the same command. Defender hides the rule ids and exclusion lists from
+        non-elevated callers; the profile section works without elevation.
+    #>
+    Write-Section "Platform Report"
+    $report = Join-Path $global:ScoopBootLogDir ("platform-report-{0}.txt" -f (Get-Date -Format 'yyyyMMdd'))
+    $isAdmin = Test-AdminRights
     if (-not $isAdmin) {
         Write-Warning "Not running as Administrator: Defender hides ASR rules and exclusion lists."
-        Write-Warning "The event list below is complete; for the full report run from an elevated shell."
+        Write-Warning "The event list and the profile section are complete; for the full report run from an elevated shell."
     }
     try { $pref = Get-MpPreference; $status = Get-MpComputerStatus } catch {
         Write-ErrorMsg "Get-MpPreference failed: $($_.Exception.Message)"
@@ -1227,47 +1257,211 @@ function Invoke-AsrReport {
         '33ddedf1-c6e0-47cb-833e-de6133960387' = 'Block rebooting machine in Safe Mode'
         'c0033c00-d16d-4114-a5a0-dc9b3a7d2ceb' = 'Block use of copied or impersonated system tools'
     }
+    $prevalenceRule = '01443614-cd74-433a-b99e-2ecdc07bfc25'
     $actionNames = @{ 0 = 'Disabled'; 1 = 'Block'; 2 = 'Audit'; 6 = 'Warn' }
+    # The directories a developer setup lives in; C:\devl and C:\data are the
+    # conventional places of the environment file, not something scoop-boot creates
+    $devDirs = @($global:BaseDir, 'C:\devl', 'C:\data')
+    $findings = @()
     $lines = @()
-    $lines += "ASR report $(Get-Date -Format s)  host=$env:COMPUTERNAME  user=$env:USERDOMAIN\$env:USERNAME  scoop-boot $global:ScriptVersion"
+    $lines += "Platform report $(Get-Date -Format s)  host=$env:COMPUTERNAME  user=$env:USERDOMAIN\$env:USERNAME  scoop-boot $global:ScriptVersion"
+    $lines += "Windows $([Environment]::OSVersion.Version)  elevated=$isAdmin"
+
+    # ------------------------------------------------------------------------
+    # Defender / ASR
+    # ------------------------------------------------------------------------
+    $lines += ""
+    $lines += "=== Defender / Attack Surface Reduction ==="
     $lines += "Defender AM engine $($status.AMEngineVersion), platform $($status.AMProductVersion), signatures $($status.AntivirusSignatureVersion)"
     $lines += "RealTimeProtection=$($status.RealTimeProtectionEnabled)  Tamper=$($status.IsTamperProtected)  MAPS=$($pref.MAPSReporting)  CloudBlockLevel=$($pref.CloudBlockLevel)"
     $lines += ""
     $lines += "--- ASR rules (Id, Action, Name) ---"
     $ids = @($pref.AttackSurfaceReductionRules_Ids | Where-Object { $_ }); $acts = @($pref.AttackSurfaceReductionRules_Actions)
     if ($ids.Count -eq 0) { $lines += $(if ($isAdmin) { "  (none configured)" } else { "  N/A: run as Administrator to list the rules" }) }
+    $prevalenceBlocks = $false
     for ($i = 0; $i -lt $ids.Count; $i++) {
         $id = "$($ids[$i])".ToLower()
         $act = [int]$acts[$i]
         $actName = if ($actionNames.ContainsKey($act)) { $actionNames[$act] } else { "$act" }
         $name = if ($ruleNames.ContainsKey($id)) { $ruleNames[$id] } else { '(see Microsoft docs)' }
         $lines += "{0}  {1,-8}  {2}" -f $id, $actName, $name
+        if ($id -eq $prevalenceRule -and $act -eq 1) { $prevalenceBlocks = $true }
     }
+    $asrExclusions = @()
     foreach ($section in @(
-        @{ Title = 'ASR-only exclusions (AttackSurfaceReductionOnlyExclusions)'; Values = $pref.AttackSurfaceReductionOnlyExclusions },
-        @{ Title = 'Per-rule exclusions (AttackSurfaceReductionRules_RuleSpecificExclusions)'; Values = $pref.AttackSurfaceReductionRules_RuleSpecificExclusions },
-        @{ Title = 'Defender path exclusions (ExclusionPath)'; Values = $pref.ExclusionPath }
+        @{ Title = 'ASR-only exclusions (AttackSurfaceReductionOnlyExclusions)'; Values = $pref.AttackSurfaceReductionOnlyExclusions; Asr = $true },
+        @{ Title = 'Per-rule exclusions (AttackSurfaceReductionRules_RuleSpecificExclusions)'; Values = $pref.AttackSurfaceReductionRules_RuleSpecificExclusions; Asr = $true },
+        @{ Title = 'Defender path exclusions (ExclusionPath)'; Values = $pref.ExclusionPath; Asr = $false }
     )) {
         $lines += ""
         $lines += "--- $($section.Title) ---"
         $values = @($section.Values | Where-Object { $_ -and "$_" -notmatch '^N/A' })
         if ($values.Count -eq 0) { $lines += $(if ($isAdmin) { "  (none)" } else { "  N/A: run as Administrator to list the exclusions" }) }
         $lines += @($values | ForEach-Object { "  $_" })
+        if ($section.Asr) { $asrExclusions += $values }
+    }
+    $usrExcludedFromAsr = @($asrExclusions | Where-Object { "$_" -like "*$($global:BaseDir)*" }).Count -gt 0
+    $usrExcludedFromScan = @($pref.ExclusionPath | Where-Object { $_ -and "$_" -like "$($global:BaseDir)*" }).Count -gt 0
+    if ($isAdmin -and $prevalenceBlocks -and -not $usrExcludedFromAsr) {
+        $findings += "ASR rule 01443614 (prevalence, age, trusted list) is in Block mode and $($global:BaseDir) is not excluded from it: every build output and every newly released tool version is refused until Microsoft knows it. Ask for a rule-specific exclusion for $($devDirs -join ', ')"
+    }
+    if ($isAdmin -and -not $usrExcludedFromScan) {
+        $lines += ""
+        $lines += "[INFO] No Defender path exclusion for $($global:BaseDir): extraction and builds are scanned in real time (slower, not blocking)"
     }
     $lines += ""
     $lines += "--- Blocked by ASR, last 14 days (event 1121) ---"
-    $events = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 1121; StartTime = (Get-Date).AddDays(-14) } -ErrorAction SilentlyContinue
-    $lines += @($events | ForEach-Object {
+    $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 1121; StartTime = (Get-Date).AddDays(-14) } -ErrorAction SilentlyContinue)
+    $eventLines = @($events | ForEach-Object {
         $m = $_.Message -split "`n"
         $rule = (($m | Select-String '^\s*ID:') | Select-Object -First 1).Line -replace '^\s*ID:\s*', ''
         $path = (($m | Select-String 'Path:') | Select-Object -First 1).Line.Trim()
         "{0}  rule={1}  {2}" -f $_.TimeCreated.ToString('s'), $rule.Trim(), $path
     } | Sort-Object -Unique)
+    if ($eventLines.Count -eq 0) { $lines += "  (none)" }
+    $lines += $eventLines
+    $devBlocks = @($eventLines | Where-Object { $line = $_; @($devDirs | Where-Object { $line -like "*Path: $_\*" }).Count -gt 0 })
+    if ($devBlocks.Count -gt 0) {
+        $findings += "$($devBlocks.Count) ASR block(s) on files under $($devDirs -join ', ') in the last 14 days (list above)"
+    }
+
+    # ------------------------------------------------------------------------
+    # User profile (FSLogix profile container)
+    # ------------------------------------------------------------------------
+    $lines += ""
+    $lines += "=== User profile ==="
+    $frx = Join-Path $env:ProgramFiles 'FSLogix\Apps\frx.exe'
+    $fsxInstalled = Test-Path $frx
+    $fsxVersion = if ($fsxInstalled) { try { (Get-Item $frx).VersionInfo.ProductVersion } catch { '' } } else { '' }
+    $profilesKey = 'HKLM:\SOFTWARE\FSLogix\Profiles'
+    $fsxEnabled = [int](Get-RegistryValue -Path $profilesKey -Name 'Enabled')
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sessionKey = "$profilesKey\Sessions\$sid"
+    $sessionVolume = Get-RegistryValue -Path $sessionKey -Name 'Volume'
+    $containerActive = ($fsxEnabled -eq 1) -and $sessionVolume
+    $lines += "USERPROFILE=$env:USERPROFILE  HOMEDRIVE=$env:HOMEDRIVE  HOMEPATH=$env:HOMEPATH"
+    $lines += $(if ($fsxInstalled) { "FSLogix: installed $fsxVersion" } else { "FSLogix: not installed" })
+    if ($containerActive) {
+        $lines += "Profile container: ACTIVE (policy Enabled=1, this session on volume $sessionVolume)"
+        $lines += "  VHD:              $(Get-RegistryValue -Path $sessionKey -Name 'VHDRootFilePath')"
+        $lines += "  VHDLocations:     $(Get-RegistryValue -Path $profilesKey -Name 'VHDLocations')"
+        $lines += "  LocalProfilePath: $(Get-RegistryValue -Path $sessionKey -Name 'LocalProfilePath')"
+        foreach ($name in @('SizeInMBs', 'VolumeType', 'IsDynamic', 'FlipFlopProfileDirectoryName', 'DeleteLocalProfileWhenVHDShouldApply', 'PreventLoginWithFailure', 'PreventLoginWithTempProfile', 'SetTempToLocalPath', 'RedirXMLSourceFolder')) {
+            $value = Get-RegistryValue -Path $profilesKey -Name $name
+            if ($null -ne $value) { $lines += "  {0,-37} {1}" -f "${name}:", $value }
+        }
+        $lines += "  Session: Status=$(Get-RegistryValue -Path $sessionKey -Name 'Status')  Reason=$(Get-RegistryValue -Path $sessionKey -Name 'Reason')  ErrorCode=$(Get-RegistryValue -Path $sessionKey -Name 'ErrorCode')"
+        # Fill level of the container volume (label Profile-<user>)
+        $volume = $null
+        try { $volume = Get-Volume -ErrorAction Stop | Where-Object { $_.FileSystemLabel -eq "Profile-$env:USERNAME" } | Select-Object -First 1 } catch { }
+        if ($volume) {
+            $sizeGB = [math]::Round($volume.Size / 1GB, 1)
+            $freeGB = [math]::Round($volume.SizeRemaining / 1GB, 1)
+            $usedPct = if ($volume.Size -gt 0) { [math]::Round(100 * ($volume.Size - $volume.SizeRemaining) / $volume.Size) } else { 0 }
+            $lines += "  Container volume: $sizeGB GB, $freeGB GB free ($usedPct% used)"
+            if ($usedPct -ge 80) {
+                $findings += "Profile container is $usedPct% full ($freeGB GB of $sizeGB GB free): logon fails when it is full. Move caches out of the profile (CACHES block in the system env file)"
+            }
+        } else {
+            $lines += "  Container volume: not found (label Profile-$env:USERNAME)"
+        }
+        # Exclusions: what stays out of the container
+        $redirFolder = Get-RegistryValue -Path $profilesKey -Name 'RedirXMLSourceFolder'
+        $redirFile = if ($redirFolder) { Join-Path $redirFolder 'redirections.xml' } else { '' }
+        $excludes = @()
+        $redirRead = $false
+        if ($redirFile -and (Test-Path $redirFile)) {
+            try {
+                [xml]$redirXml = Get-Content -Path $redirFile -Raw -ErrorAction Stop
+                $excludes = @($redirXml.SelectNodes('//Exclude') | ForEach-Object { $_.InnerText.Trim() } | Where-Object { $_ })
+                $redirRead = $true
+            } catch {
+                $lines += "  redirections.xml: not readable ($($_.Exception.Message))"
+            }
+        }
+        $lines += ""
+        $lines += "--- Excluded from the container (redirections.xml) ---"
+        if ($redirRead) {
+            if ($excludes.Count -eq 0) { $lines += "  (file present, no Exclude entries)" }
+            $lines += @($excludes | ForEach-Object { "  $_" })
+        } elseif (-not $redirFolder) {
+            $lines += "  (no RedirXMLSourceFolder: nothing is excluded, the whole profile is in the container)"
+        } elseif (-not $redirFile -or -not (Test-Path $redirFile)) {
+            $lines += "  (no redirections.xml in $redirFolder)"
+        }
+        $devCacheMarkers = @('.gradle', '.m2', '.nuget', '.cache', 'JetBrains', 'npm-cache', 'pip')
+        $devCacheExcluded = @($excludes | Where-Object { $e = $_; @($devCacheMarkers | Where-Object { $e -like "*$_*" }).Count -gt 0 })
+        if ($devCacheExcluded.Count -eq 0) {
+            $findings += "Profile container without exclusions for developer caches (.gradle, .m2, .nuget, .cache, JetBrains, npm, pip): they fill the container and every access goes over the network. Move them with the CACHES block of the system env file, or ask for redirections.xml entries"
+        }
+    } elseif ($fsxEnabled -eq 1) {
+        $lines += "Profile container: policy Enabled=1, but this session has no container volume (local or temporary profile)"
+    } else {
+        $lines += "Profile container: not active (local profile)"
+    }
+
+    # TMP/TEMP: process, User and Machine scope
+    $machineTmp = [Environment]::GetEnvironmentVariable('TMP', 'Machine')
+    $userTmp = [Environment]::GetEnvironmentVariable('TMP', 'User')
+    $lines += ""
+    $lines += "--- Temporary directory ---"
+    $lines += "  TMP process=$env:TMP  user=$userTmp  machine=$machineTmp"
+    if ($machineTmp -ne 'C:\tmp') {
+        $lines += "  [INFO] Machine TMP is not C:\tmp: setup step 2 (scoop-boot.ps1 --admin-setenv) has not run on this machine"
+    }
+    $setTemp = [int](Get-RegistryValue -Path $profilesKey -Name 'SetTempToLocalPath')
+    if ($containerActive -and ($setTemp -eq 1 -or $setTemp -eq 3)) {
+        $findings += "FSLogix writes TMP and TEMP into the User scope at every logon (SetTempToLocalPath=$setTemp): the Machine value is hidden until scoop-boot.ps1 --clean-user-scope has run. Ask for SetTempToLocalPath=0 on this host pool"
+    } elseif ($userTmp -and $userTmp -ne $machineTmp) {
+        $findings += "User-scope TMP=$userTmp overrides the Machine value $machineTmp; run scoop-boot.ps1 --clean-user-scope"
+    }
+
+    # Developer caches inside the profile (sizes; the evidence for a size limit)
+    $cacheDirs = @('.gradle', '.m2', '.nuget', '.npm', '.cache', '.dotnet', '.konan', 'AppData\Local\JetBrains', 'AppData\Local\npm-cache', 'AppData\Local\pip', 'AppData\Local\Docker')
+    $present = @($cacheDirs | Where-Object { Test-Path (Join-Path $env:USERPROFILE $_) })
+    $lines += ""
+    $lines += "--- Developer caches in the profile (MB) ---"
+    if ($present.Count -eq 0) {
+        $lines += "  (none)"
+    } else {
+        Write-Info "Measuring $($present.Count) cache directories in the profile..."
+        $totalMB = 0
+        foreach ($dir in $present) {
+            $mb = Get-DirectorySizeMB -Path (Join-Path $env:USERPROFILE $dir)
+            $totalMB += $mb
+            $lines += "  {0,8}  {1}" -f $mb, $dir
+        }
+        $lines += "  {0,8}  total" -f $totalMB
+    }
+
+    # FSLogix errors that explain a failed or temporary profile
+    if ($fsxInstalled) {
+        $lines += ""
+        $lines += "--- FSLogix errors, last 14 days (event 26, container related) ---"
+        $fsxEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-FSLogix-Apps/Operational'; Id = 26; StartTime = (Get-Date).AddDays(-14) } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'VirtualDisk|VHD|Profile' } |
+            ForEach-Object { "{0}  {1}" -f $_.TimeCreated.ToString('s'), (($_.Message -split "`n")[0].Trim()) })
+        if ($fsxEvents.Count -eq 0) { $lines += "  (none)" }
+        $lines += $fsxEvents
+    }
+
+    # ------------------------------------------------------------------------
+    # Findings, file, console
+    # ------------------------------------------------------------------------
+    $lines += ""
+    $lines += "=== Findings ==="
+    if ($findings.Count -eq 0) { $lines += "  (none)" }
+    $lines += @($findings | ForEach-Object { "  [WARN] $_" })
     if (-not (Test-Path $global:ScoopBootLogDir)) { New-Item -ItemType Directory -Path $global:ScoopBootLogDir -Force | Out-Null }
     $lines | Set-Content -Path $report -Encoding UTF8
-    $lines | ForEach-Object { Write-Host $_ }
+    $lines | Where-Object { $_ -notmatch '^  \[WARN\] ' } | ForEach-Object { Write-Host $_ }
+    foreach ($finding in $findings) { Write-Warning $finding }
     Write-Host ""
     Write-Success "Report written: $report"
+    if ($findings.Count -gt 0) {
+        Write-Host "$($findings.Count) finding(s): this platform needs changes before the setup works as intended (exit code 1)" -ForegroundColor Yellow
+        return $false
+    }
     return $true
 }
 
