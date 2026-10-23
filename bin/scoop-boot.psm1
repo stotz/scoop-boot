@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.17.0
+    Version: 1.18.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.17.0"
+$global:ScriptVersion = "1.18.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -188,7 +188,6 @@ function Initialize-ScoopBootLog {
     Write-ScoopBootLogLine -Level 'INFO' -Text "host=$env:COMPUTERNAME user=$env:USERDOMAIN\$env:USERNAME admin=$isAdmin windows=$os powershell=$($PSVersionTable.PSVersion) script=$ScriptPath args=[$($Arguments -join ' ')]"
 }
 $global:BackupDir = Join-Path $global:EnvDir "backups"
-$global:TemplateUrl = "https://raw.githubusercontent.com/stotz/scoop-boot/refs/heads/main/etc/environments/template-default.env"
 
 # ============================================================================
 # ARGUMENT PARSER
@@ -198,13 +197,8 @@ $global:ParsedArgs = @{
     Help = $false
     Version = $false
     Bootstrap = $false
-    Status = $false
     SelfTest = $false
-    Suggest = $false
-    Environment = $false
     EnvStatus = $false
-    InitEnv = $null
-    ApplyEnv = $false
     CleanUserScope = $false
     Quiet = $false
     PlatformReport = $false
@@ -218,8 +212,7 @@ $global:ParsedArgs = @{
     Force = $false
     KeepPersist = $false
     DryRun = $false
-    Rollback = $false
-    Install = @()
+    Unknown = @()
 }
 
 function Parse-Arguments {
@@ -233,21 +226,8 @@ function Parse-Arguments {
             '^--?h(elp)?$' { $global:ParsedArgs.Help = $true }
             '^--?v(ersion)?$' { $global:ParsedArgs.Version = $true }
             '^--bootstrap$' { $global:ParsedArgs.Bootstrap = $true }
-            '^--status$' { $global:ParsedArgs.Status = $true }
             '^--(selfTest|self-test)$' { $global:ParsedArgs.SelfTest = $true }
-            '^--suggest$' { $global:ParsedArgs.Suggest = $true }
-            '^--environment$' { $global:ParsedArgs.Environment = $true }
             '^--env-status$' { $global:ParsedArgs.EnvStatus = $true }
-            '^--init-env=(.+)$' { $global:ParsedArgs.InitEnv = $Matches[1] }
-            '^--init-env$' {
-                if ($i + 1 -lt $Arguments.Count -and $Arguments[$i + 1] -notmatch '^--') {
-                    $i++
-                    $global:ParsedArgs.InitEnv = $Arguments[$i]
-                } else {
-                    $global:ParsedArgs.InitEnv = ""
-                }
-            }
-            '^--apply-env$' { $global:ParsedArgs.ApplyEnv = $true }
             '^--clean-user-scope$' { $global:ParsedArgs.CleanUserScope = $true }
             '^--quiet$' { $global:ParsedArgs.Quiet = $true }
             '^--(platform-report|asr-report)$' { $global:ParsedArgs.PlatformReport = $true }
@@ -261,18 +241,10 @@ function Parse-Arguments {
             '^--force$' { $global:ParsedArgs.Force = $true }
             '^--keep-persist$' { $global:ParsedArgs.KeepPersist = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
-            '^--rollback$' { $global:ParsedArgs.Rollback = $true }
-            '^--install$' {
-                while ($i + 1 -lt $Arguments.Count -and $Arguments[$i + 1] -notmatch '^--') {
-                    $i++
-                    $global:ParsedArgs.Install += $Arguments[$i]
-                }
-            }
-            default {
-                if ($arg -notmatch '^--') {
-                    $global:ParsedArgs.Install += $arg
-                }
-            }
+            # Anything else is reported by the caller: a typo, or a command that was
+            # removed (--status, --suggest, --install, --environment, --init-env,
+            # --apply-env, --rollback in 1.18.0)
+            default { $global:ParsedArgs.Unknown += $arg }
         }
         $i++
     }
@@ -464,6 +436,7 @@ function Show-Help {
     Write-Host "SETUP (Administrator shell unless noted; run in this order):" -ForegroundColor Yellow
     Write-Host "  --admin-init         1: directories, --update, environment files from the templates, opens the system file"
     Write-Host "  --admin-setenv       2: apply the environment files at Machine scope (Phase 1)"
+    Write-Host "      --dry-run          show the changes without applying them (no Administrator needed)"
     Write-Host "  --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)"
     Write-Host "      --force            no question when the shell is elevated (account with elevated shells only)"
     Write-Host "  --admin-reset        Remove Scoop again: apps, variables, PATH entries, registry; bin, etc and logs stay"
@@ -479,18 +452,12 @@ function Show-Help {
     Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
     Write-Host ""
     Write-Host "ENVIRONMENT FILES (C:\usr\etc\environments):" -ForegroundColor Yellow
-    Write-Host "  --apply-env          Apply the files: system.* at Machine scope (admin), then --clean-user-scope"
-    Write-Host "      --dry-run          show the changes without applying them"
-    Write-Host "  --init-env=FILE      Create a file from the template (system.default.env, user.HOST.USER.env, ...)"
     Write-Host "  --env-status         Which files exist and apply to this host and user"
-    Write-Host "  --environment        Show the environment variables of this session"
+    Write-Host "  (--admin-init creates the host files from the templates; copy a template by hand for *.default.env)"
     Write-Host ""
     Write-Host "OTHER:" -ForegroundColor Yellow
     Write-Host "  --bootstrap          Install Scoop and the bootstrap packages only (part of --user-install)"
-    Write-Host "  --install APP...     Install applications with Scoop"
-    Write-Host "  --status             Show Scoop and environment status"
-    Write-Host "  --suggest            Show suggested applications"
-    Write-Host "  --self-test          Run the self-tests (parser, expansion, package list)"
+    Write-Host "  --self-test          Run the self-tests (parser, expansion, package list, help)"
     Write-Host "  --version, -v        Show version"
     Write-Host "  --help, -h           Show this help message"
     Write-Host ""
@@ -508,7 +475,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
     Write-Host "  scoop-boot.ps1 --admin-init            # first command on a new machine (Administrator)"
-    Write-Host "  scoop-boot.ps1 --apply-env --dry-run   # check an edited system file before applying it"
+    Write-Host "  scoop-boot.ps1 --admin-setenv --dry-run   # check an edited system file before applying it"
     Write-Host "  scoop-boot.ps1 --update                # after a scoop-boot release"
     Write-Host "  scoop-boot.ps1 --admin-reset --force   # start over, then --admin-init again"
     Write-Host ""
@@ -1029,7 +996,7 @@ function Invoke-CleanUserScope {
     }
 
     # Definitions of all user.* files first (on top of the system.* definitions when
-    # called from --apply-env), then the files are applied
+    # called from Invoke-ApplyEnv), then the files are applied
     $userFiles = @(Get-EnvironmentFiles | Where-Object { $_.Scope -eq 'User' })
     $userOperations = @{}
     foreach ($file in $userFiles) {
@@ -1066,9 +1033,17 @@ function Invoke-AdminSetEnv {
     <#
     .SYNOPSIS
         Setup step 2 (Administrator): applies the environment files at Machine scope (Phase 1).
+    .PARAMETER DryRun
+        Shows the changes the files would make, without writing; needs no elevation.
     #>
+    param(
+        [bool]$DryRun = $false
+    )
+    if ($DryRun) {
+        return (Get-LastResult -Output @(Invoke-ApplyEnv -DryRun $true))
+    }
     if (-not (Test-AdminRights)) {
-        Write-ErrorMsg "--admin-setenv needs an elevated shell (Run as Administrator)"
+        Write-ErrorMsg "--admin-setenv needs an elevated shell (Run as Administrator); --admin-setenv --dry-run works without"
         return $false
     }
     return (Get-LastResult -Output @(Set-DevelopmentEnvironment))
@@ -1467,9 +1442,12 @@ function Invoke-PlatformReport {
 
 
 function Invoke-ApplyEnv {
+    <#
+    .SYNOPSIS
+        Applies the environment files: sweep, system.* at Machine scope, then the User scope. Called by --admin-setenv.
+    #>
     param(
-        [bool]$DryRun = $false,
-        [bool]$Rollback = $false
+        [bool]$DryRun = $false
     )
 
     if ($DryRun) {
@@ -1484,14 +1462,13 @@ function Invoke-ApplyEnv {
     if ($envFiles.Count -eq 0) {
         Write-Warning "No environment configuration files found"
         Write-Host ""
-        Write-Host "Create a configuration file first:" -ForegroundColor Yellow
-        Write-Host "  .\bin\scoop-boot.ps1 --init-env=user.default.env" -ForegroundColor White
+        Write-Host "Create them first: scoop-boot.ps1 --admin-init (as Administrator)" -ForegroundColor Yellow
         return $false
     }
 
     # Check admin rights for system files
     $hasSystemFiles = $envFiles | Where-Object { $_.Scope -eq "Machine" }
-    if ($hasSystemFiles -and -not (Test-AdminRights)) {
+    if ($hasSystemFiles -and -not $DryRun -and -not (Test-AdminRights)) {
         Write-ErrorMsg "System environment files require administrator privileges"
         Write-Host ""
         Write-Host "Files that require admin:" -ForegroundColor Yellow
@@ -1533,7 +1510,7 @@ function Invoke-ApplyEnv {
 
     if ($DryRun) {
         Write-Info "DRY RUN: Would apply $totalChanges changes"
-        Write-Host "Run without --dry-run to apply changes"
+        Write-Host "Apply them as Administrator: scoop-boot.ps1 --admin-setenv"
     } else {
         Write-Info "Applied $totalChanges changes"
         Write-Host ""
@@ -1546,289 +1523,8 @@ function Invoke-ApplyEnv {
 }
 
 # ============================================================================
-# INIT ENVIRONMENT FUNCTIONS
-# ============================================================================
-
-function Invoke-InitEnv {
-    param([string]$FileName)
-
-    Write-Section "Initialize Environment Configuration"
-
-    # Validate filename
-    if ([string]::IsNullOrWhiteSpace($FileName)) {
-        Write-ErrorMsg "No filename specified"
-        Write-Host ""
-        Write-Host "Specify a configuration file:" -ForegroundColor Yellow
-        Write-Host "  --init-env=user.default.env" -ForegroundColor White
-        Write-Host "  --init-env=user.$(Get-Hostname).$(Get-Username).env" -ForegroundColor White
-        Write-Host "  --init-env=system.default.env" -ForegroundColor White
-        Write-Host "  --init-env=system.$(Get-Hostname).$(Get-Username).env" -ForegroundColor White
-        return $false
-    }
-
-    # Normalize filename to lowercase
-    $FileName = $FileName.ToLower()
-
-    # Ensure directory exists
-    if (-not (Test-Path $global:EnvDir)) {
-        New-Item -ItemType Directory -Path $global:EnvDir -Force | Out-Null
-    }
-
-    # Full path
-    $filePath = Join-Path $global:EnvDir $FileName
-
-    # Check if file exists
-    if (Test-Path $filePath) {
-        Write-Warning "File already exists: $filePath"
-        Write-Host "Edit the existing file or delete it first"
-        return $false
-    }
-
-    # Determine scope
-    $scope = if ($FileName -match '^system\.') { "Machine" } else { "User" }
-
-    # Download or use embedded template
-    Write-Info "Creating template..."
-    $templateContent = Get-EnvironmentTemplate -Scope $scope
-
-    # Write to file
-    $templateContent | Out-File -FilePath $filePath -Encoding UTF8
-    Write-Success "Created: $filePath"
-
-    Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "1. Edit the configuration file:" -ForegroundColor White
-    Write-Host "   notepad `"$filePath`"" -ForegroundColor White
-    Write-Host ""
-    Write-Host "2. Test what changes would be applied:" -ForegroundColor White
-    Write-Host "   .\bin\scoop-boot.ps1 --apply-env --dry-run" -ForegroundColor White
-    Write-Host ""
-    Write-Host "3. Apply the configuration:" -ForegroundColor White
-    if ($scope -eq "Machine") {
-        Write-Host "   # Run as Administrator!" -ForegroundColor Yellow
-    }
-    Write-Host "   .\bin\scoop-boot.ps1 --apply-env" -ForegroundColor White
-
-    return $true
-}
-
-function Get-EnvironmentTemplate {
-    param([string]$Scope)
-
-    # Try to download from GitHub
-    try {
-        Write-Info "Downloading template from GitHub..."
-        $template = Invoke-WebRequest -Uri $global:TemplateUrl -UseBasicParsing
-        return $template.Content
-    }
-    catch {
-        Write-Warning "Could not download template, using embedded version"
-    }
-
-    # Embedded template
-    $hostname = Get-Hostname
-    $username = Get-Username
-    $date = Get-Date -Format "yyyy-MM-dd"
-
-    return @"
-# ============================================================================
-# Environment Configuration Template
-# File: $(if ($Scope -eq 'Machine') { 'system' } else { 'user' }).$hostname.$username.env
-# ============================================================================
-# Created: $date
-# Scope: $Scope $(if ($Scope -eq 'Machine') { '(requires admin)' } else { '' })
-# SCOOP: $global:BaseDir
-# Hostname: $hostname
-# Username: $username
-# ============================================================================
-# SYNTAX:
-#   VAR=value           Set variable
-#   VAR+=value          Prepend to list (works for ALL variables)
-#   VAR=+value          Append to list (works for ALL variables)
-#   VAR-=value          Remove from list (works for ALL variables)
-#   -VAR                Unset variable
-#   # Comment           Lines starting with # are ignored
-#
-# LIST VARIABLES:
-#   PATH, PERL5LIB, PYTHONPATH, CLASSPATH, PSModulePath, PATHEXT, etc.
-#   All use semicolon (;) as separator
-#
-# VARIABLE EXPANSION:
-#   `$SCOOP              Expands to Scoop directory
-#   `$USERPROFILE        Expands to user profile directory
-#   `$JAVA_HOME          Expands to any environment variable
-# ============================================================================
-
-# ============================================================================
-# PATH MANAGEMENT
-# ============================================================================
-
-# Remove old/duplicate entries first (cleanup)
-#PATH-=C:\old\path\to\remove
-
-# Core paths (highest priority - added last)
-PATH+=`$SCOOP\bin
-PATH+=`$SCOOP\shims
-
-# ============================================================================
-# DEVELOPMENT TOOLS
-# ============================================================================
-
-# --- Java Development ---
-#JAVA_HOME=`$SCOOP\apps\temurin25-jdk\current
-#PATH+=`$JAVA_HOME\bin
-#JAVA_OPTS=-Xmx2g -Xms512m -XX:+UseG1GC
-#CLASSPATH=.
-#CLASSPATH+=`$JAVA_HOME\lib\tools.jar
-
-# --- Python Development ---
-#PYTHON_HOME=`$SCOOP\apps\python314\current
-#PATH+=`$PYTHON_HOME
-#PATH+=`$PYTHON_HOME\Scripts
-#PYTHONPATH=`$PYTHON_HOME\Lib\site-packages
-#PYTHONPATH+=`$USERPROFILE\python\libs
-
-# --- Perl Development ---
-#PERL_HOME=`$SCOOP\apps\perl\current
-#PATH+=`$PERL_HOME\perl\bin
-#PATH+=`$PERL_HOME\perl\site\bin
-#PERL5LIB=`$PERL_HOME\perl\lib
-#PERL5LIB+=`$PERL_HOME\perl\site\lib
-#PERL5LIB+=`$USERPROFILE\perl5\lib
-
-# --- Node.js Development ---
-#NODE_HOME=`$SCOOP\apps\nodejs\current
-#PATH+=`$NODE_HOME
-#NODE_PATH=`$NODE_HOME\node_modules
-#NPM_CONFIG_PREFIX=`$SCOOP\persist\nodejs
-
-# --- Go Development ---
-#GOROOT=`$SCOOP\apps\go\current
-#GOPATH=`$USERPROFILE\go
-#PATH+=`$GOROOT\bin
-#PATH+=`$GOPATH\bin
-
-# --- Rust Development ---
-#CARGO_HOME=`$USERPROFILE\.cargo
-#RUSTUP_HOME=`$USERPROFILE\.rustup
-#PATH+=`$CARGO_HOME\bin
-
-# --- Ruby Development ---
-#RUBY_HOME=`$SCOOP\apps\ruby\current
-#PATH+=`$RUBY_HOME\bin
-#GEM_HOME=`$USERPROFILE\.gem
-
-# ============================================================================
-# BUILD TOOLS
-# ============================================================================
-
-# --- Maven ---
-#MAVEN_HOME=`$SCOOP\apps\maven\current
-#PATH+=`$MAVEN_HOME\bin
-#M2_HOME=`$MAVEN_HOME
-#MAVEN_OPTS=-Xmx1024m
-
-# --- Gradle ---
-#GRADLE_HOME=`$SCOOP\apps\gradle\current
-#PATH+=`$GRADLE_HOME\bin
-#GRADLE_USER_HOME=`$USERPROFILE\.gradle
-
-# --- CMake ---
-#CMAKE_HOME=`$SCOOP\apps\cmake\current
-#PATH+=`$CMAKE_HOME\bin
-
-# ============================================================================
-# MSYS2/MinGW (if needed)
-# ============================================================================
-# Place early for low priority (specific tools override)
-
-#MSYS2_HOME=`$SCOOP\apps\msys2\current
-#PATH+=`$MSYS2_HOME\usr\bin
-#PATH+=`$MSYS2_HOME\mingw64\bin
-
-# ============================================================================
-# VERSION CONTROL
-# ============================================================================
-
-#GIT_HOME=`$SCOOP\apps\git\current
-#PATH+=`$GIT_HOME\cmd
-#GIT_SSH=`$SCOOP\apps\openssh\current\ssh.exe
-
-#SVN_HOME=`$SCOOP\apps\tortoisesvn\current
-#PATH+=`$SVN_HOME\bin
-
-# ============================================================================
-# LOCALE & ENCODING
-# ============================================================================
-
-#LANG=en_US.UTF-8
-#LC_ALL=en_US.UTF-8
-
-# ============================================================================
-# POWERSHELL MODULES
-# ============================================================================
-
-#PSModulePath+=`$USERPROFILE\Documents\PowerShell\Modules
-#PSModulePath+=`$SCOOP\modules
-
-# ============================================================================
-# NOTES
-# ============================================================================
-# 1. Uncomment lines you need
-# 2. Adjust paths to match your Scoop installations
-# 3. Use += to add to PATH and other list variables
-# 4. Use -= to remove old entries
-# 5. Order matters: later entries have higher priority in PATH
-"@
-}
-
-# ============================================================================
 # STATUS FUNCTIONS
 # ============================================================================
-
-function Show-Status {
-    Write-Section "Scoop Boot Status"
-
-    Write-Host ""
-    Write-Host "Environment:" -ForegroundColor Yellow
-    Write-Host "  SCOOP: $(if ($env:SCOOP) { $env:SCOOP } else { 'Not set' })"
-    Write-Host "  SCOOP_GLOBAL: $(if ($env:SCOOP_GLOBAL) { $env:SCOOP_GLOBAL } else { 'Not set' })"
-    Write-Host ""
-
-    Write-Host "Scoop:" -ForegroundColor Yellow
-    $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
-    if ($scoopCommand) {
-        Write-Host "  Status: Installed"
-        Write-Host "  Location: $($scoopCommand.Source)"
-
-        # Get Scoop apps
-        try {
-            $apps = & scoop list 2>$null
-            if ($apps) {
-                $appCount = ($apps | Measure-Object).Count - 1  # Subtract header
-                Write-Host "  Apps: $appCount installed"
-            }
-        } catch {}
-    } else {
-        Write-Host "  Status: Not installed"
-        Write-Host "  Run: .\bin\scoop-boot.ps1 --bootstrap"
-    }
-    Write-Host ""
-
-    Write-Host "Configuration:" -ForegroundColor Yellow
-    $envFiles = Get-EnvironmentFiles
-    if ($envFiles.Count -gt 0) {
-        Write-Host "  Files found: $($envFiles.Count)"
-        foreach ($file in $envFiles) {
-            $fileName = Split-Path -Leaf $file.Path
-            Write-Host "    - $fileName (Scope: $($file.Scope))"
-        }
-    } else {
-        Write-Host "  No configuration files"
-        Write-Host "  Run: .\bin\scoop-boot.ps1 --init-env=user.default.env"
-    }
-    Write-Host ""
-}
 
 function Invoke-EnvStatus {
     Write-Section "Environment Configuration Status"
@@ -1902,11 +1598,13 @@ function Test-ScoopBoot {
     # Test 3: Parameter parsing
     $test = @{Name = "Parameter parsing"; Result = $false}
     try {
-        $testArgs = @("--install", "app1", "app2", "--dry-run")
+        $testArgs = @("--admin-setenv", "--dry-run", "--branch=feature/x", "--status", "app1")
         $savedArgs = $global:ParsedArgs.Clone()
-        $global:ParsedArgs = @{Install = @(); DryRun = $false}
+        $global:ParsedArgs = @{AdminSetEnv = $false; DryRun = $false; Branch = ''; Unknown = @()}
         Parse-Arguments -Arguments $testArgs
-        $test.Result = $global:ParsedArgs.Install.Count -eq 2 -and $global:ParsedArgs.DryRun -eq $true
+        $test.Result = $global:ParsedArgs.AdminSetEnv -and $global:ParsedArgs.DryRun -and
+            $global:ParsedArgs.Branch -eq 'feature/x' -and
+            @($global:ParsedArgs.Unknown).Count -eq 2 -and $global:ParsedArgs.Unknown[0] -eq '--status'
         $global:ParsedArgs = $savedArgs
     } catch {}
     $tests += $test
@@ -2278,6 +1976,29 @@ JAVA_HOME=C:\java
     } catch {}
     $tests += $test
 
+    # Test 40: every option the help lists is accepted by the parser (they drifted apart before 1.18.0)
+    $test = @{Name = "Help and parser agree on the options"; Result = $false}
+    try {
+        $moduleText = Get-Content -Path (Join-Path $global:ScriptRoot 'scoop-boot.psm1') -Raw
+        $helpStart = $moduleText.IndexOf('function Show-Help {')
+        $helpEnd = $moduleText.IndexOf("`nfunction ", $helpStart + 1)
+        $helpText = $moduleText.Substring($helpStart, $helpEnd - $helpStart)
+        $helpOptions = @([regex]::Matches($helpText, '--[a-z][a-z-]*(=[A-Za-z]+)?') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+        $rejected = @()
+        $savedArgs = $global:ParsedArgs.Clone()
+        foreach ($option in $helpOptions) {
+            $probe = $option -replace '=[A-Za-z]+$', '=x'
+            $global:ParsedArgs = $savedArgs.Clone()
+            $global:ParsedArgs.Unknown = @()
+            Parse-Arguments -Arguments @($probe)
+            if (@($global:ParsedArgs.Unknown).Count -gt 0) { $rejected += $option }
+        }
+        $global:ParsedArgs = $savedArgs
+        if ($rejected.Count -gt 0) { Write-Host "       help lists options the parser rejects: $($rejected -join ', ')" -ForegroundColor Yellow }
+        $test.Result = $helpOptions.Count -ge 10 -and $rejected.Count -eq 0
+    } catch {}
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -2294,140 +2015,6 @@ JAVA_HOME=C:\java
     Write-Host "Tests: $passed passed, $failed failed, $($passed + $failed) total" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Yellow" })
 
     return $failed -eq 0
-}
-
-# ============================================================================
-# SUGGEST & ENVIRONMENT FUNCTIONS
-# ============================================================================
-
-function Show-Suggest {
-    Write-Section "Suggested Applications"
-
-    Write-Host ""
-    Write-Host "Essential Development Tools:" -ForegroundColor Yellow
-    Write-Host "  git          - Version control"
-    Write-Host "  nodejs       - JavaScript runtime"
-    Write-Host "  python       - Python programming"
-    Write-Host "  openjdk      - Java development kit"
-    Write-Host "  go           - Go programming language"
-    Write-Host "  rust         - Rust programming language"
-    Write-Host ""
-
-    Write-Host "Editors & IDEs:" -ForegroundColor Yellow
-    Write-Host "  vscode       - Visual Studio Code"
-    Write-Host "  neovim       - Advanced text editor"
-    Write-Host "  notepadplusplus - Text editor"
-    Write-Host ""
-
-    Write-Host "Build Tools:" -ForegroundColor Yellow
-    Write-Host "  maven        - Java build tool"
-    Write-Host "  gradle       - Build automation"
-    Write-Host "  cmake        - Cross-platform build"
-    Write-Host "  make         - GNU Make"
-    Write-Host ""
-
-    Write-Host "Databases:" -ForegroundColor Yellow
-    Write-Host "  postgresql   - PostgreSQL database"
-    Write-Host "  mysql        - MySQL database"
-    Write-Host "  mongodb      - NoSQL database"
-    Write-Host "  redis        - In-memory data store"
-    Write-Host ""
-
-    Write-Host "Install example:" -ForegroundColor Cyan
-    Write-Host "  .\bin\scoop-boot.ps1 --install git nodejs python vscode" -ForegroundColor White
-    Write-Host ""
-}
-
-function Show-Environment {
-    Write-Section "Current Environment Variables"
-
-    $vars = @(
-        "SCOOP", "SCOOP_GLOBAL",
-        "PATH",
-        "JAVA_HOME", "JAVA_OPTS", "CLASSPATH",
-        "PYTHON_HOME", "PYTHONPATH",
-        "PERL_HOME", "PERL5LIB",
-        "NODE_HOME", "NODE_PATH", "NPM_CONFIG_PREFIX",
-        "GOROOT", "GOPATH",
-        "CARGO_HOME", "RUSTUP_HOME",
-        "RUBY_HOME", "GEM_HOME",
-        "MAVEN_HOME", "M2_HOME", "GRADLE_HOME",
-        "CMAKE_HOME", "MAKE_HOME",
-        "GIT_HOME", "SVN_HOME",
-        "MSYS2_HOME",
-        "PSModulePath"
-    )
-
-    Write-Host ""
-    foreach ($var in $vars) {
-        $value = [Environment]::GetEnvironmentVariable($var, "Machine")
-        if ([string]::IsNullOrEmpty($value)) {
-            $value = [Environment]::GetEnvironmentVariable($var, "User")
-        }
-        if ([string]::IsNullOrEmpty($value)) {
-            $value = [Environment]::GetEnvironmentVariable($var, "Process")
-        }
-
-        if (![string]::IsNullOrEmpty($value)) {
-            Write-Host "$var`:" -ForegroundColor Yellow
-            if ($var -eq "PATH" -or $var -like "*PATH*" -or $var -like "*LIB*") {
-                $paths = $value -split ';'
-                foreach ($path in $paths) {
-                    if (![string]::IsNullOrEmpty($path)) {
-                        Write-Host "  $path" -ForegroundColor Gray
-                    }
-                }
-            } else {
-                Write-Host "  $value" -ForegroundColor White
-            }
-            Write-Host ""
-        }
-    }
-}
-
-# ============================================================================
-# INSTALL FUNCTION
-# ============================================================================
-
-function Invoke-Install {
-    param([string[]]$Apps)
-
-    Write-Section "Install Applications"
-
-    if ($Apps.Count -eq 0) {
-        Write-Warning "No applications specified"
-        Write-Host ""
-        Write-Host "Example:" -ForegroundColor Yellow
-        Write-Host "  .\bin\scoop-boot.ps1 --install git nodejs python" -ForegroundColor White
-        return
-    }
-
-    # Check if Scoop is installed
-    $scoopCommand = Get-Command scoop -ErrorAction SilentlyContinue
-    if (-not $scoopCommand) {
-        Write-ErrorMsg "Scoop is not installed"
-        Write-Host ""
-        Write-Host "Install Scoop first:" -ForegroundColor Yellow
-        Write-Host "  .\bin\scoop-boot.ps1 --bootstrap" -ForegroundColor White
-        return
-    }
-
-    Write-Info "Installing $($Apps.Count) application(s)..."
-    Write-Host ""
-
-    foreach ($app in $Apps) {
-        Write-Host "Installing: $app" -ForegroundColor White
-        try {
-            & scoop install $app
-            Write-Success "Installed: $app"
-        }
-        catch {
-            Write-ErrorMsg "Failed to install: $app"
-        }
-        Write-Host ""
-    }
-
-    Write-Info "Installation complete"
 }
 
 # ============================================================================
@@ -2654,25 +2241,19 @@ Rules:
         Write-Host ""
         Write-Host "No .env files found in: $envDir\" -ForegroundColor White
         Write-Host ""
-        Write-Host "Step 1: Create environment configuration" -ForegroundColor Cyan
+        Write-Host "Step 1: Create the environment files for this host and user" -ForegroundColor Cyan
         Write-Host "  Run as Administrator:" -ForegroundColor White
-        Write-Host "    .\bin\scoop-boot.ps1 --init-env=system.default.env" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "  Or for host-specific:" -ForegroundColor White
-        Write-Host "    .\bin\scoop-boot.ps1 --init-env=system.$(Get-Hostname).$(Get-Username).env" -ForegroundColor Gray
+        Write-Host "    C:\usr\bin\scoop-boot.ps1 --admin-init" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Step 2: Edit the created file" -ForegroundColor Cyan
-        Write-Host "  notepad `"$envDir\system.default.env`"" -ForegroundColor Gray
+        Write-Host "  notepad `"$envDir\system.$(Get-Hostname).$(Get-Username).env`"" -ForegroundColor Gray
         Write-Host "  - Uncomment lines you need" -ForegroundColor White
         Write-Host "  - Adjust paths to match your installation" -ForegroundColor White
         Write-Host ""
         Write-Host "Step 3: Test configuration" -ForegroundColor Cyan
-        Write-Host "  .\bin\scoop-boot.ps1 --apply-env --dry-run" -ForegroundColor Gray
+        Write-Host "  .\bin\scoop-boot.ps1 --admin-setenv --dry-run" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Step 4: Apply configuration (as Administrator)" -ForegroundColor Cyan
-        Write-Host "  .\bin\scoop-boot.ps1 --apply-env" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "Then re-run this installation:" -ForegroundColor Yellow
         Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
         return $false
@@ -2697,21 +2278,14 @@ Rules:
         Write-Host ""
         Write-Host "What to do:" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "Option 1: Create new file with correct name" -ForegroundColor Yellow
-        Write-Host "  .\bin\scoop-boot.ps1 --init-env=system.default.env" -ForegroundColor Gray
+        Write-Host "Option 1: Create the host files from the templates" -ForegroundColor Yellow
+        Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-init" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Option 2: Rename existing file" -ForegroundColor Yellow
-        if ($allEnvFiles[0].Name -eq "template-default.env") {
-            Write-Host "  Rename '$($allEnvFiles[0].Name)' to 'system.default.env'" -ForegroundColor Gray
-            Write-Host "  Command:" -ForegroundColor White
-            Write-Host "    Rename-Item `"$envDir\$($allEnvFiles[0].Name)`" -NewName 'system.default.env'" -ForegroundColor Gray
-        } else {
-            Write-Host "  Rename your .env file to start with 'system.' or 'user.'" -ForegroundColor Gray
-        }
+        Write-Host "  Rename your .env file to start with 'system.' or 'user.'" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Example:" -ForegroundColor Cyan
         Write-Host "  # Wrong:" -ForegroundColor Red
-        Write-Host "  template-default.env" -ForegroundColor Red
         Write-Host "  myconfig.env" -ForegroundColor Red
         Write-Host ""
         Write-Host "  # Correct:" -ForegroundColor Green
@@ -2740,7 +2314,7 @@ Rules:
         Write-Host ""
         Write-Host "Troubleshooting:" -ForegroundColor Yellow
         Write-Host "  1. Check file syntax: notepad `"$envDir\system.default.env`"" -ForegroundColor White
-        Write-Host "  2. Test with dry-run: .\bin\scoop-boot.ps1 --apply-env --dry-run" -ForegroundColor White
+        Write-Host "  2. Test with dry-run: .\bin\scoop-boot.ps1 --admin-setenv --dry-run" -ForegroundColor White
         Write-Host "  3. Check status: .\bin\scoop-boot.ps1 --env-status" -ForegroundColor White
         Write-Host ""
         return $false

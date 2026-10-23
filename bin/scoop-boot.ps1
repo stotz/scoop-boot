@@ -3,16 +3,18 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.17.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.18.0 - Portable Windows Development Environment Bootstrap
 
     Features:
-    - Order-independent parameter parsing
-    - Dynamic Git version detection
-    - Meta-environment system (User/System scope control)
-    - Environment configuration with GitHub template download
-    - List operations (+=, =+, -=) for ALL environment variables
-    - Flexible application installation
-    - Comprehensive self-testing (30 tests)
+    - Setup in three commands: --admin-init, --admin-setenv, --user-install;
+      --admin-reset to start over
+    - Environment files per host and user, applied at Machine scope; the User
+      scope is cleaned after every Scoop command (scoop wrapper in bin\)
+    - List operations (+=, =+, -=) for ALL environment variables, order-independent
+      variable expansion
+    - Package list per host (etc\packages), post-install handlers
+    - --platform-report: what Defender/ASR and a profile container do to the setup
+    - --update with rescue path; daily log with command context; 40 self-tests
     - ASCII-only output for console compatibility
 
 .PARAMETER (Dynamic)
@@ -20,9 +22,22 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.17.0
+    Version: 1.18.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.18.0:
+    - Removed: --status, --suggest, --install, --environment, --rollback,
+      --init-env, --apply-env, the long template etc\environments\template-default.env
+      and the embedded template text. --admin-setenv --dry-run shows the changes
+      the environment files would make and needs no elevation; the host files
+      come from --admin-init, *.default.env files are copied from the templates
+      by hand (docs\environment-files.md). Thirteen commands remain
+    - An unknown option stops the script with its name instead of being ignored;
+      without arguments the help is shown. Self-test 3 covers the parser's
+      unknown list, self-test 40 checks that every option in --help is accepted
+      by the parser
+    - About 420 lines less in scoop-boot.psm1
 
     Changes in v1.17.0:
     - --platform-report replaces --asr-report (kept as alias): the Defender/ASR
@@ -201,19 +216,19 @@
     - Fixed processing stop issue with non-PATH list operations
 
 .EXAMPLE
-    .\scoop-boot.ps1 --bootstrap
-    Installs Scoop and essential tools
+    .\scoop-boot.ps1 --admin-init
+    Creates the directories and the environment files for this host and user (Administrator)
 
 .EXAMPLE
-    .\scoop-boot.ps1 --init-env=system.bootes.user.env
-    Creates environment configuration file
+    .\scoop-boot.ps1 --admin-setenv --dry-run
+    Shows what the environment files would change
 
 .EXAMPLE
-    .\scoop-boot.ps1 --apply-env --dry-run
-    Shows what changes would be applied
+    .\scoop-boot.ps1 --user-install
+    Bootstraps Scoop and installs the package list
 
 .EXAMPLE
-    .\scoop-boot.ps1 --selfTest
+    .\scoop-boot.ps1 --self-test
     Runs comprehensive self-tests (30 tests)
 #>
 
@@ -247,7 +262,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.17.0"
+$global:ScriptVersion = "1.18.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -496,8 +511,12 @@ if (-not $script:ModuleLoaded) {
 $logMode = @($args | Where-Object { $_ -match '^--' -and $_ -notmatch '^--(quiet|dry-run|force|keep-persist|branch=)' } | Select-Object -First 1)
 Initialize-ScoopBootLog -ScriptName 'scoop-boot.ps1' -Version $global:ScriptVersion -Mode "$logMode" -ScriptPath $PSCommandPath -Arguments $args
 
-# Parse arguments
+# Parse arguments; an unknown option stops here (a typo, or a command removed in 1.18.0)
 Parse-Arguments -Arguments $args
+if (@($global:ParsedArgs.Unknown).Count -gt 0) {
+    Write-ErrorMsg "Unknown option(s): $($global:ParsedArgs.Unknown -join ' ')  (scoop-boot.ps1 --help lists the commands)"
+    exit 1
+}
 
 
 # Handle commands
@@ -521,38 +540,14 @@ if ($global:ParsedArgs.Bootstrap) {
     exit $(if ($success) { 0 } else { 1 })
 }
 
-if ($global:ParsedArgs.Status) {
-    Show-Status
-    exit 0
-}
-
 if ($global:ParsedArgs.SelfTest) {
     $success = Test-ScoopBoot
     exit $(if ($success) { 0 } else { 1 })
 }
 
-if ($global:ParsedArgs.Suggest) {
-    Show-Suggest
-    exit 0
-}
-
-if ($global:ParsedArgs.Environment) {
-    Show-Environment
-    exit 0
-}
-
 if ($global:ParsedArgs.EnvStatus) {
     Invoke-EnvStatus
     exit 0
-}
-
-if ($null -ne $global:ParsedArgs.InitEnv) {
-    $success = Invoke-InitEnv -FileName $global:ParsedArgs.InitEnv
-    exit $(if ($success) { 0 } else { 1 })
-}
-
-if ($global:ParsedArgs.ApplyEnv) {
-    if (Invoke-ApplyEnv -DryRun $global:ParsedArgs.DryRun -Rollback $global:ParsedArgs.Rollback) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.CleanUserScope) {
@@ -574,7 +569,7 @@ if ($global:ParsedArgs.AdminInit) {
 }
 
 if ($global:ParsedArgs.AdminSetEnv) {
-    if (Invoke-AdminSetEnv) { exit 0 } else { exit 1 }
+    if (Invoke-AdminSetEnv -DryRun $global:ParsedArgs.DryRun) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.UserInstall) {
@@ -589,17 +584,6 @@ if ($global:ParsedArgs.AdminReset) {
     if (Invoke-AdminReset -Force $global:ParsedArgs.Force -KeepPersist $global:ParsedArgs.KeepPersist) { exit 0 } else { exit 1 }
 }
 
-if ($global:ParsedArgs.Install.Count -gt 0) {
-    Invoke-Install -Apps $global:ParsedArgs.Install
-    exit 0
-}
-
-# If no command specified, show status
-if ($args.Count -eq 0) {
-    Show-Status
-    exit 0
-}
-
-Write-ErrorMsg "No valid command specified"
+# No command: the help is the status page
 Show-Help
-exit 1
+exit $(if ($args.Count -eq 0) { 0 } else { 1 })

@@ -230,7 +230,7 @@ Environment file syntax, load order and version pinning: [docs/environment-files
 ```
 Setup (Administrator shell unless noted)
 --admin-init         1: directories, --update, environment files from the templates, opens the system file
---admin-setenv       2: apply the environment files at Machine scope (Phase 1)
+--admin-setenv       2: apply the environment files at Machine scope (Phase 1); --dry-run: show the changes, no Administrator needed
 --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2); --force: no question in an elevated shell
 --admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
 
@@ -243,18 +243,12 @@ Maintenance
 --platform-report    Defender/ASR, profile container, TMP: what the platform does to the setup; exit 1 on findings
 
 Environment files
---apply-env          Apply the files (system.* needs Administrator), then clean the User scope
---dry-run            With --apply-env: show the changes without applying them
---init-env=FILE      Create an environment file from the template
 --env-status         Environment files found and their load order
---environment        Current environment variables
+                     (--admin-init creates the host files; copy a template by hand for *.default.env)
 
 Other
 --bootstrap          Install Scoop and the bootstrap packages only (part of --user-install)
---install APP...     Install applications through Scoop
---status             Scoop and environment overview
---suggest            Suggested applications
---self-test          Self-tests (parser, expansion, package list)
+--self-test          Self-tests (parser, expansion, package list, help)
 --version, --help
 ```
 

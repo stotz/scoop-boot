@@ -20,8 +20,9 @@ user.default.env                User scope, all hosts
 user.<host>.<user>.env          User scope, this host and user        your additions
 ```
 
-`--apply-env` (what `--admin-setenv` runs) applies the `system.*` files in that order, then calls
-`--clean-user-scope`, which applies the `user.*` files. `--clean-user-scope` on its own
+`--admin-setenv` applies the `system.*` files in that order, then calls
+`--clean-user-scope`, which applies the `user.*` files; `--admin-setenv --dry-run` shows
+the changes without writing and needs no Administrator. `--clean-user-scope` on its own
 applies only the `user.*` files and needs no Administrator.
 
 Before the `system.*` files are applied, every Machine PATH entry inside Scoop's
@@ -92,8 +93,10 @@ first, `cc1.exe` fails with exit code -1073741511 (`STATUS_ENTRYPOINT_NOT_FOUND`
 `etc/environments/system.hostname.username.env` is the Machine template the Quick Setup
 downloads; the comment at its end lists the optional cache relocation (Gradle, Maven,
 npm, pip, NuGet, JetBrains, WSL) for machines with roaming or container profiles.
-`etc/environments/user.hostname.username.env` is the User template. `template-default.env`
-is the long form with every tool scoop-boot knows, as a reference for `--init-env`.
+`etc/environments/user.hostname.username.env` is the User template. `--admin-init` copies
+both to `system.<host>.<user>.env` and `user.<host>.<user>.env` and fills in the header.
+For a `system.default.env` or `user.default.env` (all hosts), copy the template by hand
+and delete the host and user lines in its header.
 
 Identity values (name, mail addresses) do not belong in these templates; they belong in
 your own `user.<host>.<user>.env`, where scripts can read them.
