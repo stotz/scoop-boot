@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.19.0
+    Version: 1.20.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.19.0"
+$global:ScriptVersion = "1.20.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -326,6 +326,57 @@ function Restore-ScoopBootTitle {
     if ($null -ne $Saved) { Set-ScoopBootTitle -Text "$Saved" }
 }
 
+# etc\scoop-boot.conf: "DIR=<path>" lines, the directories --admin-init creates when
+# they are missing. scoop-boot itself needs only $global:BaseDir (where bin\ lives);
+# these directories are the conventions of the environment file (TMP, DEVL_ROOT,
+# DATA). Without the file the defaults are tmp, devl and data on the drive of
+# BaseDir. --update never touches the file.
+function Get-ScoopBootConfigDefaultText {
+    $drive = [IO.Path]::GetPathRoot($global:BaseDir)
+    $lines = @(
+        '# scoop-boot configuration (read by --admin-init and --platform-report; never touched by --update)',
+        '# DIR: directories created when missing, one per line, absolute path without spaces.',
+        '# TMP, DEVL_ROOT and DATA in the environment file should point to these.'
+    )
+    foreach ($name in @('tmp', 'devl', 'data')) { $lines += "DIR=$(Join-Path $drive $name)" }
+    return ($lines -join "`n") + "`n"
+}
+
+function Get-ScoopBootConfig {
+    <#
+    .SYNOPSIS
+        Reads etc\scoop-boot.conf: Path, Exists, Dirs (valid DIR lines), Invalid (rejected lines).
+    #>
+    $path = Join-Path $global:BaseDir 'etc\scoop-boot.conf'
+    $config = @{ Path = $path; Exists = (Test-Path $path); Dirs = @(); Invalid = @() }
+    if (-not $config.Exists) {
+        $drive = [IO.Path]::GetPathRoot($global:BaseDir)
+        $config.Dirs = @(@('tmp', 'devl', 'data') | ForEach-Object { Join-Path $drive $_ })
+        return $config
+    }
+    foreach ($op in @(Read-EnvironmentFile -FilePath $path)) {
+        if ($op.Type -ne 'Set' -or $op.Name -ne 'DIR') { continue }
+        $value = "$($op.Value)".Trim()
+        # Absolute, no spaces: Scoop and several installers fail on paths with spaces
+        if ($value -match '^[A-Za-z]:\\[^\s]*$') { $config.Dirs += $value.TrimEnd('\') } else { $config.Invalid += $value }
+    }
+    return $config
+}
+
+function Get-EnvFileMachineValue {
+    <#
+    .SYNOPSIS
+        The value a name would get from the system.* files (expanded), or $null when no file defines it.
+    #>
+    param([string]$Name)
+    $files = @(Get-EnvironmentFiles | Where-Object { $_.Scope -eq 'Machine' })
+    if ($files.Count -eq 0) { return $null }
+    $global:EnvFileDefinitions = @{}
+    foreach ($file in $files) { Register-EnvFileDefinitions -Operations @(Read-EnvironmentFile -FilePath $file.Path) }
+    if (-not $global:EnvFileDefinitions.ContainsKey($Name)) { return $null }
+    return (Expand-EnvironmentVariables -Value $global:EnvFileDefinitions[$Name])
+}
+
 # Definitions (NAME=value lines) of the .env files of the current run, name -> raw
 # value. Filled by Register-EnvFileDefinitions before any file is applied, so that a
 # reference resolves to the value the files define wherever the definition stands,
@@ -441,7 +492,7 @@ function Show-Help {
     Write-Host "      --force            no question when the shell is elevated (account with elevated shells only)"
     Write-Host "  --admin-reset        Remove Scoop again: apps, variables, PATH entries, registry; bin, etc and logs stay"
     Write-Host "      --force            no confirmation prompt"
-    Write-Host "      --keep-persist     keep C:\usr\persist (app data, settings)"
+    Write-Host "      --keep-persist     keep $global:BaseDir\persist (app data, settings)"
     Write-Host ""
     Write-Host "MAINTENANCE:" -ForegroundColor Yellow
     Write-Host "  --update             Download the current scripts, scoop wrapper and etc\packages\default.txt from GitHub"
@@ -451,7 +502,7 @@ function Show-Help {
     Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
     Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
     Write-Host ""
-    Write-Host "ENVIRONMENT FILES (C:\usr\etc\environments):" -ForegroundColor Yellow
+    Write-Host "ENVIRONMENT FILES ($global:EnvDir):" -ForegroundColor Yellow
     Write-Host "  --env-status         Which files exist and apply to this host and user"
     Write-Host "  (--admin-init creates the host files from the templates; copy a template by hand for *.default.env)"
     Write-Host ""
@@ -467,6 +518,7 @@ function Show-Help {
     Write-Host "  user.default.env                User scope, all hosts"
     Write-Host "  user.HOSTNAME.USERNAME.env      User scope, this host and user"
     Write-Host "  etc\packages\default.txt        Package list (delivered); etc\packages\HOSTNAME.txt replaces it"
+    Write-Host "  etc\scoop-boot.conf             DIR=<path> lines: directories --admin-init creates (tmp, devl, data)"
     Write-Host ""
     Write-Host "LIST OPERATIONS (work for ALL variables):" -ForegroundColor Yellow
     Write-Host "  VAR+=value          Prepend to list (PATH, PERL5LIB, etc.)"
@@ -632,7 +684,7 @@ function Invoke-Bootstrap {
             Write-Host "[FATAL] $($tool.Name) is installed but Windows refuses to start $exe" -ForegroundColor Red
             Write-Host "        $($_.Exception.Message)" -ForegroundColor Gray
             Write-Host "        Endpoint security (Defender ASR rule 01443614) blocks newly released binaries on this machine." -ForegroundColor Gray
-            Write-Host "        Nothing can be installed until C:\usr is excluded. Check the Defender log for event 1121:" -ForegroundColor Gray
+            Write-Host "        Nothing can be installed until $global:BaseDir is excluded. Check the Defender log for event 1121:" -ForegroundColor Gray
             Write-Host "        Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1121}" -ForegroundColor Gray
             return $false
         }
@@ -1071,9 +1123,12 @@ function Invoke-UserInstall {
     param(
         [bool]$Force = $false
     )
+    # The environment file decides what TMP is; if it defines one, it must be applied
+    # (Scoop and several installers fail on long or redirected temp paths)
+    $expectedTmp = Get-EnvFileMachineValue -Name 'TMP'
     $machineTmp = [Environment]::GetEnvironmentVariable('TMP', 'Machine')
-    if ($machineTmp -ne 'C:\tmp') {
-        Write-ErrorMsg "Machine-scope TMP is '$machineTmp', expected C:\tmp: setup step 2 has not run. Run as Administrator: scoop-boot.ps1 --admin-setenv"
+    if ($expectedTmp -and $machineTmp -ne $expectedTmp) {
+        Write-ErrorMsg "Machine-scope TMP is '$machineTmp', the environment file defines '$expectedTmp': setup step 2 has not run. Run as Administrator: scoop-boot.ps1 --admin-setenv"
         return $false
     }
     # Install-ScoopTools itself warns and asks when run from an elevated shell
@@ -1245,9 +1300,9 @@ function Invoke-PlatformReport {
     }
     $prevalenceRule = '01443614-cd74-433a-b99e-2ecdc07bfc25'
     $actionNames = @{ 0 = 'Disabled'; 1 = 'Block'; 2 = 'Audit'; 6 = 'Warn' }
-    # The directories a developer setup lives in; C:\devl and C:\data are the
-    # conventional places of the environment file, not something scoop-boot creates
-    $devDirs = @($global:BaseDir, 'C:\devl', 'C:\data')
+    # The directories a developer setup lives in: the Scoop root and the DIR entries
+    # of etc\scoop-boot.conf (tmp, devl, data by default)
+    $devDirs = @($global:BaseDir) + @((Get-ScoopBootConfig).Dirs)
     $findings = @()
     $lines = @()
     $lines += "Platform report $(Get-Date -Format s)  host=$env:COMPUTERNAME  user=$env:USERDOMAIN\$env:USERNAME  scoop-boot $global:ScriptVersion"
@@ -1392,8 +1447,9 @@ function Invoke-PlatformReport {
     $lines += ""
     $lines += "--- Temporary directory ---"
     $lines += "  TMP process=$env:TMP  user=$userTmp  machine=$machineTmp"
-    if ($machineTmp -ne 'C:\tmp') {
-        $lines += "  [INFO] Machine TMP is not C:\tmp: setup step 2 (scoop-boot.ps1 --admin-setenv) has not run on this machine"
+    $expectedTmp = Get-EnvFileMachineValue -Name 'TMP'
+    if ($expectedTmp -and $machineTmp -ne $expectedTmp) {
+        $lines += "  [INFO] Machine TMP is '$machineTmp', the environment file defines '$expectedTmp': setup step 2 (scoop-boot.ps1 --admin-setenv) has not run on this machine"
     }
     $setTemp = [int](Get-RegistryValue -Path $profilesKey -Name 'SetTempToLocalPath')
     if ($containerActive -and ($setTemp -eq 1 -or $setTemp -eq 3)) {
@@ -2014,8 +2070,11 @@ JAVA_HOME=C:\java
     $test = @{Name = "Installed files match the release manifest"; Result = $false}
     try {
         $manifestPath = Join-Path $global:BaseDir 'etc\release.manifest'
-        if ((Test-Path $global:BranchFile) -or -not (Test-Path $manifestPath)) {
-            $test.Name += " (skipped: $(if (Test-Path $global:BranchFile) { 'branch files' } else { 'no manifest' }))"
+        # A git working tree is not an installation: its files may differ from the last
+        # release, and bin\scoop.cmd is checked out with CRLF while the manifest has the blob
+        $isRepo = Test-Path (Join-Path $global:BaseDir '.git')
+        if ($isRepo -or (Test-Path $global:BranchFile) -or -not (Test-Path $manifestPath)) {
+            $test.Name += " (skipped: $(if ($isRepo) { 'git working tree' } elseif (Test-Path $global:BranchFile) { 'branch files' } else { 'no manifest' }))"
             $test.Result = $true
         } else {
             $mismatch = @()
@@ -2030,6 +2089,45 @@ JAVA_HOME=C:\java
             $test.Result = $mismatch.Count -eq 0
         }
     } catch {}
+    $tests += $test
+
+    # Test 42: etc\scoop-boot.conf: defaults without the file, DIR lines with and without errors
+    $test = @{Name = "scoop-boot.conf: defaults, DIR lines, rejected lines"; Result = $false}
+    try {
+        $savedBase = $global:BaseDir
+        $tempBase = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-test-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Path (Join-Path $tempBase 'etc') -Force | Out-Null
+        $global:BaseDir = $tempBase
+        $defaults = Get-ScoopBootConfig
+        $drive = [IO.Path]::GetPathRoot($tempBase)
+        $ok1 = (-not $defaults.Exists) -and ($defaults.Dirs.Count -eq 3) -and ($defaults.Dirs[0] -eq (Join-Path $drive 'tmp'))
+        "# test`nDIR=D:\dev\tmp`nDIR=D:\dev\data\`nDIR=C:\with space\x`nDIR=relative\path`nOTHER=C:\ignored" | Set-Content -Path (Join-Path $tempBase 'etc\scoop-boot.conf') -Encoding ASCII
+        $read = Get-ScoopBootConfig
+        $ok2 = $read.Exists -and ($read.Dirs.Count -eq 2) -and ($read.Dirs[0] -eq 'D:\dev\tmp') -and ($read.Dirs[1] -eq 'D:\dev\data') -and ($read.Invalid.Count -eq 2)
+        $test.Result = $ok1 -and $ok2
+    } catch {} finally {
+        $global:BaseDir = $savedBase
+        if ($tempBase) { Remove-Item $tempBase -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $tests += $test
+
+    # Test 43: Get-EnvFileMachineValue expands the definition of the system.* files; $null without one
+    $test = @{Name = "Env file value for the TMP check (expanded, null without definition)"; Result = $false}
+    try {
+        $savedEnvDir = $global:EnvDir
+        $tempEnv = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-test-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Path $tempEnv -Force | Out-Null
+        $global:EnvDir = $tempEnv
+        $none = Get-EnvFileMachineValue -Name 'TMP'
+        "USR=D:\dev`nTMP=`$USR\tmp`nTEMP=`$TMP" | Set-Content -Path (Join-Path $tempEnv 'system.default.env') -Encoding ASCII
+        $tmp = Get-EnvFileMachineValue -Name 'TMP'
+        $temp = Get-EnvFileMachineValue -Name 'TEMP'
+        $other = Get-EnvFileMachineValue -Name 'NOT_DEFINED_HERE'
+        $test.Result = ($null -eq $none) -and ($tmp -eq 'D:\dev\tmp') -and ($temp -eq 'D:\dev\tmp') -and ($null -eq $other)
+    } catch {} finally {
+        $global:EnvDir = $savedEnvDir
+        if ($tempEnv) { Remove-Item $tempEnv -Recurse -Force -ErrorAction SilentlyContinue }
+    }
     $tests += $test
 
     # Display results
@@ -2185,42 +2283,18 @@ function Set-DevelopmentEnvironment {
     Write-Host "[OK] Running with administrator privileges" -ForegroundColor Green
     Write-Host ""
 
-    # ============================================================================
-    # CRITICAL: Fix TMP/TEMP FIRST (prevents all Scoop installation issues!)
-    # ============================================================================
-    Write-Host ">>> Setting up TEMP directories (CRITICAL for Scoop!)..." -ForegroundColor Yellow
+    # TMP and TEMP come from the environment file (Machine scope); the directory they
+    # point to is created after the files are applied, see below. User-level TMP/TEMP
+    # are deliberately not set: --clean-user-scope removes User overrides of managed names.
 
-    # Create C:\tmp directory
-    if (-not (Test-Path "C:\tmp")) {
-        New-Item -ItemType Directory -Path "C:\tmp" -Force | Out-Null
-        # Set permissions
-        icacls "C:\tmp" /grant "Everyone:(OI)(CI)F" /T /Q 2>&1 | Out-Null
-        Write-Host "[OK] Created C:\tmp directory with full permissions" -ForegroundColor Green
-    } else {
-        Write-Host "[OK] C:\tmp directory already exists" -ForegroundColor Gray
-    }
-
-    # Set TMP and TEMP at Machine level
-    [Environment]::SetEnvironmentVariable("TMP", "C:\tmp", "Machine")
-    [Environment]::SetEnvironmentVariable("TEMP", "C:\tmp", "Machine")
-    Write-Host "[OK] Set Machine-level: TMP=C:\tmp, TEMP=C:\tmp" -ForegroundColor Green
-
-    # User-level TMP/TEMP are deliberately not set: the .env file sets them at
-    # Machine scope and --clean-user-scope removes User overrides of managed names.
-
-    # Apply to current session
-    $env:TMP = "C:\tmp"
-    $env:TEMP = "C:\tmp"
-    Write-Host "[OK] Applied to current session" -ForegroundColor Green
-
-    # Explain the directory layout to whoever looks into C:\usr later
+    # Explain the directory layout to whoever looks into the Scoop root later
     $dirReadme = "$ScoopDir\README_scoop_dir_warnings.md"
-    @'
-# C:\usr - read before putting anything here
+    @"
+# $ScoopDir - read before putting anything here
 
 This directory is the base of a Scoop-managed developer environment set up by
 scoop-boot (https://github.com/stotz/scoop-boot). Scoop is NOT the owner of
-C:\usr; it owns only these subdirectories:
+$ScoopDir; it owns only these subdirectories:
 
     apps\       installed applications (one folder per app, "current" junction)
     buckets\    manifest repositories
@@ -2244,16 +2318,16 @@ Rules:
 
 - Do not install or copy software into apps\, shims\ or persist\ by hand;
   the next scoop update or reset will remove or break it.
-- Other software may live in its own directory directly under C:\usr (for
-  example C:\usr\PostgreSQL). scoop-boot leaves it alone, but its PATH entries
+- Other software may live in its own directory directly under $ScoopDir (for
+  example $ScoopDir\PostgreSQL). scoop-boot leaves it alone, but its PATH entries
   and variables are then yours to maintain, not the .env file's.
 - Do not set JAVA_HOME, PATH and friends by hand in the Windows dialog. Edit
   etc\environments\system.<hostname>.<username>.env and run
   scoop-boot.ps1 --admin-setenv (as Administrator). After
   scoop update or scoop install, run scoop-boot.ps1 --clean-user-scope.
-- Keep anything you cannot rebuild out of C:\usr or back it up elsewhere;
-  C:\usr\backups holds environment snapshots only, not application data.
-'@ | Set-Content -Path $dirReadme -Encoding ASCII
+- Keep anything you cannot rebuild out of $ScoopDir or back it up elsewhere;
+  $ScoopDir\backups holds environment snapshots only, not application data.
+"@ | Set-Content -Path $dirReadme -Encoding ASCII
     Write-Host "[OK] Wrote $dirReadme" -ForegroundColor Green
     Write-Host ""
     Write-Host ">>> Applying environment configuration..." -ForegroundColor White
@@ -2276,7 +2350,7 @@ Rules:
         Write-Host ""
         Write-Host "Step 1: Create the environment files for this host and user" -ForegroundColor Cyan
         Write-Host "  Run as Administrator:" -ForegroundColor White
-        Write-Host "    C:\usr\bin\scoop-boot.ps1 --admin-init" -ForegroundColor Gray
+        Write-Host "    $ScoopDir\bin\scoop-boot.ps1 --admin-init" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Step 2: Edit the created file" -ForegroundColor Cyan
         Write-Host "  notepad `"$envDir\system.$(Get-Hostname).$(Get-Username).env`"" -ForegroundColor Gray
@@ -2287,7 +2361,7 @@ Rules:
         Write-Host "  .\bin\scoop-boot.ps1 --admin-setenv --dry-run" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Step 4: Apply configuration (as Administrator)" -ForegroundColor Cyan
-        Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
+        Write-Host "  $ScoopDir\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
         return $false
     }
@@ -2312,7 +2386,7 @@ Rules:
         Write-Host "What to do:" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "Option 1: Create the host files from the templates" -ForegroundColor Yellow
-        Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-init" -ForegroundColor Gray
+        Write-Host "  $ScoopDir\bin\scoop-boot.ps1 --admin-init" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Option 2: Rename existing file" -ForegroundColor Yellow
         Write-Host "  Rename your .env file to start with 'system.' or 'user.'" -ForegroundColor Gray
@@ -2326,7 +2400,7 @@ Rules:
         Write-Host "  user.bootes.john.env" -ForegroundColor Green
         Write-Host ""
         Write-Host "After fixing, re-run:" -ForegroundColor Yellow
-        Write-Host "  C:\usr\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
+        Write-Host "  $ScoopDir\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
         return $false
     }
@@ -2353,6 +2427,19 @@ Rules:
         return $false
     }
 
+    # The temporary directory the files set at Machine scope must exist and be
+    # writable for everyone; the session takes the new value right away
+    foreach ($name in @('TMP', 'TEMP')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Machine')
+        if (-not $value) { continue }
+        if ($value -match '^[A-Za-z]:\\' -and -not (Test-Path $value)) {
+            New-Item -ItemType Directory -Path $value -Force | Out-Null
+            icacls $value /grant "Everyone:(OI)(CI)F" /T /Q 2>&1 | Out-Null
+            Write-Host "[OK] Created $value ($name) with full permissions" -ForegroundColor Green
+        }
+        Set-Item -Path "Env:$name" -Value $value
+    }
+
     Write-Host ""
     Write-Host "=== Phase 1 Complete ===" -ForegroundColor Green
     Write-Host ""
@@ -2363,7 +2450,7 @@ Rules:
     Write-Host "Next step:" -ForegroundColor Yellow
     Write-Host "  Close this Administrator PowerShell" -ForegroundColor White
     Write-Host "  Open a NORMAL PowerShell (not Administrator)" -ForegroundColor White
-    Write-Host "  Run: C:\usr\bin\scoop-boot.ps1 --user-install" -ForegroundColor White
+    Write-Host "  Run: $ScoopDir\bin\scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""
     return $true
 }
@@ -2743,7 +2830,7 @@ function Install-ScoopTools {
     } else {
         Write-Host "[WARN] VC++ runtime not installed (vcredist2022 post_install needs elevation, UAC was denied?)" -ForegroundColor Yellow
         Write-Host "       Run in an Administrator PowerShell:" -ForegroundColor Gray
-        Write-Host "       Get-ChildItem C:\usr\cache\vcredist2022* | ForEach-Object { & `$_.FullName /install /quiet /norestart }" -ForegroundColor Gray
+        Write-Host "       Get-ChildItem $ScoopDir\cache\vcredist2022* | ForEach-Object { & `$_.FullName /install /quiet /norestart }" -ForegroundColor Gray
         $failedApps += 'vcredist2022 (runtime)'
     }
 
@@ -3268,7 +3355,13 @@ function Invoke-ScoopReset {
     Write-Host ""
     Write-Host "[INFO] Scanning for ALL processes with open handles to Scoop..." -ForegroundColor Gray
     Set-ScoopBootTitle -Text "scoop-boot reset processes"
+    # A run that removed the junctions but could not delete apps\ leaves
+    # sysinternals\current gone; the versioned directory still has handle64.exe
     $handle64Path = "$ScoopDir\apps\sysinternals\current\handle64.exe"
+    if (-not (Test-Path $handle64Path)) {
+        $found = Get-ChildItem -Path "$ScoopDir\apps\sysinternals" -Filter 'handle64.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) { $handle64Path = $found.FullName }
+    }
     $usedHandle = $false
 
     if (Test-Path $handle64Path) {
@@ -3297,19 +3390,32 @@ function Invoke-ScoopReset {
                 # directories are gone. Anything else (Teams, Outlook, Edge with a file dialog
                 # open) keeps running; if it blocks the deletion, that is reported below.
                 Write-Host "  [FOUND] $($processesToKill.Count) processes with open handles:" -ForegroundColor Yellow
+                # Image paths: WMI first (it also answers for the sandboxed renderer
+                # processes of Chrome and Firefox, whose restricted tokens make
+                # Get-Process fail even for an administrator), then Get-Process. A
+                # process whose path stays unknown counts as a Scoop process when a
+                # process of the same name provably runs from $ScoopDir: those renderers
+                # held apps\ on 22.10. and 24.10. and were spared by mistake.
+                $imagePaths = @{}
+                foreach ($processId in $processesToKill.Keys) {
+                    $imagePath = $null
+                    try { $imagePath = (Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop).ExecutablePath } catch { }
+                    if (-not $imagePath) { try { $imagePath = (Get-Process -Id $processId -ErrorAction Stop).Path } catch { } }
+                    $imagePaths[$processId] = $imagePath
+                }
+                $scoopExeNames = @($processesToKill.Keys | Where-Object { $imagePaths[$_] -and ($imagePaths[$_] -like "$ScoopDir\*") } | ForEach-Object { $processesToKill[$_].ToLower() } | Sort-Object -Unique)
                 foreach ($processId in $processesToKill.Keys) {
                     $exeName = $processesToKill[$processId]
                     if ($processId -eq $PID) { continue }
 
-                    $imagePath = $null
-                    try { $imagePath = (Get-Process -Id $processId -ErrorAction Stop).Path } catch { }
-                    $isScoopApp = $imagePath -and ($imagePath -like "$ScoopDir\*")
+                    $imagePath = $imagePaths[$processId]
+                    $isScoopApp = ($imagePath -and ($imagePath -like "$ScoopDir\*")) -or ((-not $imagePath) -and ($scoopExeNames -contains $exeName.ToLower()))
                     $isExplorer = $exeName -ieq 'explorer.exe'
 
                     if ($isExplorer) {
                         Write-Host "    - $exeName (PID: $processId): Windows shell, holds Scoop shell extensions; restarted after cleanup" -ForegroundColor Yellow
                     } elseif ($isScoopApp) {
-                        Write-Host "    - $exeName (PID: $processId): Scoop application" -ForegroundColor Yellow
+                        Write-Host "    - $exeName (PID: $processId): Scoop application$(if (-not $imagePath) { ' (path not readable, same name as one)' })" -ForegroundColor Yellow
                     } else {
                         # The path tells which program to close by hand when the deletion
                         # below fails (a browser with a download dialog, an IDE, Teams)
@@ -3356,11 +3462,17 @@ function Invoke-ScoopReset {
 
             Write-Host "  [INFO] Stopping all detected processes..." -ForegroundColor Gray
             $runningApps | ForEach-Object {
+                # Inside catch, $_ is the error record, hence the copy
+                $proc = $_
                 try {
-                    Stop-Process -Id $_.Id -Force -ErrorAction Stop
-                    Write-Host "    [OK] Stopped: $($_.Name)" -ForegroundColor Green
+                    Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                    Write-Host "    [OK] Stopped: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Green
                 } catch {
-                    Write-Host "    [FAIL] Could not stop: $($_.Name)" -ForegroundColor Red
+                    if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
+                        Write-Host "    [FAIL] Could not stop: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Red
+                    } else {
+                        Write-Host "    [OK] Already gone: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Gray
+                    }
                 }
             }
             Start-Sleep -Seconds 2
@@ -3574,7 +3686,7 @@ function Invoke-ScoopReset {
         Write-Host "  Get-Process | Where-Object { `$_.Path -like '*usr*' }" -ForegroundColor Gray
         Write-Host ""
         Write-Host "  # Check for open handles (if Sysinternals installed):" -ForegroundColor Gray
-        Write-Host "  handle64.exe C:\usr\apps" -ForegroundColor Gray
+        Write-Host "  handle64.exe $ScoopDir\apps" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Manual cleanup commands:" -ForegroundColor Cyan
         $remainingDirs | ForEach-Object {

@@ -3,8 +3,8 @@ scoop-boot.tar.bz2
 scoop-boot_v*.tar.bz2
 docs/AI_Instruktion.md
 docs/AI_TODO.md
-CLAUDE.md
 # IDE metadata
 .idea/
-# Logs written when scoop-boot.ps1 runs from the repository
+# Claude Code instructions and logs of a script run from the repository
+CLAUDE.md
 logs/

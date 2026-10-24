@@ -4,7 +4,7 @@
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-lightgrey.svg)](#support-matrix)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#author--license)
 
-One PowerShell script, `scoop-boot.ps1`, that sets up, configures and tears down a Windows development environment based on the [Scoop](https://scoop.sh) package manager: three commands from a fresh machine to a working tool set, environment variables managed through files, and a reset that leaves your files alone. Everything lives under `C:\usr`.
+One PowerShell script, `scoop-boot.ps1`, that sets up, configures and tears down a Windows development environment based on the [Scoop](https://scoop.sh) package manager: three commands from a fresh machine to a working tool set, environment variables managed through files, and a reset that leaves your files alone. Everything lives under one directory, `C:\usr` in this README; scoop-boot takes its root from wherever its `bin\` folder is.
 
 ---
 
@@ -30,8 +30,10 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/stotz/scoop-boot/main/b
 C:\usr\bin\scoop-boot.ps1 --admin-init
 ```
 
-`--admin-init` creates `C:\usr\etc\environments`, `C:\usr\etc\packages`, `C:\tmp`, `C:\devl`
-(repositories) and `C:\data` (data, optional tool caches), downloads the current release (the
+`--admin-init` creates `C:\usr\etc\environments` and `C:\usr\etc\packages`, plus the directories
+listed in `C:\usr\etc\scoop-boot.conf` (`DIR=` lines; written with the defaults `C:\tmp`,
+`C:\devl` for repositories and `C:\data` for data and optional tool caches when the file does
+not exist, on the drive of the Scoop root). It then downloads the current release (the
 other scripts, the scoop wrapper and the package list, see "Releases" below), writes `system.<host>.<user>.env` and
 `user.<host>.<user>.env` from the templates when they do not exist yet, and opens the
 system file in Notepad: review paths and tool versions, then save. `system.*` is applied at
@@ -47,7 +49,8 @@ account; rename them to your regular user name.
 C:\usr\bin\scoop-boot.ps1 --admin-setenv
 ```
 
-Sets `TMP`/`TEMP` to `C:\tmp`, applies the `system.*` file at Machine scope, then cleans
+Applies the `system.*` file at Machine scope (including `TMP`/`TEMP`, whose directory is
+created if missing), then cleans
 the User scope and applies the `user.*` file.
 
 ### 3. Tools (new PowerShell window, normal user)
@@ -138,7 +141,7 @@ SHA256:ygweazny8W4PyHz5SOOACa6LygoQwm55NFwrgPtSRJI
 `--version` names the installed release; `--self-test` checks the installed files against
 the manifest. `--update --branch=NAME` downloads a branch head without any check, for
 testing on one machine; every run says so until `--update --branch=main`.
-Releases are cut with `tools\release.ps1 -Tag vNNNN` on `main`.
+Releases are cut with `tools/release.sh vNNNN` on `main` (Git Bash).
 
 ### Checking the platform first
 

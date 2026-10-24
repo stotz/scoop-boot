@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.19.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.20.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -23,9 +23,27 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.19.0
+    Version: 1.20.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.20.0:
+    - The Scoop root is wherever bin\ lives; the conventions around it (tmp, devl,
+      data) come from etc\scoop-boot.conf ("DIR=<path>" lines). --admin-init writes
+      the file with the defaults on the root's drive when it is missing, creates
+      the directories, and sets USR in the new environment file to the root.
+      --platform-report reads the same list. No C:\usr, C:\tmp, C:\devl or C:\data
+      left in the scripts outside comments and examples
+    - TMP and TEMP are the environment file's business: --admin-setenv no longer
+      sets them before applying the files; after applying it creates the
+      directory the Machine values point to (everyone may write) and takes the
+      values into the session. --user-install compares Machine TMP with the
+      value the system.* files define instead of C:\tmp; no definition, no check.
+      Self-tests 42 (conf) and 43 (env file value); 43 tests
+    - tools/release.sh (bash) replaces tools/release.ps1: Urs works in Git Bash,
+      where "ssh-keygen -Y verify < file" needs no .NET detour and the blob hashes
+      are one pipe. Same manifest, same signature, same checks
+    - Rescue fallbacks: Get-Username is defined there too, --admin-init used it
 
     Changes in v1.19.0:
     - Signed releases. tools\release.ps1 writes etc\release.manifest (tag, date,
@@ -283,7 +301,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.19.0"
+$global:ScriptVersion = "1.20.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -306,6 +324,7 @@ if (-not $script:ModuleLoaded) {
     function Write-ErrorMsg { param([string]$Message) Microsoft.PowerShell.Utility\Write-Host "[ERROR] $Message" -ForegroundColor Red }
     function Get-FileSha256Short { param([string]$Path) try { return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.Substring(0, 8).ToLower() } catch { return 'unknown' } }
     function Get-Hostname { return [System.Net.Dns]::GetHostName().ToLower() }
+    function Get-Username { return [Environment]::UserName.ToLower() }
 }
 
 # ============================================================================
@@ -347,11 +366,13 @@ function Invoke-AdminInit {
     .SYNOPSIS
         Setup step 1 (Administrator): directories, scripts, environment files.
     .DESCRIPTION
-        Creates C:\usr\bin, C:\usr\etc\environments, C:\usr\etc\packages, C:\tmp,
-        C:\devl and C:\data, runs --update (scripts, scoop wrapper, package list),
-        writes system.<host>.<user>.env and user.<host>.<user>.env from the templates
-        when they do not exist yet, and opens the system file in Notepad. Running it
-        again changes nothing that already exists.
+        Creates bin\, etc\environments and etc\packages under the Scoop root plus the
+        directories listed in etc\scoop-boot.conf (written with its defaults tmp,
+        devl and data on the root's drive when missing), runs --update (scripts,
+        scoop wrapper, package list), writes system.<host>.<user>.env and
+        user.<host>.<user>.env from the templates when they do not exist yet (USR set
+        to the Scoop root), and opens the system file in Notepad. Running it again
+        changes nothing that already exists.
     #>
     param(
         [string]$Branch = ''
@@ -361,9 +382,17 @@ function Invoke-AdminInit {
         Write-ErrorMsg "--admin-init needs an elevated shell (Run as Administrator)"
         return $false
     }
-    # C:\devl (repositories) and C:\data (data, optional tool caches) are not used by
-    # scoop-boot; they are the conventional places the environment file refers to.
-    foreach ($dir in @((Join-Path $global:BaseDir 'bin'), $global:EnvDir, $global:PackagesDir, 'C:\tmp', 'C:\devl', 'C:\data')) {
+    # The conventions (tmp, devl, data) come from etc\scoop-boot.conf; scoop-boot
+    # itself needs only the root. The file is written with its defaults when missing.
+    $config = Get-ScoopBootConfig
+    if (-not $config.Exists) {
+        [IO.File]::WriteAllText($config.Path, (Get-ScoopBootConfigDefaultText), (New-Object Text.UTF8Encoding($false)))
+        Write-Success "Configuration written with defaults: $($config.Path) (DIR=$($config.Dirs -join ', DIR='))"
+    } else {
+        Write-Host "[OK] Configuration: $($config.Path) (DIR=$($config.Dirs -join ', DIR='))" -ForegroundColor Gray
+    }
+    foreach ($bad in $config.Invalid) { Write-Warning "Ignored in $($config.Path): DIR=$bad (absolute path without spaces expected)" }
+    foreach ($dir in @((Join-Path $global:BaseDir 'bin'), $global:EnvDir, $global:PackagesDir) + @($config.Dirs)) {
         if (Test-Path $dir) {
             Write-Host "[OK] Directory exists: $dir" -ForegroundColor Gray
         } else {
@@ -392,6 +421,9 @@ function Invoke-AdminInit {
             $content = $template -replace '<hostname>', (Get-Hostname) -replace '<username>', (Get-Username)
             $content = $content -replace "(?m)^# File: $scope\.hostname\.username\.env\s*$", "# File: $scope.$envName"
             $content = $content -replace '(?m)^# Created: .*$', "# Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm') by scoop-boot.ps1 --admin-init ($Branch)"
+            # The Scoop root of this machine; TMP, DEVL_ROOT and DATA stay the template's
+            # values and are reviewed in Notepad together with everything else
+            $content = $content -replace '(?m)^USR=.*$', "USR=$($global:BaseDir)" -replace '(?m)^# SCOOP: .*$', "# SCOOP: $($global:BaseDir)"
             # UTF-8 without BOM, line endings as in the repository (LF)
             [IO.File]::WriteAllText($target, $content, (New-Object Text.UTF8Encoding($false)))
             Write-Success "Environment file created from template: $target"
