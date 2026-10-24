@@ -24,6 +24,8 @@
 # writing anything.
 
 set -euo pipefail
+# A command that fails under set -e would otherwise end the script without a word
+trap 'echo "[ERROR] aborted at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 TAG="${1:-}"
 NO_PUSH="${2:-}"
@@ -47,7 +49,8 @@ ok "main is clean; scoop-boot.ps1 version $version; release $TAG"
 command -v ssh-keygen >/dev/null || fail "ssh-keygen not found"
 [ -f "$KEY" ] || fail "signing key not found: $KEY"
 [ -f "$KEY.pub" ] || fail "public key not found: $KEY.pub"
-read -r key_type key_blob _ < "$KEY.pub"
+# read returns 1 at end of file without a trailing newline, the variables are set anyway
+read -r key_type key_blob _ < "$KEY.pub" || true
 [ -n "$key_type" ] && [ -n "$key_blob" ] || fail "public key file is not in OpenSSH format: $KEY.pub"
 
 # 2. allowed_signers and the README fingerprint
