@@ -31,8 +31,8 @@ C:\usr\bin\scoop-boot.ps1 --admin-init
 ```
 
 `--admin-init` creates `C:\usr\etc\environments`, `C:\usr\etc\packages`, `C:\tmp`, `C:\devl`
-(repositories) and `C:\data` (data, optional tool caches), downloads the other scripts, the
-scoop wrapper and the package list (`--update`), writes `system.<host>.<user>.env` and
+(repositories) and `C:\data` (data, optional tool caches), downloads the current release (the
+other scripts, the scoop wrapper and the package list, see "Releases" below), writes `system.<host>.<user>.env` and
 `user.<host>.<user>.env` from the templates when they do not exist yet, and opens the
 system file in Notepad: review paths and tool versions, then save. `system.*` is applied at
 Machine scope and is the source of truth; `user.*` holds your additions at User scope.
@@ -117,6 +117,28 @@ scoop-boot.ps1 --platform-report    # what the platform does to the setup: ASR, 
 ```
 
 `--update` never touches `etc\environments`; those files are yours.
+
+### Releases and `--update`
+
+A release is a Git tag (`v0019`, ...). It carries `etc\release.manifest`, the SHA-256 of
+every delivered file, signed with an SSH key (`etc\release.manifest.sig`). `--update`
+reads `etc\LATEST` on `main` to learn the current tag, verifies the manifest with the
+key in `C:\usr\etc\allowed_signers`, downloads every file from the tag and compares it
+with the manifest; only when all of that passes does it replace anything. A failed check
+leaves the installation untouched and says why.
+
+`allowed_signers` arrives once, on the first `--update` of a machine, and is never replaced
+automatically. Compare the fingerprint it prints with this one before you trust the
+installation:
+
+```
+SHA256:ygweazny8W4PyHz5SOOACa6LygoQwm55NFwrgPtSRJI
+```
+
+`--version` names the installed release; `--self-test` checks the installed files against
+the manifest. `--update --branch=NAME` downloads a branch head without any check, for
+testing on one machine; every run says so until `--update --branch=main`.
+Releases are cut with `tools\release.ps1 -Tag vNNNN` on `main`.
 
 ### Checking the platform first
 
@@ -235,7 +257,7 @@ Setup (Administrator shell unless noted)
 --admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
 
 Maintenance
---update             Download the current scripts, the scoop wrapper and etc\packages\default.txt from GitHub
+--update             Install the current signed release (scripts, scoop wrapper, etc\packages\default.txt)
 --branch=NAME        With --update: download from a branch and remember it (etc\scoop-boot.branch); --branch=main switches back
 --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no Administrator)
 --quiet              With --clean-user-scope: one summary line, and only when something changed

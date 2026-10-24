@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.18.0
+    Version: 1.19.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.18.0"
+$global:ScriptVersion = "1.19.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -483,6 +483,17 @@ function Show-Help {
 
 function Show-Version {
     Write-Host "scoop-boot.ps1 version $global:ScriptVersion"
+    $manifest = Join-Path $global:BaseDir 'etc\release.manifest'
+    if (Test-Path $global:BranchFile) {
+        $branch = (Get-Content $global:BranchFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        Write-Host "branch $branch (unsigned downloads; back to signed releases with --update --branch=main)" -ForegroundColor Yellow
+    } elseif (Test-Path $manifest) {
+        $tag = (Select-String -Path $manifest -Pattern '^tag\s+(\S+)' | Select-Object -First 1)
+        $date = (Select-String -Path $manifest -Pattern '^date\s+(\S+)' | Select-Object -First 1)
+        Write-Host ("release {0} ({1}), signature verified by --update" -f $(if ($tag) { $tag.Matches[0].Groups[1].Value } else { '?' }), $(if ($date) { $date.Matches[0].Groups[1].Value } else { '?' }))
+    } else {
+        Write-Host "no release manifest yet: run --update to install the signed release" -ForegroundColor Yellow
+    }
 }
 
 # ============================================================================
@@ -1999,6 +2010,28 @@ JAVA_HOME=C:\java
     } catch {}
     $tests += $test
 
+    # Test 41: the installed files match the release manifest --update verified (skipped on a branch or without manifest)
+    $test = @{Name = "Installed files match the release manifest"; Result = $false}
+    try {
+        $manifestPath = Join-Path $global:BaseDir 'etc\release.manifest'
+        if ((Test-Path $global:BranchFile) -or -not (Test-Path $manifestPath)) {
+            $test.Name += " (skipped: $(if (Test-Path $global:BranchFile) { 'branch files' } else { 'no manifest' }))"
+            $test.Result = $true
+        } else {
+            $mismatch = @()
+            foreach ($line in (Get-Content $manifestPath)) {
+                if ($line -match '^sha256\s+([0-9a-f]{64})\s+(\S+)$') {
+                    $file = Join-Path $global:BaseDir ($Matches[2] -replace '/', '\')
+                    $actual = if (Test-Path $file) { (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLower() } else { 'missing' }
+                    if ($actual -ne $Matches[1]) { $mismatch += $Matches[2] }
+                }
+            }
+            if ($mismatch.Count -gt 0) { Write-Host "       changed since the last --update: $($mismatch -join ', ')" -ForegroundColor Yellow }
+            $test.Result = $mismatch.Count -eq 0
+        }
+    } catch {}
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -3109,7 +3142,7 @@ function Invoke-ScoopReset {
                     [System.IO.Directory]::Delete($junction.FullName, $false)
                 } catch {
                     # Try cmd rmdir for stubborn junctions
-                    & cmd /c "rmdir `"$($junction.FullName)`"" 2>$null
+                    & $env:ComSpec /c "rmdir `"$($junction.FullName)`"" 2>$null
                 }
             }
             Write-Host "  -> Junctions removed" -ForegroundColor Green
@@ -3134,7 +3167,7 @@ function Invoke-ScoopReset {
         # Method 2: cmd rd with UNC path
         if (-not $deleted -and (Test-Path $Path)) {
             try {
-                $rdOutput = & cmd /c "rd /s /q `"\\?\$Path`" 2>&1"
+                $rdOutput = & $env:ComSpec /c "rd /s /q `"\\?\$Path`" 2>&1"
                 if (-not (Test-Path $Path)) {
                     $deleted = $true
                     Write-Host "  -> Deleted with cmd rd" -ForegroundColor Green
@@ -3172,7 +3205,7 @@ function Invoke-ScoopReset {
                 Start-Sleep -Seconds 2
 
                 # Try deletion again with cmd rd
-                & cmd /c "rd /s /q `"\\?\$Path`"" 2>$null
+                & $env:ComSpec /c "rd /s /q `"\\?\$Path`"" 2>$null
                 if (-not (Test-Path $Path)) {
                     $deleted = $true
                     Write-Host "  -> Deleted after Explorer restart" -ForegroundColor Green

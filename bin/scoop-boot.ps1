@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.18.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.19.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -14,7 +14,8 @@
       variable expansion
     - Package list per host (etc\packages), post-install handlers
     - --platform-report: what Defender/ASR and a profile container do to the setup
-    - --update with rescue path; daily log with command context; 40 self-tests
+    - --update installs signed releases: manifest with SHA-256 of every file,
+      SSH signature, trust on first use; rescue path; daily log; 41 self-tests
     - ASCII-only output for console compatibility
 
 .PARAMETER (Dynamic)
@@ -22,9 +23,29 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.18.0
+    Version: 1.19.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.19.0:
+    - Signed releases. tools\release.ps1 writes etc\release.manifest (tag, date,
+      SHA-256 of the six delivered files, taken from the committed blobs), signs it
+      with the SSH key (ssh-keygen -Y sign, namespace and principal "scoop-boot"),
+      sets etc\LATEST and pushes commit and tag. --update without --branch reads
+      LATEST on main, downloads manifest and signature from the tag, verifies the
+      signature with the key in the local etc\allowed_signers (delivered once, on
+      the first update, fingerprint printed for comparison with the README),
+      downloads every file and compares it with the manifest, and only then
+      replaces anything. One failed check leaves the installation untouched.
+      --update --branch=NAME stays unverified and says so in every run.
+      The verified manifest is kept in etc\; --version names the release,
+      self-test 41 compares the installed files with it
+    - The signature goes to ssh-keygen through a .NET process with the manifest
+      bytes on standard input; a PowerShell pipe appends a line break and the
+      signature would never match (found in the spike on 23.10.)
+    - Reset calls cmd.exe through $env:ComSpec: with Git's or MSYS2's usr\bin
+      before System32 in the PATH, "cmd" resolved to an extensionless file and
+      opened the "select an app" dialog. The system template explains the order
 
     Changes in v1.18.0:
     - Removed: --status, --suggest, --install, --environment, --rollback,
@@ -262,7 +283,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.18.0"
+$global:ScriptVersion = "1.19.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -389,45 +410,242 @@ function Invoke-AdminInit {
 }
 
 
+function Get-FileSha256 {
+    <#
+    .SYNOPSIS
+        Full SHA-256 of a file, lower case; '' when unreadable. Defined here because --update must verify without the module.
+    #>
+    param([string]$Path)
+    try { return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLower() } catch { return '' }
+}
+
+function Get-SshKeygenPath {
+    <#
+    .SYNOPSIS
+        ssh-keygen.exe of the Windows OpenSSH client (-Y verify needs OpenSSH 8.1 or newer), else the first one on the PATH.
+    #>
+    $inbox = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'
+    if (Test-Path $inbox) { return $inbox }
+    $cmd = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return ''
+}
+
+function Get-SshKeyFingerprint {
+    <#
+    .SYNOPSIS
+        SHA256 fingerprint of the first key in an allowed_signers file, as ssh-keygen -l prints it.
+    #>
+    param([string]$AllowedSignersPath)
+    try {
+        $line = Get-Content -Path $AllowedSignersPath | Where-Object { $_ -and $_ -notmatch '^\s*#' } | Select-Object -First 1
+        $blob = ($line -split '\s+' | Where-Object { $_ -match '^AAAA' } | Select-Object -First 1)
+        if (-not $blob) { return 'unknown' }
+        $sha = [Security.Cryptography.SHA256]::Create().ComputeHash([Convert]::FromBase64String($blob))
+        return 'SHA256:' + [Convert]::ToBase64String($sha).TrimEnd('=')
+    } catch { return 'unknown' }
+}
+
+function Test-ReleaseSignature {
+    <#
+    .SYNOPSIS
+        Verifies etc\release.manifest against its SSH signature with ssh-keygen -Y verify.
+    .DESCRIPTION
+        The manifest bytes go to ssh-keygen's standard input through a .NET process:
+        a PowerShell pipe would append a line break and the signature would not match.
+        Principal and namespace are both "scoop-boot"; the public key comes from the
+        local etc\allowed_signers, delivered once and never replaced by --update.
+    #>
+    param(
+        [string]$ManifestPath,
+        [string]$SignaturePath,
+        [string]$AllowedSignersPath
+    )
+    $sshKeygen = Get-SshKeygenPath
+    if (-not $sshKeygen) {
+        Write-ErrorMsg "ssh-keygen.exe not found: the Windows OpenSSH client is needed to verify a release (Settings > Optional features)"
+        return $false
+    }
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $sshKeygen
+        $psi.Arguments = "-Y verify -f `"$AllowedSignersPath`" -I scoop-boot -n scoop-boot -s `"$SignaturePath`""
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [Diagnostics.Process]::Start($psi)
+        $bytes = [IO.File]::ReadAllBytes($ManifestPath)
+        $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $p.StandardInput.Close()
+        $out = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
+        $p.WaitForExit()
+        if ($p.ExitCode -eq 0 -and $out -match '^Good ') {
+            Write-Success ("Release signature verified ({0})" -f $out.Trim())
+            return $true
+        }
+        Write-ErrorMsg "Release signature NOT valid (ssh-keygen exit $($p.ExitCode)): $($out.Trim())"
+        return $false
+    } catch {
+        Write-ErrorMsg "Signature check failed to run: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Read-ReleaseManifest {
+    <#
+    .SYNOPSIS
+        Parses etc\release.manifest: "tag vNNNN", "date ...", "sha256 <hex> <path>" lines; '#' starts a comment.
+    #>
+    param([string]$Path)
+    $manifest = @{ Tag = ''; Date = ''; Files = @{}; Order = @() }
+    foreach ($line in (Get-Content -Path $Path)) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith('#')) { continue }
+        if ($t -match '^tag\s+(\S+)$') { $manifest.Tag = $Matches[1]; continue }
+        if ($t -match '^date\s+(\S+)$') { $manifest.Date = $Matches[1]; continue }
+        if ($t -match '^sha256\s+([0-9a-f]{64})\s+(\S+)$') { $manifest.Files[$Matches[2]] = $Matches[1]; $manifest.Order += $Matches[2]; continue }
+    }
+    return $manifest
+}
+
 function Invoke-SelfUpdate {
     <#
     .SYNOPSIS
-        Downloads the current scoop-boot scripts and the scoop wrapper from GitHub into bin\.
+        Downloads the current scoop-boot release (or a branch) from GitHub into bin\ and etc\.
     .DESCRIPTION
-        Replaced: scoop-boot.ps1, scoop-boot.psm1 and the scoop wrapper (scoop.ps1, scoop.cmd, scoop)
-        under bin\, and etc\packages\default.txt. The environment files and any
-        etc\packages\<host>.txt belong to the user and are never touched. Previous
-        versions go to backups\scripts-<timestamp>\. A locally edited default.txt is
-        reported before it is replaced (its hash is recorded in default.txt.sha256).
+        Without --branch: the release named in etc\LATEST on main is downloaded from its
+        tag. Its etc\release.manifest (SHA-256 of every delivered file) is verified
+        against the SSH signature in etc\release.manifest.sig with the key in the local
+        etc\allowed_signers; then every file is downloaded and compared with the
+        manifest. Nothing is written before all of that succeeded. allowed_signers is
+        downloaded once, on the first update, and its fingerprint is printed: compare
+        it with the README (trust on first use, like an SSH host key).
+
+        With --branch=NAME the branch head is downloaded unverified, for testing on
+        one machine; the banner warns until --update --branch=main.
+
+        Replaced: scoop-boot.ps1, scoop-boot.psm1 and the scoop wrapper (scoop.ps1,
+        scoop.cmd, scoop) under bin\, and etc\packages\default.txt. The environment
+        files and any etc\packages\<host>.txt belong to the user and are never
+        touched. Previous versions go to backups\scripts-<timestamp>\. A locally
+        edited default.txt is reported before it is replaced.
     .PARAMETER Branch
-        Git branch to download from, for testing a branch on one machine:
-        --update --branch=feature/xyz. Remembered in etc\scoop-boot.branch until
-        --update --branch=main; without the switch the remembered branch, else main.
+        --branch=NAME: download from this branch and remember it in
+        etc\scoop-boot.branch; --branch=main forgets it. Without the switch the
+        remembered branch, else the signed release.
     #>
     param(
         [string]$Branch = ''
     )
     Write-Section "scoop-boot Update"
     $Branch = Get-UpdateBranch -Requested $Branch
-    $base = "https://raw.githubusercontent.com/stotz/scoop-boot/$Branch"
-    if ($Branch -ne 'main') { Write-Warning "Downloading from branch '$Branch', not from main (remembered in $global:BranchFile; back with --update --branch=main)" }
-    $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt')
+    $repo = 'https://raw.githubusercontent.com/stotz/scoop-boot'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $backupDir = Join-Path $global:BaseDir "backups\scripts-$stamp"
     $temp = Join-Path $env:TEMP "scoop-boot-update-$stamp"
     New-Item -ItemType Directory -Path $temp -Force | Out-Null
-    $changed = 0
+    $etcDir = Join-Path $global:BaseDir 'etc'
+    if (-not (Test-Path $etcDir)) { New-Item -ItemType Directory -Path $etcDir -Force | Out-Null }
+    $allowedSigners = Join-Path $etcDir 'allowed_signers'
+    $localManifest = Join-Path $etcDir 'release.manifest'
+    $localSignature = Join-Path $etcDir 'release.manifest.sig'
+    $manifest = $null
+
+    if ($Branch -eq 'main') {
+        # Signed release: LATEST on main names the tag, the tag carries the files
+        try {
+            $tag = (Invoke-WebRequest -Uri "$repo/main/etc/LATEST" -UseBasicParsing).Content.Trim()
+        } catch {
+            Write-ErrorMsg "Could not read the release pointer $repo/main/etc/LATEST ($($_.Exception.Message))"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        if ($tag -notmatch '^v\d{4}$') {
+            Write-ErrorMsg "etc/LATEST on main does not name a release tag: '$tag'"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        $ref = $tag
+        $base = "$repo/$ref"
+        Write-Info "Release $tag"
+        $tempManifest = Join-Path $temp 'release.manifest'
+        $tempSignature = Join-Path $temp 'release.manifest.sig'
+        try {
+            Invoke-WebRequest -Uri "$base/etc/release.manifest" -OutFile $tempManifest -UseBasicParsing
+            Invoke-WebRequest -Uri "$base/etc/release.manifest.sig" -OutFile $tempSignature -UseBasicParsing
+        } catch {
+            Write-ErrorMsg "Download failed: $base/etc/release.manifest(.sig) ($($_.Exception.Message))"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        if (-not (Test-Path $allowedSigners)) {
+            # Trust on first use: the key arrives once; from now on it decides
+            try {
+                Invoke-WebRequest -Uri "$base/etc/allowed_signers" -OutFile $allowedSigners -UseBasicParsing
+            } catch {
+                Write-ErrorMsg "Download failed: $base/etc/allowed_signers ($($_.Exception.Message))"
+                Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+            Write-Warning "Release signing key saved to $allowedSigners (first update on this machine)"
+            Write-Warning "Fingerprint $(Get-SshKeyFingerprint -AllowedSignersPath $allowedSigners): compare it with the README before trusting this installation"
+        }
+        if (-not (Test-ReleaseSignature -ManifestPath $tempManifest -SignaturePath $tempSignature -AllowedSignersPath $allowedSigners)) {
+            Write-ErrorMsg "Nothing was changed. If the key was rotated on purpose, delete $allowedSigners and run --update again; the README names the current fingerprint"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        $manifest = Read-ReleaseManifest -Path $tempManifest
+        if ($manifest.Tag -ne $tag -or $manifest.Order.Count -eq 0) {
+            Write-ErrorMsg "Manifest of $tag is not usable (tag '$($manifest.Tag)', $($manifest.Order.Count) files)"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        $files = @($manifest.Order)
+    } else {
+        $ref = $Branch
+        $base = "$repo/$ref"
+        Write-Warning "Downloading from branch '$Branch' WITHOUT signature check (remembered in $global:BranchFile; back to signed releases with --update --branch=main)"
+        $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt')
+    }
+
+    # Phase 1: download everything and check it against the manifest; no file is
+    # touched before all downloads passed
+    $downloads = @{}
+    $failed = $false
     foreach ($rel in $files) {
-        $name = Split-Path -Leaf $rel
-        $target = Join-Path $global:BaseDir ($rel -replace '/', '\')
-        $download = Join-Path $temp $name
+        $download = Join-Path $temp ($rel -replace '[/\\]', '_')
         try {
             Invoke-WebRequest -Uri "$base/$rel" -OutFile $download -UseBasicParsing
         } catch {
             Write-ErrorMsg "Download failed: $base/$rel ($($_.Exception.Message))"
+            $failed = $true
             continue
         }
+        if ($manifest) {
+            $hash = Get-FileSha256 -Path $download
+            if ($hash -ne $manifest.Files[$rel]) {
+                Write-ErrorMsg "$rel does not match the release manifest (downloaded $($hash.Substring(0,8)), expected $($manifest.Files[$rel].Substring(0,8)))"
+                $failed = $true
+                continue
+            }
+        }
+        $downloads[$rel] = $download
+    }
+    if ($failed) {
+        Write-ErrorMsg "Update aborted, nothing was changed"
+        Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    # Phase 2: replace what changed, with a backup of the previous version
+    $backupDir = Join-Path $global:BaseDir "backups\scripts-$stamp"
+    $changed = 0
+    foreach ($rel in $files) {
+        $name = Split-Path -Leaf $rel
+        $target = Join-Path $global:BaseDir ($rel -replace '/', '\')
+        $download = $downloads[$rel]
         $newHash = Get-FileSha256Short -Path $download
         $oldHash = if (Test-Path $target) { Get-FileSha256Short -Path $target } else { 'none' }
         $newVer = (Select-String -Path $download -Pattern 'Version:\s*([0-9.]+)' | Select-Object -First 1)
@@ -456,6 +674,14 @@ function Invoke-SelfUpdate {
         Write-Success "$name updated: $oldHash -> $newHash$(if ($newVer) { " ($newVer)" })"
         $changed++
     }
+    if ($manifest) {
+        # The verified manifest stays: --version names the release, --self-test checks the files against it
+        Copy-Item (Join-Path $temp 'release.manifest') $localManifest -Force
+        Copy-Item (Join-Path $temp 'release.manifest.sig') $localSignature -Force
+    } elseif (Test-Path $localManifest) {
+        # Branch files do not belong to any release
+        Remove-Item $localManifest, $localSignature -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
     # Files of earlier releases that no longer exist: moved to the backup directory
     foreach ($rel in @('bin/scoop-complete-install.ps1', 'bin/scoop-complete-reset.ps1')) {
@@ -472,14 +698,13 @@ function Invoke-SelfUpdate {
         Where-Object { $_.FullName -ne $backupDir } | Sort-Object Name -Descending | Select-Object -Skip 4 |
         ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     if ($changed -eq 0) {
-        Write-Info "Everything is current"
+        Write-Info "Everything is current$(if ($manifest) { " (release $($manifest.Tag))" })"
     } else {
-        Write-Info "$changed file(s) updated; previous versions in $backupDir"
+        Write-Info "$changed file(s) updated$(if ($manifest) { " to release $($manifest.Tag)" }); previous versions in $backupDir"
         Write-Info "Environment files under etc\environments and host package lists were not touched"
     }
     return $true
 }
-
 
 # ============================================================================
 # MAIN EXECUTION
