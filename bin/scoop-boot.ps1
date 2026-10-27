@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.20.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.21.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -12,7 +12,8 @@
       scope is cleaned after every Scoop command (scoop wrapper in bin\)
     - List operations (+=, =+, -=) for ALL environment variables, order-independent
       variable expansion
-    - Package list per host (etc\packages), post-install handlers
+    - Package list per host (etc\packages), post-install handlers as a table,
+      --export and --import to carry the packages of one machine to another
     - --platform-report: what Defender/ASR and a profile container do to the setup
     - --update installs signed releases: manifest with SHA-256 of every file,
       SSH signature, trust on first use; rescue path; daily log; 41 self-tests
@@ -23,9 +24,41 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.20.0
+    Version: 1.21.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.21.0:
+    - Post-install handlers are a table ($global:PackageHandlers: Name, Handler
+      function, Description, Arguments). Step 4 of --user-install runs the table
+      for every listed package, --list-packages reads the same descriptions; a
+      handler reports failures as typed objects, so the stdout of the tools it
+      runs (pacman, scoop) no longer leaks into the result. Window title: one
+      step per handler. The handler bodies are the former Steps 4 to 6, unchanged
+    - Result objects: Set-DevelopmentEnvironment, Install-ScoopTools,
+      Show-PackageList, Invoke-ScoopReset and Invoke-ApplyEnv return a typed
+      result (Command, Ok, and Installed/AlreadyInstalled/Failed/UserScopeChanges
+      or Remaining/Backup); the entry points take Ok as the exit code. Two fixes
+      fall out of it: --user-install with failed packages and --admin-reset with
+      directories left behind now exit with 1 (they exited 0). Get-LastResult is gone
+    - --admin-setenv --dry-run shows the net effect: the operations are applied to
+      a simulated store (a prepend after the sweep sees the swept PATH) and the
+      store is compared with the registry at the end: per scope changed, new,
+      removed, unchanged, with PATH entries added or removed and whether the
+      order changes. "82 changes" on an unchanged machine is now "0 changed"
+    - --export[=NAME] writes etc\exports\NAME.txt from apps\*\current\scoop-install.json
+      and buckets\*\.git\config (never from "scoop list", which truncates names):
+      "# bucket NAME URL" lines, then bucket/name per package with version and
+      hold as comment, bootstrap packages left out. --import=NAME|FILE [--dry-run]
+      appends what the effective list lacks to etc\packages\<host>.txt under
+      "# import <date> from NAME (n of m packages were missing)", creates the host
+      file from default.txt when needed, adds "# bucket" lines for buckets Scoop
+      does not know; a second import adds nothing. --import=NAME --replace writes
+      the host file from the export alone (the old machine's list, nothing else;
+      the previous list is kept as .bak). Step 2 of --user-install adds the
+      "# bucket" buckets. Nothing is installed or uninstalled by --import
+    - Self-tests 44 (handler table), 45 (import plan), 46 (dry-run net effect),
+      47 (export from a temporary apps tree); 47 tests
 
     Changes in v1.20.0:
     - The Scoop root is wherever bin\ lives; the conventions around it (tmp, devl,
@@ -301,7 +334,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.20.0"
+$global:ScriptVersion = "1.21.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -810,6 +843,14 @@ if ($global:ParsedArgs.EnvStatus) {
 if ($global:ParsedArgs.CleanUserScope) {
     $null = Invoke-CleanUserScope -DryRun $global:ParsedArgs.DryRun
     exit 0
+}
+
+if ($null -ne $global:ParsedArgs.Export) {
+    if (Invoke-Export -Name $global:ParsedArgs.Export) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.Import) {
+    if (Invoke-Import -Source $global:ParsedArgs.Import -DryRun $global:ParsedArgs.DryRun -Replace $global:ParsedArgs.Replace) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.PlatformReport) {

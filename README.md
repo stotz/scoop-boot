@@ -174,6 +174,32 @@ A few packages need more than `scoop install` (the VC++ runtime check, the MSYS2
 setup, the `nc`/`netcat` shims, registry imports, tray apps). Those steps run only when
 their package is in the list; `--list-packages` marks them.
 
+### Moving to another machine
+
+`--export` on the old machine writes `etc\exports\<name>.txt`: the installed packages as
+`bucket/name` lines with version and hold status as comments, and the buckets with their
+URLs. The data comes from the files Scoop keeps under `apps\` and `buckets\`, not from
+`scoop list`, which truncates long names. Copy the file to `etc\exports\` on the new
+machine and run `--import=<name>` after `--admin-init`: everything the package list there
+lacks is appended to `etc\packages\<host>.txt` under a dated `# import` header (the host
+file is created from `default.txt` first when it does not exist); buckets Scoop does not
+know by name get a `# bucket NAME URL` line that `--user-install` adds in Step 2. Nothing is
+installed by the import; `--list-packages` shows the new lines, `--user-install` installs
+them. A second import of the same file adds nothing. `--import=<name> --replace` goes the
+other way: the host file is written from the export alone, so the new machine gets exactly
+the old machine's list (the previous list is kept as `.bak`); nothing is uninstalled, the
+next `--admin-reset` removes what is no longer listed.
+
+```powershell
+C:\usr\bin\scoop-boot.ps1 --export=old-avd            # old machine, normal shell
+C:\usr\bin\scoop-boot.ps1 --import=old-avd --dry-run  # new machine: what would be added
+C:\usr\bin\scoop-boot.ps1 --import=old-avd            # append to etc\packages\<host>.txt
+C:\usr\bin\scoop-boot.ps1 --user-install              # install it
+```
+
+Environment files and `etc\scoop-boot.conf` are not part of the export: they are named
+after the host and should be reviewed on a new machine, not copied blindly.
+
 ### Caches outside the user profile (optional)
 
 Gradle, Maven, npm, pip, NuGet, JetBrains indexes and WSL disks all default to
@@ -266,6 +292,8 @@ Maintenance
 --quiet              With --clean-user-scope: one summary line, and only when something changed
 --list-packages      Package list in use, status of each package and its post-install steps; installs nothing
 --platform-report    Defender/ASR, profile container, TMP: what the platform does to the setup; exit 1 on findings
+--export[=NAME]      Installed packages and buckets to etc\exports\NAME.txt (default: hostname)
+--import=NAME|FILE   Append what this machine's list lacks to etc\packages\HOSTNAME.txt; --dry-run shows it; --replace clones the list
 
 Environment files
 --env-status         Environment files found and their load order

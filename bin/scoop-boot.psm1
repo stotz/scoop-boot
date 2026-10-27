@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.20.0
+    Version: 1.21.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.20.0"
+$global:ScriptVersion = "1.21.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -202,6 +202,8 @@ $global:ParsedArgs = @{
     CleanUserScope = $false
     Quiet = $false
     PlatformReport = $false
+    Export = $null
+    Import = ''
     Update = $false
     Branch = ''
     AdminInit = $false
@@ -211,6 +213,7 @@ $global:ParsedArgs = @{
     ListPackages = $false
     Force = $false
     KeepPersist = $false
+    Replace = $false
     DryRun = $false
     Unknown = @()
 }
@@ -231,6 +234,9 @@ function Parse-Arguments {
             '^--clean-user-scope$' { $global:ParsedArgs.CleanUserScope = $true }
             '^--quiet$' { $global:ParsedArgs.Quiet = $true }
             '^--(platform-report|asr-report)$' { $global:ParsedArgs.PlatformReport = $true }
+            '^--export$' { $global:ParsedArgs.Export = '' }
+            '^--export=(.+)$' { $global:ParsedArgs.Export = $Matches[1] }
+            '^--import=(.+)$' { $global:ParsedArgs.Import = $Matches[1] }
             '^--update$' { $global:ParsedArgs.Update = $true }
             '^--branch=(.+)$' { $global:ParsedArgs.Branch = $Matches[1] }
             '^--admin-init$' { $global:ParsedArgs.AdminInit = $true }
@@ -240,6 +246,7 @@ function Parse-Arguments {
             '^--list-packages$' { $global:ParsedArgs.ListPackages = $true }
             '^--force$' { $global:ParsedArgs.Force = $true }
             '^--keep-persist$' { $global:ParsedArgs.KeepPersist = $true }
+            '^--replace$' { $global:ParsedArgs.Replace = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
             # Anything else is reported by the caller: a typo, or a command that was
             # removed (--status, --suggest, --install, --environment, --init-env,
@@ -383,6 +390,103 @@ function Get-EnvFileMachineValue {
 # also on a machine where the name is not yet in the registry and in --dry-run.
 if (-not (Test-Path variable:global:EnvFileDefinitions)) { $global:EnvFileDefinitions = @{} }
 
+# Dry run: writes go to this simulated store instead of the registry, reads look
+# here first, so that a prepend after a sweep sees the swept PATH and the net
+# effect can be compared with the registry at the end. $null = no dry run active.
+if (-not (Test-Path variable:global:EnvDryRunState)) { $global:EnvDryRunState = $null }
+
+function Get-EnvValue {
+    <#
+    .SYNOPSIS
+        Value of an environment variable in a scope; during a dry run the simulated value when one exists.
+    #>
+    param([string]$Name, [string]$Scope)
+    if ($global:EnvDryRunState -and $global:EnvDryRunState.ContainsKey($Scope) -and $global:EnvDryRunState[$Scope].ContainsKey($Name)) {
+        return $global:EnvDryRunState[$Scope][$Name]
+    }
+    return [Environment]::GetEnvironmentVariable($Name, $Scope)
+}
+
+function Set-EnvValue {
+    <#
+    .SYNOPSIS
+        Writes a variable ($null removes it): to the registry, or during a dry run to the simulated store only.
+    #>
+    param([string]$Name, [object]$Value, [string]$Scope, [bool]$DryRun = $false)
+    if ($DryRun) {
+        if ($global:EnvDryRunState) {
+            if (-not $global:EnvDryRunState.ContainsKey($Scope)) { $global:EnvDryRunState[$Scope] = @{} }
+            $global:EnvDryRunState[$Scope][$Name] = $Value
+        }
+        return
+    }
+    [Environment]::SetEnvironmentVariable($Name, $Value, $Scope)
+}
+
+function Get-EnvDryRunDiff {
+    <#
+    .SYNOPSIS
+        Compares the simulated store of one scope with the registry: what a real run would change.
+    .DESCRIPTION
+        Returns objects with Name, Kind (new, removed, changed, unchanged), Old, New and
+        for list variables (PATH and friends) Added, Removed, OrderChanged.
+    #>
+    param([string]$Scope)
+    $result = @()
+    if (-not $global:EnvDryRunState -or -not $global:EnvDryRunState.ContainsKey($Scope)) { return $result }
+    foreach ($name in ($global:EnvDryRunState[$Scope].Keys | Sort-Object)) {
+        $new = $global:EnvDryRunState[$Scope][$name]
+        $old = [Environment]::GetEnvironmentVariable($name, $Scope)
+        $item = [pscustomobject]@{ Name = $name; Kind = 'unchanged'; Old = $old; New = $new; Added = @(); Removed = @(); OrderChanged = $false }
+        if ($null -eq $old -and $null -eq $new) { continue }
+        elseif ($null -eq $old) { $item.Kind = 'new' }
+        elseif ($null -eq $new) { $item.Kind = 'removed' }
+        elseif ($old -ne $new) {
+            $item.Kind = 'changed'
+            if ($name -ieq 'Path' -or $old.Contains(';') -or $new.Contains(';')) {
+                $oldParts = @($old -split ';' | Where-Object { $_ })
+                $newParts = @($new -split ';' | Where-Object { $_ })
+                $item.Added = @($newParts | Where-Object { $oldParts -notcontains $_ })
+                $item.Removed = @($oldParts | Where-Object { $newParts -notcontains $_ })
+                $common = @($newParts | Where-Object { $oldParts -contains $_ })
+                $commonOld = @($oldParts | Where-Object { $newParts -contains $_ })
+                $item.OrderChanged = (($common -join ';') -ne ($commonOld -join ';'))
+            }
+        }
+        $result += $item
+    }
+    return $result
+}
+
+function Write-EnvDryRunSummary {
+    <#
+    .SYNOPSIS
+        Prints the net effect of a dry run per scope: the operations were listed above, this is what the registry would end up with.
+    #>
+    Write-Host ""
+    Write-Host "=== Net effect (what the registry would end up with) ===" -ForegroundColor Cyan
+    foreach ($scope in @('Machine', 'User')) {
+        $diff = @(Get-EnvDryRunDiff -Scope $scope)
+        if ($diff.Count -eq 0) { continue }
+        $changed = @($diff | Where-Object { $_.Kind -eq 'changed' })
+        $new = @($diff | Where-Object { $_.Kind -eq 'new' })
+        $removed = @($diff | Where-Object { $_.Kind -eq 'removed' })
+        $same = @($diff | Where-Object { $_.Kind -eq 'unchanged' })
+        Write-Host ("{0}: {1} changed, {2} new, {3} removed, {4} unchanged" -f $scope, $changed.Count, $new.Count, $removed.Count, $same.Count) -ForegroundColor White
+        foreach ($item in $new) { Write-Host "  + $($item.Name) = $($item.New)" -ForegroundColor Green }
+        foreach ($item in $removed) { Write-Host "  - $($item.Name) (was: $($item.Old))" -ForegroundColor Yellow }
+        foreach ($item in $changed) {
+            if ($item.Added.Count -gt 0 -or $item.Removed.Count -gt 0 -or $item.OrderChanged) {
+                Write-Host ("  ~ {0}: +{1} -{2}{3}" -f $item.Name, $item.Added.Count, $item.Removed.Count, $(if ($item.OrderChanged) { ', order changed' } else { '' })) -ForegroundColor Yellow
+                foreach ($e in $item.Added) { Write-Host "      + $e" -ForegroundColor Green }
+                foreach ($e in $item.Removed) { Write-Host "      - $e" -ForegroundColor Yellow }
+            } else {
+                Write-Host "  ~ $($item.Name): $($item.Old) -> $($item.New)" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
 function Register-EnvFileDefinitions {
     param([array]$Operations)
     foreach ($op in $Operations) {
@@ -501,6 +605,10 @@ function Show-Help {
     Write-Host "      --quiet            print only a summary when something changed"
     Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
     Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
+    Write-Host "  --export[=NAME]      Write the installed packages and buckets to etc\exports\NAME.txt (default: hostname)"
+    Write-Host "  --import=NAME|FILE   Add the packages of an export that this machine's list lacks to etc\packages\HOSTNAME.txt"
+    Write-Host "      --dry-run          show what would be added, write nothing"
+    Write-Host "      --replace          write etc\packages\HOSTNAME.txt from the export alone (clone the old machine's list)"
     Write-Host ""
     Write-Host "ENVIRONMENT FILES ($global:EnvDir):" -ForegroundColor Yellow
     Write-Host "  --env-status         Which files exist and apply to this host and user"
@@ -519,6 +627,7 @@ function Show-Help {
     Write-Host "  user.HOSTNAME.USERNAME.env      User scope, this host and user"
     Write-Host "  etc\packages\default.txt        Package list (delivered); etc\packages\HOSTNAME.txt replaces it"
     Write-Host "  etc\scoop-boot.conf             DIR=<path> lines: directories --admin-init creates (tmp, devl, data)"
+    Write-Host "  etc\exports\NAME.txt            Package export of a machine (--export), input for --import=NAME"
     Write-Host ""
     Write-Host "LIST OPERATIONS (work for ALL variables):" -ForegroundColor Yellow
     Write-Host "  VAR+=value          Prepend to list (PATH, PERL5LIB, etc.)"
@@ -881,27 +990,21 @@ function Apply-EnvironmentOperations {
 
         switch ($op.Type) {
             "Set" {
-                if ($DryRun) {
-                    Write-DryRun "Set $($op.Name) = $expandedValue [$Scope from $fileName]"
-                } else {
-                    [Environment]::SetEnvironmentVariable($op.Name, $expandedValue, $Scope)
-                    Write-Success "Set $($op.Name) [$Scope]"
-                }
+                Set-EnvValue -Name $op.Name -Value $expandedValue -Scope $Scope -DryRun $DryRun
+                if ($DryRun) { Write-DryRun "Set $($op.Name) = $expandedValue [$Scope from $fileName]" }
+                else { Write-Success "Set $($op.Name) [$Scope]" }
                 $changes++
             }
 
             "Unset" {
-                if ($DryRun) {
-                    Write-DryRun "Unset $($op.Name) [$Scope from $fileName]"
-                } else {
-                    [Environment]::SetEnvironmentVariable($op.Name, $null, $Scope)
-                    Write-Success "Unset $($op.Name) [$Scope]"
-                }
+                Set-EnvValue -Name $op.Name -Value $null -Scope $Scope -DryRun $DryRun
+                if ($DryRun) { Write-DryRun "Unset $($op.Name) [$Scope from $fileName]" }
+                else { Write-Success "Unset $($op.Name) [$Scope]" }
                 $changes++
             }
 
             "ListPrepend" {
-                $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
+                $currentValue = Get-EnvValue -Name $op.Name -Scope $Scope
                 if ($currentValue) {
                     $parts = $currentValue -split ';' | Where-Object { $_ -and $_ -ne $expandedValue }
                     $newValue = @($expandedValue) + $parts | Select-Object -Unique
@@ -910,17 +1013,14 @@ function Apply-EnvironmentOperations {
                     $newValue = $expandedValue
                 }
 
-                if ($DryRun) {
-                    Write-DryRun "Prepend to $($op.Name): $expandedValue [$Scope from $fileName]"
-                } else {
-                    [Environment]::SetEnvironmentVariable($op.Name, $newValue, $Scope)
-                    Write-Success "Prepended to $($op.Name) [$Scope]"
-                }
+                Set-EnvValue -Name $op.Name -Value $newValue -Scope $Scope -DryRun $DryRun
+                if ($DryRun) { Write-DryRun "Prepend to $($op.Name): $expandedValue [$Scope from $fileName]" }
+                else { Write-Success "Prepended to $($op.Name) [$Scope]" }
                 $changes++
             }
 
             "ListAppend" {
-                $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
+                $currentValue = Get-EnvValue -Name $op.Name -Scope $Scope
                 if ($currentValue) {
                     $parts = $currentValue -split ';' | Where-Object { $_ -and $_ -ne $expandedValue }
                     $newValue = $parts + @($expandedValue) | Select-Object -Unique
@@ -929,17 +1029,14 @@ function Apply-EnvironmentOperations {
                     $newValue = $expandedValue
                 }
 
-                if ($DryRun) {
-                    Write-DryRun "Append to $($op.Name): $expandedValue [$Scope from $fileName]"
-                } else {
-                    [Environment]::SetEnvironmentVariable($op.Name, $newValue, $Scope)
-                    Write-Success "Appended to $($op.Name) [$Scope]"
-                }
+                Set-EnvValue -Name $op.Name -Value $newValue -Scope $Scope -DryRun $DryRun
+                if ($DryRun) { Write-DryRun "Append to $($op.Name): $expandedValue [$Scope from $fileName]" }
+                else { Write-Success "Appended to $($op.Name) [$Scope]" }
                 $changes++
             }
 
             "ListRemove" {
-                $currentValue = [Environment]::GetEnvironmentVariable($op.Name, $Scope)
+                $currentValue = Get-EnvValue -Name $op.Name -Scope $Scope
                 $currentParts = @()
                 if ($currentValue) {
                     $currentParts = @($currentValue -split ';' | Where-Object { $_ })
@@ -950,12 +1047,9 @@ function Apply-EnvironmentOperations {
                     Write-Host "[SKIP] Not in $($op.Name): $expandedValue [$Scope]" -ForegroundColor DarkGray
                 } else {
                     $newValue = $parts -join ';'
-                    if ($DryRun) {
-                        Write-DryRun "Remove from $($op.Name): $expandedValue [$Scope from $fileName]"
-                    } else {
-                        [Environment]::SetEnvironmentVariable($op.Name, $newValue, $Scope)
-                        Write-Success "Removed from $($op.Name): $expandedValue [$Scope]"
-                    }
+                    Set-EnvValue -Name $op.Name -Value $newValue -Scope $Scope -DryRun $DryRun
+                    if ($DryRun) { Write-DryRun "Remove from $($op.Name): $expandedValue [$Scope from $fileName]" }
+                    else { Write-Success "Removed from $($op.Name): $expandedValue [$Scope]" }
                     $changes++
                 }
             }
@@ -993,7 +1087,7 @@ function Remove-ScoopPathEntries {
     #>
     param([string]$Scope, [bool]$DryRun = $false)
 
-    $current = [Environment]::GetEnvironmentVariable('Path', $Scope)
+    $current = Get-EnvValue -Name 'Path' -Scope $Scope
     if (-not $current) { return 0 }
     $parts = @($current -split ';' | Where-Object { $_ })
     $keep = @($parts | Where-Object { -not (Test-ScoopOwnedPath $_) })
@@ -1002,8 +1096,8 @@ function Remove-ScoopPathEntries {
         if ($DryRun) { Write-DryRun "Remove from PATH: $entry [$Scope]" }
         else { Write-Success "Removed from PATH: $entry [$Scope]" }
     }
-    if ($removed.Count -gt 0 -and -not $DryRun) {
-        [Environment]::SetEnvironmentVariable('Path', ($keep -join ';'), $Scope)
+    if ($removed.Count -gt 0) {
+        Set-EnvValue -Name 'Path' -Value ($keep -join ';') -Scope $Scope -DryRun $DryRun
     }
     return $removed.Count
 }
@@ -1042,18 +1136,20 @@ function Invoke-CleanUserScope {
     if ($DryRun) { Write-Section "Clean User Scope (DRY RUN)" } else { Write-Section "Clean User Scope" }
     Write-Info "User scope of: $([Environment]::UserName)"
 
+    # A dry run on its own simulates too; inside Invoke-ApplyEnv the store is already active
+    $ownsDryRunState = $DryRun -and -not $global:EnvDryRunState
+    if ($ownsDryRunState) { $global:EnvDryRunState = @{ Machine = @{}; User = @{} } }
+
     $changes = 0
     $changes += Remove-ScoopPathEntries -Scope 'User' -DryRun $DryRun
 
     $managed = Get-SystemManagedVariableNames
     foreach ($name in $managed) {
-        $userValue = [Environment]::GetEnvironmentVariable($name, 'User')
+        $userValue = Get-EnvValue -Name $name -Scope 'User'
         if ($null -ne $userValue) {
+            Set-EnvValue -Name $name -Value $null -Scope 'User' -DryRun $DryRun
             if ($DryRun) { Write-DryRun "Remove User override: $name = $userValue (Machine value from system.* wins)" }
-            else {
-                [Environment]::SetEnvironmentVariable($name, $null, 'User')
-                Write-Success "Removed User override: $name (was: $userValue)"
-            }
+            else { Write-Success "Removed User override: $name (was: $userValue)" }
             $changes++
         }
     }
@@ -1077,19 +1173,36 @@ function Invoke-CleanUserScope {
     }
     if ($changes -eq 0) { Write-Success "User scope is clean" }
     else { Write-Info "User scope: $changes change(s)" }
+    if ($ownsDryRunState) {
+        Write-EnvDryRunSummary
+        $global:EnvDryRunState = $null
+    }
     return $changes
 }
 
 
-function Get-LastResult {
+function New-RunResult {
     <#
     .SYNOPSIS
-        True when the last object a command wrote to the pipeline is $true. The long
-        functions (installation, reset) can leak stray objects before their result.
+        The result object of a command: Command, Ok, and whatever the command reports (Installed, Failed, Remaining, ...).
+    #>
+    param([string]$Command, [bool]$Ok, [hashtable]$Data = @{})
+    $result = [pscustomobject]@{ PSTypeName = 'ScoopBoot.Result'; Command = $Command; Ok = $Ok }
+    foreach ($key in $Data.Keys) { $result | Add-Member -NotePropertyName $key -NotePropertyValue $Data[$key] }
+    return $result
+}
+
+function Get-RunResult {
+    <#
+    .SYNOPSIS
+        The result object a command returned. The long functions (installation, reset)
+        leak stray objects into the pipeline before their result; the typed object is
+        picked out, and a run without one counts as failed.
     #>
     param([object[]]$Output)
-    $items = @($Output)
-    return ($items.Count -gt 0 -and $items[-1] -is [bool] -and $items[-1])
+    $results = @($Output | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.TypeNames -contains 'ScoopBoot.Result' })
+    if ($results.Count -gt 0) { return $results[-1] }
+    return (New-RunResult -Command 'unknown' -Ok $false -Data @{ Reason = 'the command returned no result' })
 }
 
 function Invoke-AdminSetEnv {
@@ -1103,13 +1216,13 @@ function Invoke-AdminSetEnv {
         [bool]$DryRun = $false
     )
     if ($DryRun) {
-        return (Get-LastResult -Output @(Invoke-ApplyEnv -DryRun $true))
+        return (Get-RunResult -Output @(Invoke-ApplyEnv -DryRun $true)).Ok
     }
     if (-not (Test-AdminRights)) {
         Write-ErrorMsg "--admin-setenv needs an elevated shell (Run as Administrator); --admin-setenv --dry-run works without"
         return $false
     }
-    return (Get-LastResult -Output @(Set-DevelopmentEnvironment))
+    return (Get-RunResult -Output @(Set-DevelopmentEnvironment)).Ok
 }
 
 function Invoke-UserInstall {
@@ -1134,7 +1247,7 @@ function Invoke-UserInstall {
     # Install-ScoopTools itself warns and asks when run from an elevated shell
     $savedTitle = Get-ScoopBootTitle
     try {
-        return (Get-LastResult -Output @(Install-ScoopTools -Force $Force))
+        return (Get-RunResult -Output @(Install-ScoopTools -Force $Force)).Ok
     } finally {
         Restore-ScoopBootTitle -Saved $savedTitle
     }
@@ -1159,7 +1272,7 @@ function Invoke-AdminReset {
     }
     $savedTitle = Get-ScoopBootTitle
     try {
-        return (Get-LastResult -Output @(Invoke-ScoopReset -Force:$Force -KeepPersist:$KeepPersist))
+        return (Get-RunResult -Output @(Invoke-ScoopReset -Force:$Force -KeepPersist:$KeepPersist)).Ok
     } finally {
         Restore-ScoopBootTitle -Saved $savedTitle
     }
@@ -1170,7 +1283,7 @@ function Invoke-ListPackages {
     .SYNOPSIS
         Shows the package list in use; installs nothing.
     #>
-    return (Get-LastResult -Output @(Show-PackageList))
+    return (Get-RunResult -Output @(Show-PackageList)).Ok
 }
 
 function Get-PackageListFile {
@@ -1519,6 +1632,7 @@ function Invoke-ApplyEnv {
 
     if ($DryRun) {
         Write-Section "Environment Apply (DRY RUN)"
+        $global:EnvDryRunState = @{ Machine = @{}; User = @{} }
     } else {
         Write-Section "Environment Apply"
     }
@@ -1530,7 +1644,7 @@ function Invoke-ApplyEnv {
         Write-Warning "No environment configuration files found"
         Write-Host ""
         Write-Host "Create them first: scoop-boot.ps1 --admin-init (as Administrator)" -ForegroundColor Yellow
-        return $false
+        return (New-RunResult -Command 'apply-env' -Ok $false)
     }
 
     # Check admin rights for system files
@@ -1544,7 +1658,7 @@ function Invoke-ApplyEnv {
         }
         Write-Host ""
         Write-Host "Run PowerShell as Administrator and try again" -ForegroundColor Yellow
-        return $false
+        return (New-RunResult -Command 'apply-env' -Ok $false)
     }
 
     # Process each file. Before the Machine files, every Machine PATH entry inside
@@ -1576,7 +1690,10 @@ function Invoke-ApplyEnv {
     $totalChanges += Invoke-CleanUserScope -DryRun $DryRun
 
     if ($DryRun) {
-        Write-Info "DRY RUN: Would apply $totalChanges changes"
+        Write-Info "DRY RUN: $totalChanges operations"
+        Write-EnvDryRunSummary
+        $global:EnvDryRunState = $null
+        Write-Host ""
         Write-Host "Apply them as Administrator: scoop-boot.ps1 --admin-setenv"
     } else {
         Write-Info "Applied $totalChanges changes"
@@ -1586,7 +1703,7 @@ function Invoke-ApplyEnv {
         Write-Host "  - Restart: Visual Studio, IntelliJ IDEA, VS Code" -ForegroundColor White
         Write-Host "  - Or reboot system for complete refresh" -ForegroundColor White
     }
-    return $true
+    return (New-RunResult -Command 'apply-env' -Ok $true -Data @{ Operations = $totalChanges; DryRun = $DryRun })
 }
 
 # ============================================================================
@@ -2130,6 +2247,109 @@ JAVA_HOME=C:\java
     }
     $tests += $test
 
+    # Test 44: handler table: every handler names an existing function and a package of default.txt (or is Optional)
+    $test = @{Name = "Handler table: functions exist, packages are in default.txt"; Result = $false}
+    try {
+        $defaultList = Join-Path $global:PackagesDir 'default.txt'
+        $listed = if (Test-Path $defaultList) { @(Read-PackageList -Path $defaultList -Silent | ForEach-Object { Get-ManifestAppName -Package $_ }) } else { @() }
+        $problems = @()
+        foreach ($entry in $global:PackageHandlers) {
+            if (-not (Get-Command $entry.Handler -ErrorAction SilentlyContinue)) { $problems += "$($entry.Name): no function $($entry.Handler)" }
+            if (-not $entry.Description) { $problems += "$($entry.Name): no description" }
+            $optional = $entry.ContainsKey('Optional') -and $entry.Optional
+            if ($listed.Count -gt 0 -and -not $optional -and $listed -notcontains $entry.Name -and $global:BootstrapPackages -notcontains $entry.Name) { $problems += "$($entry.Name): not in default.txt" }
+        }
+        if ($problems.Count -gt 0) { Write-Host "       $($problems -join '; ')" -ForegroundColor Yellow }
+        $test.Result = ($global:PackageHandlers.Count -ge 5) -and ($problems.Count -eq 0) -and ($null -ne (Get-PackageHandler -Name 'msys2')) -and ($null -eq (Get-PackageHandler -Name 'nope'))
+    } catch {}
+    $tests += $test
+
+    # Test 45: import plan: missing packages, bucket lines, host file from default.txt, second import empty
+    $test = @{Name = "Import plan: missing packages, buckets, host file, idempotent"; Result = $false}
+    try {
+        $savedPackagesDir = $global:PackagesDir; $savedBase = $global:BaseDir
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-test-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Path (Join-Path $tempRoot 'etc\packages') -Force | Out-Null
+        $global:BaseDir = $tempRoot; $global:PackagesDir = Join-Path $tempRoot 'etc\packages'
+        "# default`nalpha`nextras/beta`n" | Set-Content -Path (Join-Path $global:PackagesDir 'default.txt') -Encoding ASCII
+        $exportFile = Join-Path $tempRoot 'old.txt'
+        "# export`n# bucket foo https://example.org/foo`n# bucket java https://example.org/java`nalpha  # 1.0`nextras/beta`ngamma  # 2.0, held`nfoo/delta`njava/epsilon`n7zip`n" | Set-Content -Path $exportFile -Encoding ASCII
+        $plan = Get-ImportPlan -ExportPath $exportFile
+        $ok1 = ($plan.Imported.Count -eq 6) -and ($plan.Missing.Count -eq 3) -and ($plan.Missing[0] -eq 'gamma') -and ($plan.Missing[1] -eq 'foo/delta') -and ($plan.Missing[2] -eq 'java/epsilon')
+        $ok2 = ($plan.Buckets.Count -eq 1) -and ($plan.Buckets[0].Name -eq 'foo') -and $plan.CreateFromDefault
+        $savedSuppress = $global:ScoopBootQuiet
+        $null = Invoke-Import -Source $exportFile *> $null
+        $hostFile = Join-Path $global:PackagesDir ("{0}.txt" -f (Get-Hostname))
+        $hostText = Get-Content -Path $hostFile -Raw
+        $ok3 = (Test-Path $hostFile) -and ($hostText -match '(?m)^alpha$') -and ($hostText -match '(?m)^# import .* from old \(3 of 6 packages were missing\)$') -and ($hostText -match '(?m)^# bucket foo https://example.org/foo$') -and ($hostText -match '(?m)^foo/delta$')
+        $plan2 = Get-ImportPlan -ExportPath $exportFile
+        $ok4 = ($plan2.Missing.Count -eq 0) -and (-not $plan2.CreateFromDefault)
+        $buckets = @(Read-PackageListBuckets -Path $hostFile)
+        $ok5 = ($buckets.Count -eq 1) -and ($buckets[0].Url -eq 'https://example.org/foo')
+        $test.Result = $ok1 -and $ok2 -and $ok3 -and $ok4 -and $ok5
+    } catch {} finally {
+        $global:PackagesDir = $savedPackagesDir; $global:BaseDir = $savedBase
+        if ($tempRoot) { Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $tests += $test
+
+    # Test 46: dry-run net effect: the simulated store never touches the registry and the diff names the changes
+    $test = @{Name = "Dry run: simulated store, net effect (new, removed, changed, PATH order)"; Result = $false}
+    try {
+        [Environment]::SetEnvironmentVariable('SB_T_LIST', 'C:\a;C:\b;C:\c', 'Process')
+        [Environment]::SetEnvironmentVariable('SB_T_SAME', 'x', 'Process')
+        [Environment]::SetEnvironmentVariable('SB_T_GONE', 'y', 'Process')
+        $global:EnvDryRunState = @{ Process = @{} }
+        Set-EnvValue -Name 'SB_T_LIST' -Value 'C:\c;C:\a;C:\d' -Scope 'Process' -DryRun $true
+        Set-EnvValue -Name 'SB_T_SAME' -Value 'x' -Scope 'Process' -DryRun $true
+        Set-EnvValue -Name 'SB_T_GONE' -Value $null -Scope 'Process' -DryRun $true
+        Set-EnvValue -Name 'SB_T_NEW' -Value 'n' -Scope 'Process' -DryRun $true
+        $untouched = ([Environment]::GetEnvironmentVariable('SB_T_LIST', 'Process') -eq 'C:\a;C:\b;C:\c') -and ($null -eq [Environment]::GetEnvironmentVariable('SB_T_NEW', 'Process'))
+        $simulated = (Get-EnvValue -Name 'SB_T_LIST' -Scope 'Process') -eq 'C:\c;C:\a;C:\d'
+        $diff = @(Get-EnvDryRunDiff -Scope 'Process')
+        $byName = @{}; foreach ($d in $diff) { $byName[$d.Name] = $d }
+        $list = $byName['SB_T_LIST']
+        $test.Result = $untouched -and $simulated -and ($byName['SB_T_NEW'].Kind -eq 'new') -and ($byName['SB_T_GONE'].Kind -eq 'removed') -and ($byName['SB_T_SAME'].Kind -eq 'unchanged') -and
+            ($list.Kind -eq 'changed') -and ($list.Added -join ',') -eq 'C:\d' -and ($list.Removed -join ',') -eq 'C:\b' -and $list.OrderChanged
+    } catch {} finally {
+        $global:EnvDryRunState = $null
+        foreach ($n in 'SB_T_LIST', 'SB_T_SAME', 'SB_T_GONE', 'SB_T_NEW') { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
+    }
+    $tests += $test
+
+    # Test 47: export reads scoop-install.json / scoop-manifest.json (and the old names), skips bootstrap packages and scoop itself
+    $test = @{Name = "Export: packages from apps\*\current, buckets from .git\config"; Result = $false}
+    try {
+        $savedBase = $global:BaseDir
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-test-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        foreach ($app in @(@{ n = 'temurin11-jdk'; b = 'java'; v = '11.0.32-101'; h = $false; new = $true }, @{ n = 'vscode'; b = 'extras'; v = '1.143.1'; h = $true; new = $true }, @{ n = 'jq'; b = 'main'; v = '1.8.2'; h = $false; new = $false }, @{ n = '7zip'; b = 'main'; v = '26.05'; h = $false; new = $true }, @{ n = 'scoop'; b = ''; v = 'x'; h = $false; new = $true })) {
+            $d = Join-Path $tempRoot "apps\$($app.n)\current"
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+            $install = @{ bucket = $app.b; architecture = '64bit' }
+            if ($app.h) { $install.hold = $true }
+            $installName = if ($app.new) { 'scoop-install.json' } else { 'install.json' }
+            $manifestName = if ($app.new) { 'scoop-manifest.json' } else { 'manifest.json' }
+            ($install | ConvertTo-Json) | Set-Content -Path (Join-Path $d $installName) -Encoding ASCII
+            (@{ version = $app.v } | ConvertTo-Json) | Set-Content -Path (Join-Path $d $manifestName) -Encoding ASCII
+        }
+        New-Item -ItemType Directory -Path (Join-Path $tempRoot 'buckets\extras\.git') -Force | Out-Null
+        "[remote `"origin`"]`n`turl = https://github.com/ScoopInstaller/Extras`n" | Set-Content -Path (Join-Path $tempRoot 'buckets\extras\.git\config') -Encoding ASCII
+        $global:BaseDir = $tempRoot
+        $packages = @(Get-InstalledScoopPackages)
+        $byName = @{}; foreach ($pk in $packages) { $byName[$pk.Name] = $pk }
+        $ok1 = ($packages.Count -eq 4) -and ($byName['vscode'].Bucket -eq 'extras') -and $byName['vscode'].Held -and ($byName['jq'].Version -eq '1.8.2') -and ($byName['temurin11-jdk'].Version -eq '11.0.32-101') -and -not $byName.ContainsKey('scoop')
+        $buckets = @(Get-ScoopBuckets)
+        $ok2 = ($buckets.Count -eq 1) -and ($buckets[0].Url -eq 'https://github.com/ScoopInstaller/Extras')
+        $null = Invoke-Export -Name 'unit' *> $null
+        $exported = @(Read-PackageList -Path (Join-Path $tempRoot 'etc\exports\unit.txt') -Silent)
+        $ok3 = ($exported.Count -eq 3) -and ($exported -contains 'java/temurin11-jdk') -and ($exported -contains 'extras/vscode') -and ($exported -contains 'jq') -and ($exported -notcontains '7zip')
+        $test.Result = $ok1 -and $ok2 -and $ok3
+    } catch {} finally {
+        $global:BaseDir = $savedBase
+        if ($tempRoot) { Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -2149,6 +2369,216 @@ JAVA_HOME=C:\java
 }
 
 # ============================================================================
+# EXPORT / IMPORT: carry the installed packages of one machine into the package
+# list of another. Nothing is read from "scoop list" or "scoop bucket list": both
+# are formatted tables that truncate long names ("temurin11..."); the files Scoop
+# writes under apps\ and buckets\ carry the full data.
+# ============================================================================
+
+function Get-InstalledScoopPackages {
+    <#
+    .SYNOPSIS
+        The packages Scoop has installed, from apps\<name>\current\scoop-install.json: Name, Bucket, Version, Held.
+    .NOTES
+        Scoop renamed install.json and manifest.json to scoop-install.json and
+        scoop-manifest.json; both names are accepted, the new one first.
+    #>
+    $result = @()
+    $appsDir = Join-Path $global:BaseDir 'apps'
+    if (-not (Test-Path $appsDir)) { return $result }
+    foreach ($dir in (Get-ChildItem -Path $appsDir -Directory | Sort-Object Name)) {
+        if ($dir.Name -eq 'scoop') { continue }
+        $installJson = @('scoop-install.json', 'install.json') | ForEach-Object { Join-Path $dir.FullName "current\$_" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $installJson) { continue }
+        $bucket = ''; $held = $false; $version = ''
+        try {
+            $install = Get-Content -Path $installJson -Raw | ConvertFrom-Json
+            if ($install.PSObject.Properties.Name -contains 'bucket' -and $install.bucket) { $bucket = "$($install.bucket)" }
+            if ($install.PSObject.Properties.Name -contains 'hold' -and $install.hold) { $held = $true }
+        } catch { }
+        $manifestJson = @('scoop-manifest.json', 'manifest.json') | ForEach-Object { Join-Path $dir.FullName "current\$_" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if ($manifestJson) {
+            try { $version = "$((Get-Content -Path $manifestJson -Raw | ConvertFrom-Json).version)" } catch { }
+        }
+        $result += [pscustomobject]@{ Name = $dir.Name; Bucket = $bucket; Version = $version; Held = $held }
+    }
+    return $result
+}
+
+function Get-ScoopBuckets {
+    <#
+    .SYNOPSIS
+        The buckets under buckets\: Name and the git remote URL from .git\config.
+    #>
+    $result = @()
+    $bucketsDir = Join-Path $global:BaseDir 'buckets'
+    if (-not (Test-Path $bucketsDir)) { return $result }
+    foreach ($dir in (Get-ChildItem -Path $bucketsDir -Directory | Sort-Object Name)) {
+        $url = ''
+        $gitConfig = Join-Path $dir.FullName '.git\config'
+        if (Test-Path $gitConfig) {
+            $line = Get-Content -Path $gitConfig | Where-Object { $_ -match '^\s*url\s*=\s*(\S+)' } | Select-Object -First 1
+            if ($line -and $line -match '^\s*url\s*=\s*(\S+)') { $url = $Matches[1] }
+        }
+        $result += [pscustomobject]@{ Name = $dir.Name; Url = $url }
+    }
+    return $result
+}
+
+function Read-PackageListBuckets {
+    <#
+    .SYNOPSIS
+        "# bucket NAME URL" lines of a package list or export file: buckets to add before the packages.
+    #>
+    param([string]$Path)
+    $result = @()
+    if (-not (Test-Path $Path)) { return $result }
+    foreach ($line in (Get-Content -Path $Path)) {
+        if ($line -match '^\s*#\s*bucket\s+([A-Za-z0-9._-]+)\s+(\S+)\s*$') { $result += [pscustomobject]@{ Name = $Matches[1]; Url = $Matches[2] } }
+    }
+    return $result
+}
+
+function Invoke-Export {
+    <#
+    .SYNOPSIS
+        Writes the installed packages and the buckets of this machine to etc\exports\NAME.txt, in package list format. Called by --export.
+    #>
+    param([string]$Name = '')
+    if (-not $Name) { $Name = Get-Hostname }
+    if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Write-ErrorMsg "Export name must be a plain name (letters, digits, . _ -): '$Name'"; return $false }
+    Write-Section "Export: $Name"
+    $packages = @(Get-InstalledScoopPackages)
+    if ($packages.Count -eq 0) { Write-ErrorMsg "No Scoop packages under $global:BaseDir\apps"; return $false }
+    $buckets = @(Get-ScoopBuckets)
+    $exportDir = Join-Path $global:BaseDir 'etc\exports'
+    if (-not (Test-Path $exportDir)) { New-Item -ItemType Directory -Path $exportDir -Force | Out-Null }
+    $target = Join-Path $exportDir "$Name.txt"
+    $lines = @(
+        "# scoop-boot export: host $(Get-Hostname), user $(Get-Username), $(Get-Date -Format 'yyyy-MM-dd HH:mm'), scoop-boot $global:ScriptVersion",
+        "# Package list format: one package per line, bucket/name for packages outside main.",
+        "# On another machine: copy this file to etc\exports\ there and run",
+        "#   scoop-boot.ps1 --import=$Name   (adds what its package list lacks; --user-install installs it)",
+        "# Bootstrap packages ($($global:BootstrapPackages -join ', ')) are not listed: --user-install installs them first."
+    )
+    foreach ($bucket in $buckets) { $lines += "# bucket $($bucket.Name) $($bucket.Url)" }
+    $lines += ''
+    $skipped = 0
+    foreach ($package in $packages) {
+        if ($global:BootstrapPackages -contains $package.Name) { $skipped++; continue }
+        $entry = if ($package.Bucket -and $package.Bucket -ne 'main') { "$($package.Bucket)/$($package.Name)" } else { $package.Name }
+        $note = @()
+        if ($package.Version) { $note += $package.Version }
+        if ($package.Held) { $note += 'held' }
+        $lines += if ($note.Count -gt 0) { "{0,-40} # {1}" -f $entry, ($note -join ', ') } else { $entry }
+    }
+    [IO.File]::WriteAllText($target, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+    Write-Success "Exported $($packages.Count - $skipped) packages and $($buckets.Count) buckets: $target"
+    Write-Info "Copy the file to etc\exports\ on the other machine, then: scoop-boot.ps1 --import=$Name"
+    return $true
+}
+
+function Get-ImportPlan {
+    <#
+    .SYNOPSIS
+        What --import would add: packages missing from the effective list, buckets missing on this machine, the target file.
+    #>
+    param([string]$ExportPath)
+    $imported = @(Read-PackageList -Path $ExportPath)
+    $importedBuckets = @(Read-PackageListBuckets -Path $ExportPath)
+    $hostFile = Join-Path $global:PackagesDir ("{0}.txt" -f (Get-Hostname))
+    $defaultFile = Join-Path $global:PackagesDir 'default.txt'
+    $effective = Get-PackageListFile
+    $present = @()
+    if ($effective) { $present = @(Read-PackageList -Path $effective -Silent | ForEach-Object { Get-ManifestAppName -Package $_ }) }
+    $present += $global:BootstrapPackages
+    $missing = @($imported | Where-Object { $present -notcontains (Get-ManifestAppName -Package $_) })
+    # Buckets Scoop adds by itself when a known bucket/name is installed need no line;
+    # others are written as "# bucket" lines that Step 2 of --user-install adds
+    $known = @('main', 'extras', 'versions', 'java', 'nerd-fonts', 'nirsoft', 'php', 'games', 'sysinternals', 'nonportable')
+    $existingBuckets = @(Get-ScoopBuckets | ForEach-Object { $_.Name })
+    $neededBucketNames = @($missing | Where-Object { $_ -match '/' } | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique)
+    $buckets = @($importedBuckets | Where-Object { $neededBucketNames -contains $_.Name -and $known -notcontains $_.Name -and $existingBuckets -notcontains $_.Name })
+    return [pscustomobject]@{
+        Source = $ExportPath; Imported = $imported; Missing = $missing; Buckets = $buckets
+        Target = $hostFile; CreateFromDefault = (-not (Test-Path $hostFile)) -and (Test-Path $defaultFile)
+    }
+}
+
+function Invoke-Import {
+    <#
+    .SYNOPSIS
+        Adds the packages of an export file that this machine's package list lacks to etc\packages\<host>.txt. Called by --import.
+    .DESCRIPTION
+        The host file is created from default.txt when it does not exist. Packages
+        that are already listed are not added again, so a second import is harmless.
+        With -Replace the host file is written from the export alone: the machine
+        gets exactly the old machine's list, default.txt no longer counts. Nothing
+        is installed or uninstalled either way: --list-packages shows the lines,
+        --user-install installs them, the next --admin-reset removes what is not listed.
+    #>
+    param([string]$Source, [bool]$DryRun = $false, [bool]$Replace = $false)
+    $path = $Source
+    if (-not (Test-Path $path)) {
+        $candidate = Join-Path $global:BaseDir "etc\exports\$Source"
+        if (Test-Path $candidate) { $path = $candidate }
+        elseif (Test-Path "$candidate.txt") { $path = "$candidate.txt" }
+    }
+    if (-not (Test-Path $path)) { Write-ErrorMsg "Export not found: '$Source' (a file, or a name under $global:BaseDir\etc\exports)"; return $false }
+    Write-Section "Import: $(Split-Path -Leaf $path)$(if ($Replace) { ' (replace)' })$(if ($DryRun) { ' (DRY RUN)' })"
+    $plan = Get-ImportPlan -ExportPath $path
+    if ($Replace) {
+        $exportName = [IO.Path]::GetFileNameWithoutExtension($path)
+        $known = @('main', 'extras', 'versions', 'java', 'nerd-fonts', 'nirsoft', 'php', 'games', 'sysinternals', 'nonportable')
+        $bucketLines = @(Read-PackageListBuckets -Path $path | Where-Object { $known -notcontains $_.Name } | ForEach-Object { "# bucket $($_.Name) $($_.Url)" })
+        Write-Info "$($plan.Imported.Count) packages in the export; the host list will contain exactly these"
+        if (Test-Path $plan.Target) {
+            $current = @(Read-PackageList -Path $plan.Target -Silent)
+            $dropped = @($current | Where-Object { $plan.Imported -notcontains $_ })
+            foreach ($d in $dropped) { Write-Host "  - $d (no longer listed)" -ForegroundColor Yellow }
+        }
+        foreach ($m in $plan.Missing) { Write-Host "  + $m" -ForegroundColor White }
+        if ($DryRun) { Write-Info "DRY RUN: nothing written; target would be $($plan.Target)"; return $true }
+        if (Test-Path $plan.Target) {
+            $backup = "$($plan.Target).$(Get-Date -Format 'yyyyMMdd_HHmmss').bak"
+            Copy-Item $plan.Target $backup -Force
+            Write-Host "[OK] Previous list kept as $backup" -ForegroundColor Gray
+        }
+        $lines = @("# $(Split-Path -Leaf $plan.Target): package list of this host, written by --import=$exportName --replace on $(Get-Date -Format 'yyyy-MM-dd HH:mm').", "# It replaces default.txt on this machine and is never touched by --update.", "")
+        $lines += $bucketLines
+        $lines += $plan.Imported
+        [IO.File]::WriteAllText($plan.Target, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+        Write-Success "Wrote $($plan.Target) with $($plan.Imported.Count) packages"
+        Write-Info "Next: scoop-boot.ps1 --list-packages to review, then --user-install to install them"
+        return $true
+    }
+    Write-Info "$($plan.Imported.Count) packages in the export, $($plan.Missing.Count) not in this machine's list"
+    foreach ($b in $plan.Buckets) { Write-Host "  bucket $($b.Name) $($b.Url)" -ForegroundColor Gray }
+    foreach ($m in $plan.Missing) { Write-Host "  $m" -ForegroundColor White }
+    if ($plan.Missing.Count -eq 0) { Write-Success "Nothing to import; the list already has everything"; return $true }
+    if ($DryRun) { Write-Info "DRY RUN: nothing written; target would be $($plan.Target)"; return $true }
+    if ($plan.CreateFromDefault) {
+        $defaultFile = Join-Path $global:PackagesDir 'default.txt'
+        $header = "# $(Split-Path -Leaf $plan.Target): package list of this host, created from default.txt by --import on $(Get-Date -Format 'yyyy-MM-dd HH:mm').`n# It replaces default.txt on this machine and is never touched by --update.`n`n"
+        [IO.File]::WriteAllText($plan.Target, $header + (Get-Content -Path $defaultFile -Raw), (New-Object Text.UTF8Encoding($false)))
+        Write-Success "Created $($plan.Target) from default.txt"
+    } elseif (-not (Test-Path $plan.Target)) {
+        [IO.File]::WriteAllText($plan.Target, "# $(Split-Path -Leaf $plan.Target): package list of this host`n", (New-Object Text.UTF8Encoding($false)))
+        Write-Success "Created $($plan.Target)"
+    }
+    $block = @("", "# import $(Get-Date -Format 'yyyy-MM-dd HH:mm') from $([IO.Path]::GetFileNameWithoutExtension($path)) ($($plan.Missing.Count) of $($plan.Imported.Count) packages were missing)")
+    foreach ($b in $plan.Buckets) { $block += "# bucket $($b.Name) $($b.Url)" }
+    $block += $plan.Missing
+    $existing = Get-Content -Path $plan.Target -Raw
+    if ($existing -and -not $existing.EndsWith("`n")) { $existing += "`n" }
+    if ($existing.EndsWith("`n`n")) { $block = @($block | Select-Object -Skip 1) }
+    [IO.File]::WriteAllText($plan.Target, $existing + (($block -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+    Write-Success "Added $($plan.Missing.Count) packages to $($plan.Target)"
+    Write-Info "Next: scoop-boot.ps1 --list-packages to review, then --user-install to install them"
+    return $true
+}
+
+# ============================================================================
 # INSTALLATION (formerly scoop-complete-install.ps1)
 # ============================================================================
 
@@ -2157,18 +2587,239 @@ JAVA_HOME=C:\java
 # Installed by the bootstrap (Step 1) before any list is read; never listed in a package file
 $global:BootstrapPackages = @('7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
 
-$global:PackageHandlers = @{
-    'vcredist2022'      = 'skipped when the VC++ runtime is present; runtime verified in Step 4'
-    'temurin25-jdk'     = 'Step 4: scoop reset (default Java)'
-    'msys2'             = 'Step 4: pacman -Syu, GCC (UCRT64), compile-and-run smoke test'
-    'nmap'              = 'Step 4: shims nc and netcat -> ncat.exe'
-    '7zip'              = 'Step 5: reg import install-context.reg'
-    'notepadplusplus'   = 'Step 5: reg import install-context.reg'
-    'vscode'            = 'Step 5: reg import install-context.reg'
-    'git'               = 'Step 5: reg import install-context.reg'
-    'python314'         = 'Step 5: reg import install-pep-514.reg'
-    'jetbrains-toolbox' = 'Step 6: started (tray)'
-    'greenshot'         = 'Step 6: started (tray)'
+# ----------------------------------------------------------------------------
+# Post-install handlers: one entry per package that needs more than "scoop install".
+# Step 4 of --user-install runs them in this order for every package that is in the
+# list or already on disk; --list-packages shows the Description next to the package.
+# A handler receives the Scoop root and the package name and returns the failures it
+# wants reported (strings), nothing when all went well. Optional = $true: the package
+# may be absent from default.txt without a warning (post-install for an opt-in tool).
+# ----------------------------------------------------------------------------
+$global:PackageHandlers = @(
+    @{ Name = 'temurin25-jdk';     Handler = 'Invoke-JavaDefaultHandler'; Description = 'scoop reset (default Java)' }
+    @{ Name = 'vcredist2022';      Handler = 'Invoke-VcRuntimeHandler';   Description = 'skipped when the VC++ runtime is present; runtime verified' }
+    @{ Name = 'msys2';             Handler = 'Invoke-GccHandler';         Description = 'pacman -Syu, GCC (UCRT64), compile-and-run smoke test' }
+    @{ Name = 'nmap';              Handler = 'Invoke-NcatShimHandler';    Description = 'shims nc and netcat -> ncat.exe' }
+    @{ Name = '7zip';              Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'notepadplusplus';   Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'vscode';            Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'git';               Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'python314';         Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-pep-514.reg';  Arguments = @{ File = 'install-pep-514.reg' } }
+    @{ Name = 'jetbrains-toolbox'; Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'jetbrains-toolbox.exe'; Process = 'jetbrains-toolbox'; Title = 'JetBrains Toolbox' } }
+    @{ Name = 'greenshot';         Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'Greenshot.exe'; Process = 'Greenshot'; Title = 'Greenshot' } }
+)
+$global:VcRuntimeKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
+
+function New-HandlerFailure {
+    <#
+    .SYNOPSIS
+        A failure a handler reports; typed, so that stray pipeline output of the tools it runs (pacman, scoop) is told apart and dropped.
+    #>
+    param([string]$Text)
+    return [pscustomobject]@{ PSTypeName = 'ScoopBoot.Failure'; Text = $Text }
+}
+
+function Get-PackageHandler {
+    <#
+    .SYNOPSIS
+        The handler entry of a package, or $null.
+    #>
+    param([string]$Name)
+    foreach ($entry in $global:PackageHandlers) { if ($entry.Name -eq $Name) { return $entry } }
+    return $null
+}
+
+function Invoke-JavaDefaultHandler {
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    if (-not (Test-Path "$ScoopDir\apps\$Package\current\bin\java.exe")) {
+        Write-Host "[WARN] $Package is not installed, default Java not set" -ForegroundColor Yellow
+        return @()
+    }
+    Write-Host "[INFO] Setting default Java to $Package..." -ForegroundColor Gray
+    scoop reset $Package 2>&1 | Out-Null
+    Write-Host "[OK] Default Java set to $Package" -ForegroundColor Green
+    return @()
+}
+
+function Invoke-VcRuntimeHandler {
+    # Verifies the result of the vcredist2022 post_install (needs elevation); the
+    # install itself is skipped in Step 3 when the runtime is already present
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $vcRuntime = Get-ItemProperty $global:VcRuntimeKey -ErrorAction SilentlyContinue
+    if ($vcRuntime -and $vcRuntime.Installed -eq 1) {
+        Write-Host "[OK] VC++ runtime installed ($($vcRuntime.Version))" -ForegroundColor Green
+        $vcredistInstaller = Get-ChildItem "$ScoopDir\apps\vcredist2022\current" -Filter "VC_redist*.exe" -ErrorAction SilentlyContinue
+        if ($vcredistInstaller) {
+            Remove-Item $vcredistInstaller.FullName -Force -ErrorAction SilentlyContinue
+            Write-Host "[OK] vcredist2022 installer removed (libraries remain)" -ForegroundColor Gray
+        }
+        return @()
+    }
+    Write-Host "[WARN] VC++ runtime not installed (vcredist2022 post_install needs elevation, UAC was denied?)" -ForegroundColor Yellow
+    Write-Host "       Run in an Administrator PowerShell:" -ForegroundColor Gray
+    Write-Host "       Get-ChildItem $ScoopDir\cache\vcredist2022* | ForEach-Object { & `$_.FullName /install /quiet /norestart }" -ForegroundColor Gray
+    return (New-HandlerFailure 'vcredist2022 (runtime)')
+}
+
+function Invoke-GccHandler {
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $failed = @()
+    if (-not (Test-Path "$ScoopDir\apps\msys2\current")) {
+        Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
+        return $failed
+    }
+    Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
+    Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
+    Write-Host "     (core update plus GCC download, several minutes)" -ForegroundColor DarkGray
+
+    # msys2.exe is only a launcher: it spawns a terminal and exits at once, so
+    # Start-Process -Wait returns before pacman has done anything. Call bash.exe
+    # directly instead; that blocks until pacman is finished and streams its output.
+    $msysBash = "$ScoopDir\apps\msys2\current\usr\bin\bash.exe"
+    $env:MSYSTEM = 'UCRT64'
+    $env:CHERE_INVOKING = '1'
+    $env:MSYS2_PATH_TYPE = 'minimal'
+    try {
+        # First login run completes the MSYS2 post-install setup
+        & $msysBash -lc 'true' 2>&1 | Out-Null
+
+        # Core update may replace msys2-runtime/pacman and stop; second pass finishes
+        foreach ($pass in 1, 2) {
+            Write-Host "  -> pacman -Syu, pass $pass" -ForegroundColor DarkGray
+            & $msysBash -lc 'pacman -Syu --noconfirm'
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  [WARN] pacman -Syu pass $pass exited with code $LASTEXITCODE" -ForegroundColor Yellow
+            }
+        }
+
+        # Package mirrors fail sporadically (HTTP 500 on a single .sig file aborts the
+        # whole transaction). Retry a few times; pacman keeps what it already downloaded.
+        $gccExe = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
+        foreach ($attempt in 1, 2, 3) {
+            Write-Host "  -> pacman -S mingw-w64-ucrt-x86_64-gcc, attempt $attempt" -ForegroundColor DarkGray
+            & $msysBash -lc 'pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc'
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $gccExe)) { break }
+            Write-Host "  [WARN] pacman -S exited with code $LASTEXITCODE" -ForegroundColor Yellow
+            if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+        }
+    } finally {
+        Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING, Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue
+    }
+
+    # Verify installation (CRITICAL: Check ucrt64, NOT mingw64!)
+    $gccPath = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
+    if (Test-Path $gccPath) {
+        Write-Host "[OK] MSYS2 GCC (UCRT64) installed successfully!" -ForegroundColor Green
+        Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
+
+        # Smoke test: compile and run a one-line program. Two known failure modes on
+        # managed machines, each with its own message:
+        #  - cc1.exe exits with -1073741511 (STATUS_ENTRYPOINT_NOT_FOUND) when another
+        #    directory earlier in PATH ships older libstdc++/libgcc DLLs
+        #  - the built exe is refused by endpoint security (ASR rule 01443614, "Block
+        #    executable files unless they meet a prevalence, age, or trusted list criterion")
+        $ccTestDir = "$ScoopDir\cache\scoop-boot-cctest"
+        New-Item -ItemType Directory -Path $ccTestDir -Force | Out-Null
+        $ccTestSrc = "$ccTestDir\hello.c"
+        $ccTestExe = "$ccTestDir\hello.exe"
+        Set-Content -Path $ccTestSrc -Value 'int main(void){return 42;}' -Encoding ASCII
+        Remove-Item $ccTestExe -Force -ErrorAction SilentlyContinue
+        $savedPath = $env:Path
+        $env:Path = "$ScoopDir\apps\msys2\current\ucrt64\bin;$env:Path"
+        $ccOutput = @(& $gccPath $ccTestSrc -o $ccTestExe 2>&1 | ForEach-Object { "$_" })
+        $ccExit = $LASTEXITCODE
+        $env:Path = $savedPath
+        if (-not (Test-Path $ccTestExe)) {
+            Write-Host "[WARN] GCC is installed but cannot compile (gcc exit code $ccExit)" -ForegroundColor Yellow
+            foreach ($line in ($ccOutput | Select-Object -First 4)) { Write-Host "       gcc: $line" -ForegroundColor Gray }
+            $ccText = $ccOutput -join "`n"
+            if ($ccExit -eq -1073741511 -or $ccText -match 'entry point') {
+                Write-Host "       cc1.exe: STATUS_ENTRYPOINT_NOT_FOUND. A directory earlier in PATH ships older" -ForegroundColor Gray
+                Write-Host "       libstdc++/libgcc DLLs. Check: where.exe libstdc++-6.dll" -ForegroundColor Gray
+            } elseif ($ccText -match 'Access is denied|cannot execute') {
+                Write-Host "       A compiler component (cc1.exe, as.exe or ld.exe) was refused by Windows: endpoint" -ForegroundColor Gray
+                Write-Host "       security (Defender ASR rule 01443614) blocks newly released binaries. Defender event 1121." -ForegroundColor Gray
+            }
+            $failed += New-HandlerFailure 'gcc (compile test)'
+        } else {
+            $runOk = $false
+            try {
+                & $ccTestExe 2>&1 | Out-Null
+                $runOk = ($LASTEXITCODE -eq 42)
+            } catch { }
+            if ($runOk) {
+                Write-Host "[OK] GCC compile-and-run test passed" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] GCC compiled the test program, but Windows refused to run it." -ForegroundColor Yellow
+                Write-Host "       Endpoint security (Defender ASR rule 01443614) blocks locally built" -ForegroundColor Gray
+                Write-Host "       executables on this machine. Check the Defender log for event 1121:" -ForegroundColor Gray
+                Write-Host "       Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1121}" -ForegroundColor Gray
+                $failed += New-HandlerFailure 'gcc (running built exe blocked by ASR)'
+            }
+        }
+        Remove-Item $ccTestDir -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "[WARN] GCC installation failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
+        $failed += New-HandlerFailure 'msys2 gcc (ucrt64)'
+        Write-Host ""
+        Write-Host "Manual installation steps:" -ForegroundColor Yellow
+        Write-Host "  1. Open UCRT64 terminal: $ScoopDir\apps\msys2\current\ucrt64.exe" -ForegroundColor White
+        Write-Host "  2. Run: pacman -Syu" -ForegroundColor White
+        Write-Host "  3. Run: pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor White
+        Write-Host ""
+        Write-Host "NOTE: Use ucrt64.exe (modern), NOT msys2.exe (legacy)" -ForegroundColor Yellow
+    }
+    return $failed
+}
+
+function Invoke-NcatShimHandler {
+    # netcat aliases: the netcat package is blocked by Windows Defender (PUA), so nc and
+    # netcat point to ncat from nmap. "scoop shim add" re-adds shims to the User PATH,
+    # which Step 7 cleans up again; that is why handlers run before Step 7.
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $ncat = "$ScoopDir\apps\nmap\current\ncat.exe"
+    if (-not (Test-Path $ncat)) {
+        Write-Host "[WARN] nmap not found, skipping nc/netcat shims" -ForegroundColor Yellow
+        return @()
+    }
+    foreach ($alias in @('nc', 'netcat')) {
+        if (Test-Path "$ScoopDir\shims\$alias.exe") {
+            Write-Host "[OK] Shim already present: $alias -> ncat" -ForegroundColor Gray
+        } else {
+            scoop shim add $alias $ncat 2>&1 | Out-Null
+            if (Test-Path "$ScoopDir\shims\$alias.exe") {
+                Write-Host "[OK] Shim created: $alias -> ncat" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] Could not create shim $alias (scoop shim add $alias $ncat)" -ForegroundColor Yellow
+            }
+        }
+    }
+    return @()
+}
+
+function Invoke-RegImportHandler {
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $regPath = "$ScoopDir\apps\$Package\current\$($Arguments.File)"
+    if (Test-Path $regPath) {
+        Start-Process reg -ArgumentList "import `"$regPath`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+        Write-Host "[OK] Imported: $Package ($($Arguments.File))" -ForegroundColor Green
+    } else {
+        Write-Host "[SKIP] $Package has no $($Arguments.File)" -ForegroundColor DarkGray
+    }
+    return @()
+}
+
+function Invoke-TrayAppHandler {
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $exePath = "$ScoopDir\apps\$Package\current\$($Arguments.Exe)"
+    if (-not (Test-Path $exePath)) { return @() }
+    if (Get-Process -Name $Arguments.Process -ErrorAction SilentlyContinue) {
+        Write-Host "[OK] Already running: $($Arguments.Title)" -ForegroundColor Gray
+    } else {
+        Start-Process -FilePath $exePath -ErrorAction SilentlyContinue
+        Write-Host "[OK] Started: $($Arguments.Title)" -ForegroundColor Green
+    }
+    return @()
 }
 
 function Test-WSL2Installed {
@@ -2277,7 +2928,7 @@ function Set-DevelopmentEnvironment {
         Write-Host "Run PowerShell as Administrator:" -ForegroundColor Yellow
         Write-Host "  Right-click PowerShell -> Run as Administrator" -ForegroundColor White
         Write-Host ""
-        return $false
+        return (New-RunResult -Command 'admin-setenv' -Ok $false)
     }
 
     Write-Host "[OK] Running with administrator privileges" -ForegroundColor Green
@@ -2363,7 +3014,7 @@ Rules:
         Write-Host "Step 4: Apply configuration (as Administrator)" -ForegroundColor Cyan
         Write-Host "  $ScoopDir\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
-        return $false
+        return (New-RunResult -Command 'admin-setenv' -Ok $false)
     }
 
     # Check if valid files exist
@@ -2402,7 +3053,7 @@ Rules:
         Write-Host "After fixing, re-run:" -ForegroundColor Yellow
         Write-Host "  $ScoopDir\bin\scoop-boot.ps1 --admin-setenv" -ForegroundColor White
         Write-Host ""
-        return $false
+        return (New-RunResult -Command 'admin-setenv' -Ok $false)
     }
 
     Write-Host "[INFO] Found $($validEnvFiles.Count) valid environment file(s):" -ForegroundColor Gray
@@ -2413,7 +3064,7 @@ Rules:
 
     # Apply environment configuration
     Write-Host "[INFO] Applying environment from .env file(s)..." -ForegroundColor Gray
-    $applied = Get-LastResult -Output @(Invoke-ApplyEnv)
+    $applied = (Get-RunResult -Output @(Invoke-ApplyEnv)).Ok
 
     if (-not $applied) {
         Write-Host ""
@@ -2424,7 +3075,7 @@ Rules:
         Write-Host "  2. Test with dry-run: .\bin\scoop-boot.ps1 --admin-setenv --dry-run" -ForegroundColor White
         Write-Host "  3. Check status: .\bin\scoop-boot.ps1 --env-status" -ForegroundColor White
         Write-Host ""
-        return $false
+        return (New-RunResult -Command 'admin-setenv' -Ok $false)
     }
 
     # The temporary directory the files set at Machine scope must exist and be
@@ -2452,7 +3103,7 @@ Rules:
     Write-Host "  Open a NORMAL PowerShell (not Administrator)" -ForegroundColor White
     Write-Host "  Run: $ScoopDir\bin\scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""
-    return $true
+    return (New-RunResult -Command 'admin-setenv' -Ok $true)
 }
 
 function Install-ScoopTools {
@@ -2494,7 +3145,7 @@ function Install-ScoopTools {
         $response = Read-Host
         if ($response -ne 'y' -and $response -ne 'Y') {
             Write-Host "Installation cancelled." -ForegroundColor Gray
-            return $true
+            return (New-RunResult -Command 'user-install' -Ok $true -Data @{ Cancelled = $true })
         }
         Write-Host ""
     } else {
@@ -2640,12 +3291,12 @@ function Install-ScoopTools {
                 Write-Host "[OK] Scoop core installed successfully!" -ForegroundColor Green
             } else {
                 Write-Host "[ERROR] Scoop installation failed!" -ForegroundColor Red
-                return $false
+                return (New-RunResult -Command 'user-install' -Ok $false)
             }
         } catch {
             Write-Host "[ERROR] Failed to download/install Scoop!" -ForegroundColor Red
             Write-Host "Error: $_" -ForegroundColor Red
-            return $false
+            return (New-RunResult -Command 'user-install' -Ok $false)
         }
 
         # Update PATH for current session
@@ -2677,14 +3328,14 @@ function Install-ScoopTools {
     # Final verification
     if (-not (Test-Path "$ScoopDir\apps\scoop")) {
         Write-Host "[ERROR] Scoop not found after bootstrap!" -ForegroundColor Red
-        return $false
+        return (New-RunResult -Command 'user-install' -Ok $false)
     }
 
     if (-not (Test-Path "$ScoopDir\apps\git\current\cmd\git.exe")) {
         Write-Host "[FATAL] git could not be installed. Scoop cannot add buckets or install anything without it." -ForegroundColor Red
         Write-Host "        See the bootstrap messages above. If 7z.exe or git.exe were refused by Windows," -ForegroundColor Gray
         Write-Host "        endpoint security blocks newly released binaries (Defender event 1121)." -ForegroundColor Gray
-        return $false
+        return (New-RunResult -Command 'user-install' -Ok $false)
     }
 
     Write-Host ""
@@ -2703,21 +3354,29 @@ function Install-ScoopTools {
     Write-Host ">>> Step 2: Adding additional buckets..." -ForegroundColor White
     Write-Host ""
 
-    # Bootstrap already added main + extras, we add java + versions
+    # Bootstrap already added main + extras, we add java + versions, plus the
+    # "# bucket NAME URL" lines of the package list (written by --import)
     $failedApps = @()
-    $additionalBuckets = @('java', 'versions')
+    $installedNow = @()
+    $alreadyInstalled = @()
+    $userScopeChanges = 0
+    $additionalBuckets = @(@{ Name = 'java'; Url = '' }, @{ Name = 'versions'; Url = '' })
+    $listFileForBuckets = Get-PackageListFile
+    if ($listFileForBuckets) {
+        foreach ($b in @(Read-PackageListBuckets -Path $listFileForBuckets)) { $additionalBuckets += @{ Name = $b.Name; Url = $b.Url } }
+    }
     foreach ($bucket in $additionalBuckets) {
-        Write-Host "Adding bucket: $bucket" -ForegroundColor Gray
-        if (Test-Path "$ScoopDir\buckets\$bucket\bucket") {
-            Write-Host "[OK] Bucket already exists: $bucket" -ForegroundColor Gray
+        Write-Host "Adding bucket: $($bucket.Name)" -ForegroundColor Gray
+        if (Test-Path "$ScoopDir\buckets\$($bucket.Name)\bucket") {
+            Write-Host "[OK] Bucket already exists: $($bucket.Name)" -ForegroundColor Gray
             continue
         }
-        scoop bucket add $bucket
-        if (Test-Path "$ScoopDir\buckets\$bucket\bucket") {
-            Write-Host "[OK] Added bucket: $bucket" -ForegroundColor Green
+        if ($bucket.Url) { scoop bucket add $bucket.Name $bucket.Url } else { scoop bucket add $bucket.Name }
+        if (Test-Path "$ScoopDir\buckets\$($bucket.Name)\bucket") {
+            Write-Host "[OK] Added bucket: $($bucket.Name)" -ForegroundColor Green
         } else {
-            Write-Host "[ERROR] Bucket not added: $bucket (packages from it will fail below)" -ForegroundColor Red
-            $failedApps += "bucket $bucket"
+            Write-Host "[ERROR] Bucket not added: $($bucket.Name) (packages from it will fail below)" -ForegroundColor Red
+            $failedApps += "bucket $($bucket.Name)"
         }
     }
 
@@ -2740,34 +3399,33 @@ function Install-ScoopTools {
     }
     if (-not $packageFile) {
         Write-Host "[FATAL] No package list: $global:PackagesDir\default.txt is missing. Run: $ScoopDir\bin\scoop-boot.ps1 --update" -ForegroundColor Red
-        return $false
+        return (New-RunResult -Command 'user-install' -Ok $false)
     }
     $apps = @(Read-PackageList -Path $packageFile)
     $requestedNames = @($apps | ForEach-Object { Get-ManifestAppName -Package $_ })
     Write-Host "[INFO] Package list: $packageFile ($($apps.Count) packages)" -ForegroundColor Gray
-    foreach ($handlerApp in ($PackageHandlers.Keys | Sort-Object)) {
-        if ($BootstrapPackages -contains $handlerApp) { continue }
-        if ($requestedNames -notcontains $handlerApp -and -not (Test-Path "$ScoopDir\apps\$handlerApp\current")) {
-            Write-Host "[WARN] $handlerApp is not in the package list; its post-install step ($($PackageHandlers[$handlerApp])) will not run" -ForegroundColor Yellow
+    foreach ($entry in $PackageHandlers) {
+        if ($BootstrapPackages -contains $entry.Name) { continue }
+        if ($requestedNames -notcontains $entry.Name -and -not (Test-Path "$ScoopDir\apps\$($entry.Name)\current")) {
+            Write-Host "[WARN] $($entry.Name) is not in the package list; its post-install step ($($entry.Description)) will not run" -ForegroundColor Yellow
         }
     }
     if ($apps.Count -eq 0) {
         Write-Host "[FATAL] Package list is empty: $packageFile" -ForegroundColor Red
-        return $false
+        return (New-RunResult -Command 'user-install' -Ok $false)
     }
 
     # VC++ 2015-2022 runtime: the vcredist2022 post_install needs elevation.
     # Skip it when the runtime is already present (usual on managed images).
-    $vcRuntimeKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
-    $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue
+    $vcRuntime = Get-ItemProperty $global:VcRuntimeKey -ErrorAction SilentlyContinue
     if ($vcRuntime -and $vcRuntime.Installed -eq 1 -and $requestedNames -contains 'vcredist2022') {
         Write-Host "[OK] VC++ runtime already present ($($vcRuntime.Version)), skipping vcredist2022" -ForegroundColor Gray
         $apps = @($apps | Where-Object { (Get-ManifestAppName -Package $_) -ne 'vcredist2022' })
     }
 
-    # Window title counts through the whole run: the packages, then the four
-    # post-install stages (java, gcc, post-install, clean-user-scope)
-    $titleTotal = $apps.Count + 4
+    # Window title counts through the whole run: the packages, then one step per
+    # handler and the user-scope cleanup (the exact total is known after Step 3)
+    $titleTotal = $apps.Count + @($PackageHandlers | Where-Object { $requestedNames -contains $_.Name }).Count + 1
     $appIndex = 0
     foreach ($app in $apps) {
         $appIndex++
@@ -2775,6 +3433,7 @@ function Install-ScoopTools {
         $appDir = "$ScoopDir\apps\$(Get-ManifestAppName -Package $app)\current"
         if (Test-Path $appDir) {
             Write-Host "[OK] Already installed: $app" -ForegroundColor Gray
+            $alreadyInstalled += $app
             continue
         }
         Write-Host "[INFO] Installing $app..." -ForegroundColor Gray
@@ -2783,6 +3442,7 @@ function Install-ScoopTools {
         try { scoop install $app } catch { Write-Host "[ERROR] $app`: $($_.Exception.Message)" -ForegroundColor Red }
         if (Test-Path $appDir) {
             Write-Host "[OK] Installed: $app" -ForegroundColor Green
+            $installedNow += $app
         } else {
             Write-Host "[ERROR] Not installed: $app" -ForegroundColor Red
             $failedApps += $app
@@ -2802,213 +3462,27 @@ function Install-ScoopTools {
     Write-Host ">>> Step 4: Post-installation tasks..." -ForegroundColor White
     Write-Host ""
 
-    # Handlers below run only for packages in the list (or already on disk from an
-    # earlier run); a package that is not listed is simply not touched.
-    $listed = $requestedNames + $BootstrapPackages + @($PackageHandlers.Keys | Where-Object { Test-Path "$ScoopDir\apps\$_\current" })
-
-    # Set default Java version
-    if ($listed -contains 'temurin25-jdk' -and (Test-Path "$ScoopDir\apps\temurin25-jdk\current\bin\java.exe")) {
-        Set-ScoopBootTitle -Text "scoop-boot [$($apps.Count + 1)/$titleTotal] java"
-        Write-Host "[INFO] Setting default Java to Temurin 25..." -ForegroundColor Gray
-        scoop reset temurin25-jdk 2>&1 | Out-Null
-        Write-Host "[OK] Default Java set to Temurin 25" -ForegroundColor Green
-    } elseif ($listed -contains 'temurin25-jdk') {
-        Write-Host "[WARN] temurin25-jdk is not installed, default Java not set" -ForegroundColor Yellow
-    }
-
-    # VC++ runtime: verify the result of the vcredist2022 post_install (needs elevation)
-    $vcRuntime = Get-ItemProperty $vcRuntimeKey -ErrorAction SilentlyContinue
-    if ($listed -notcontains 'vcredist2022') {
-        # not managed by this list; nothing to verify
-    } elseif ($vcRuntime -and $vcRuntime.Installed -eq 1) {
-        Write-Host "[OK] VC++ runtime installed ($($vcRuntime.Version))" -ForegroundColor Green
-        $vcredistInstaller = Get-ChildItem "$ScoopDir\apps\vcredist2022\current" -Filter "VC_redist*.exe" -ErrorAction SilentlyContinue
-        if ($vcredistInstaller) {
-            Remove-Item $vcredistInstaller.FullName -Force -ErrorAction SilentlyContinue
-            Write-Host "[OK] vcredist2022 installer removed (libraries remain)" -ForegroundColor Gray
-        }
-    } else {
-        Write-Host "[WARN] VC++ runtime not installed (vcredist2022 post_install needs elevation, UAC was denied?)" -ForegroundColor Yellow
-        Write-Host "       Run in an Administrator PowerShell:" -ForegroundColor Gray
-        Write-Host "       Get-ChildItem $ScoopDir\cache\vcredist2022* | ForEach-Object { & `$_.FullName /install /quiet /norestart }" -ForegroundColor Gray
-        $failedApps += 'vcredist2022 (runtime)'
-    }
-
-    # Initialize MSYS2 and install GCC
-    if ($listed -contains 'msys2' -and (Test-Path "$ScoopDir\apps\msys2\current")) {
-        Set-ScoopBootTitle -Text "scoop-boot [$($apps.Count + 2)/$titleTotal] gcc"
-        Write-Host "[INFO] Initializing MSYS2 and installing GCC..." -ForegroundColor Gray
-        Write-Host "  -> Initializing MSYS2..." -ForegroundColor DarkGray
-        Write-Host "     (core update plus GCC download, several minutes)" -ForegroundColor DarkGray
-
-        # msys2.exe is only a launcher: it spawns a terminal and exits at once, so
-        # Start-Process -Wait returns before pacman has done anything. Call bash.exe
-        # directly instead; that blocks until pacman is finished and streams its output.
-        $msysBash = "$ScoopDir\apps\msys2\current\usr\bin\bash.exe"
-        $env:MSYSTEM = 'UCRT64'
-        $env:CHERE_INVOKING = '1'
-        $env:MSYS2_PATH_TYPE = 'minimal'
+    # Handlers run only for packages in the list (or already on disk from an earlier
+    # run); a package that is not listed is simply not touched. Order = table order.
+    $listed = $requestedNames + $BootstrapPackages + @($PackageHandlers | ForEach-Object { $_.Name } | Where-Object { Test-Path "$ScoopDir\apps\$_\current" })
+    $handlerIndex = 0
+    $handlersToRun = @($PackageHandlers | Where-Object { $listed -contains $_.Name })
+    $titleTotal = $apps.Count + $handlersToRun.Count + 1
+    foreach ($entry in $handlersToRun) {
+        $handlerIndex++
+        Set-ScoopBootTitle -Text "scoop-boot [$($apps.Count + $handlerIndex)/$titleTotal] $($entry.Name)"
+        $arguments = if ($entry.ContainsKey('Arguments')) { $entry.Arguments } else { @{} }
         try {
-            # First login run completes the MSYS2 post-install setup
-            & $msysBash -lc 'true' 2>&1 | Out-Null
-
-            # Core update may replace msys2-runtime/pacman and stop; second pass finishes
-            foreach ($pass in 1, 2) {
-                Write-Host "  -> pacman -Syu, pass $pass" -ForegroundColor DarkGray
-                & $msysBash -lc 'pacman -Syu --noconfirm'
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host "  [WARN] pacman -Syu pass $pass exited with code $LASTEXITCODE" -ForegroundColor Yellow
-                }
-            }
-
-            # Package mirrors fail sporadically (HTTP 500 on a single .sig file aborts the
-            # whole transaction). Retry a few times; pacman keeps what it already downloaded.
-            $gccExe = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
-            foreach ($attempt in 1, 2, 3) {
-                Write-Host "  -> pacman -S mingw-w64-ucrt-x86_64-gcc, attempt $attempt" -ForegroundColor DarkGray
-                & $msysBash -lc 'pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc'
-                if ($LASTEXITCODE -eq 0 -and (Test-Path $gccExe)) { break }
-                Write-Host "  [WARN] pacman -S exited with code $LASTEXITCODE" -ForegroundColor Yellow
-                if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
-            }
-        } finally {
-            Remove-Item Env:MSYSTEM, Env:CHERE_INVOKING, Env:MSYS2_PATH_TYPE -ErrorAction SilentlyContinue
+            # Only typed failures count; other pipeline output of the handler (stdout of
+            # pacman, scoop) is dropped, as it was when the handlers were inline code
+            $handlerFailures = @(& $entry.Handler -ScoopDir $ScoopDir -Package $entry.Name -Arguments $arguments |
+                Where-Object { $_ -is [pscustomobject] -and $_.PSObject.TypeNames -contains 'ScoopBoot.Failure' } |
+                ForEach-Object { $_.Text })
+        } catch {
+            Write-Host "[ERROR] Handler for $($entry.Name) failed: $($_.Exception.Message)" -ForegroundColor Red
+            $handlerFailures = @("$($entry.Name) (handler)")
         }
-
-        # Verify installation (CRITICAL: Check ucrt64, NOT mingw64!)
-        $gccPath = "$ScoopDir\apps\msys2\current\ucrt64\bin\gcc.exe"
-        if (Test-Path $gccPath) {
-            Write-Host "[OK] MSYS2 GCC (UCRT64) installed successfully!" -ForegroundColor Green
-            Write-Host "     GCC location: $gccPath" -ForegroundColor DarkGray
-
-            # Smoke test: compile and run a one-line program. Two known failure modes on
-            # managed machines, each with its own message:
-            #  - cc1.exe exits with -1073741511 (STATUS_ENTRYPOINT_NOT_FOUND) when another
-            #    directory earlier in PATH ships older libstdc++/libgcc DLLs
-            #  - the built exe is refused by endpoint security (ASR rule 01443614, "Block
-            #    executable files unless they meet a prevalence, age, or trusted list criterion")
-            $ccTestDir = "$ScoopDir\cache\scoop-boot-cctest"
-            New-Item -ItemType Directory -Path $ccTestDir -Force | Out-Null
-            $ccTestSrc = "$ccTestDir\hello.c"
-            $ccTestExe = "$ccTestDir\hello.exe"
-            Set-Content -Path $ccTestSrc -Value 'int main(void){return 42;}' -Encoding ASCII
-            Remove-Item $ccTestExe -Force -ErrorAction SilentlyContinue
-            $savedPath = $env:Path
-            $env:Path = "$ScoopDir\apps\msys2\current\ucrt64\bin;$env:Path"
-            $ccOutput = @(& $gccPath $ccTestSrc -o $ccTestExe 2>&1 | ForEach-Object { "$_" })
-            $ccExit = $LASTEXITCODE
-            $env:Path = $savedPath
-            if (-not (Test-Path $ccTestExe)) {
-                Write-Host "[WARN] GCC is installed but cannot compile (gcc exit code $ccExit)" -ForegroundColor Yellow
-                foreach ($line in ($ccOutput | Select-Object -First 4)) { Write-Host "       gcc: $line" -ForegroundColor Gray }
-                $ccText = $ccOutput -join "`n"
-                if ($ccExit -eq -1073741511 -or $ccText -match 'entry point') {
-                    Write-Host "       cc1.exe: STATUS_ENTRYPOINT_NOT_FOUND. A directory earlier in PATH ships older" -ForegroundColor Gray
-                    Write-Host "       libstdc++/libgcc DLLs. Check: where.exe libstdc++-6.dll" -ForegroundColor Gray
-                } elseif ($ccText -match 'Access is denied|cannot execute') {
-                    Write-Host "       A compiler component (cc1.exe, as.exe or ld.exe) was refused by Windows: endpoint" -ForegroundColor Gray
-                    Write-Host "       security (Defender ASR rule 01443614) blocks newly released binaries. Defender event 1121." -ForegroundColor Gray
-                }
-                $failedApps += 'gcc (compile test)'
-            } else {
-                $runOk = $false
-                try {
-                    & $ccTestExe 2>&1 | Out-Null
-                    $runOk = ($LASTEXITCODE -eq 42)
-                } catch { }
-                if ($runOk) {
-                    Write-Host "[OK] GCC compile-and-run test passed" -ForegroundColor Green
-                } else {
-                    Write-Host "[WARN] GCC compiled the test program, but Windows refused to run it." -ForegroundColor Yellow
-                    Write-Host "       Endpoint security (Defender ASR rule 01443614) blocks locally built" -ForegroundColor Gray
-                    Write-Host "       executables on this machine. Check the Defender log for event 1121:" -ForegroundColor Gray
-                    Write-Host "       Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; Id=1121}" -ForegroundColor Gray
-                    $failedApps += 'gcc (running built exe blocked by ASR)'
-                }
-            }
-            Remove-Item $ccTestDir -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
-            Write-Host "[WARN] GCC installation failed (gcc.exe not found in ucrt64)" -ForegroundColor Yellow
-            $failedApps += 'msys2 gcc (ucrt64)'
-            Write-Host ""
-            Write-Host "Manual installation steps:" -ForegroundColor Yellow
-            Write-Host "  1. Open UCRT64 terminal: $ScoopDir\apps\msys2\current\ucrt64.exe" -ForegroundColor White
-            Write-Host "  2. Run: pacman -Syu" -ForegroundColor White
-            Write-Host "  3. Run: pacman -S mingw-w64-ucrt-x86_64-gcc" -ForegroundColor White
-            Write-Host ""
-            Write-Host "NOTE: Use ucrt64.exe (modern), NOT msys2.exe (legacy)" -ForegroundColor Yellow
-        }
-    } elseif ($listed -contains 'msys2') {
-        Write-Host "[WARN] MSYS2 not found, skipping GCC installation" -ForegroundColor Yellow
-    }
-
-    # netcat aliases: the netcat package is blocked by Windows Defender (PUA), so nc and
-    # netcat point to ncat from nmap. "scoop shim add" re-adds shims to the User PATH,
-    # which Step 7 cleans up again; that is why this runs before Step 7.
-    $ncat = "$ScoopDir\apps\nmap\current\ncat.exe"
-    if ($listed -contains 'nmap' -and (Test-Path $ncat)) {
-        foreach ($alias in @('nc', 'netcat')) {
-            if (Test-Path "$ScoopDir\shims\$alias.exe") {
-                Write-Host "[OK] Shim already present: $alias -> ncat" -ForegroundColor Gray
-            } else {
-                scoop shim add $alias $ncat 2>&1 | Out-Null
-                if (Test-Path "$ScoopDir\shims\$alias.exe") {
-                    Write-Host "[OK] Shim created: $alias -> ncat" -ForegroundColor Green
-                } else {
-                    Write-Host "[WARN] Could not create shim $alias (scoop shim add $alias $ncat)" -ForegroundColor Yellow
-                }
-            }
-        }
-    } elseif ($listed -contains 'nmap') {
-        Write-Host "[WARN] nmap not found, skipping nc/netcat shims" -ForegroundColor Yellow
-    }
-
-    Set-ScoopBootTitle -Text "scoop-boot [$($apps.Count + 3)/$titleTotal] post-install"
-    Write-Host ""
-    Write-Host ">>> Step 5: Registry imports..." -ForegroundColor White
-    Write-Host ""
-
-    $regFiles = @(
-        @{App='7zip'; File='install-context.reg'},
-        @{App='notepadplusplus'; File='install-context.reg'},
-        @{App='vscode'; File='install-context.reg'},
-        @{App='git'; File='install-context.reg'},
-        @{App='python314'; File='install-pep-514.reg'}
-    )
-
-    foreach ($item in $regFiles) {
-        if ($listed -notcontains $item.App) { continue }
-        $regPath = "$ScoopDir\apps\$($item.App)\current\$($item.File)"
-        if (Test-Path $regPath) {
-            Start-Process reg -ArgumentList "import `"$regPath`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
-            Write-Host "[OK] Imported: $($item.App)" -ForegroundColor Green
-        }
-    }
-
-    Write-Host ""
-    Write-Host ">>> Step 6: Starting system tray apps..." -ForegroundColor White
-    Write-Host ""
-
-    $toolboxPath = "$ScoopDir\apps\jetbrains-toolbox\current\jetbrains-toolbox.exe"
-    if ($listed -contains 'jetbrains-toolbox' -and (Test-Path $toolboxPath)) {
-        $toolboxRunning = Get-Process -Name "jetbrains-toolbox" -ErrorAction SilentlyContinue
-        if (-not $toolboxRunning) {
-            Start-Process -FilePath $toolboxPath -ErrorAction SilentlyContinue
-            Write-Host "[OK] Started: JetBrains Toolbox" -ForegroundColor Green
-        } else {
-            Write-Host "[OK] Already running: JetBrains Toolbox" -ForegroundColor Gray
-        }
-    }
-
-    $greenshotPath = "$ScoopDir\apps\greenshot\current\Greenshot.exe"
-    if ($listed -contains 'greenshot' -and (Test-Path $greenshotPath)) {
-        $greenshotRunning = Get-Process -Name "Greenshot" -ErrorAction SilentlyContinue
-        if (-not $greenshotRunning) {
-            Start-Process -FilePath $greenshotPath -ErrorAction SilentlyContinue
-            Write-Host "[OK] Started: Greenshot" -ForegroundColor Green
-        } else {
-            Write-Host "[OK] Already running: Greenshot" -ForegroundColor Gray
-        }
+        $failedApps += $handlerFailures
     }
 
     # ============================================================================
@@ -3021,7 +3495,7 @@ function Install-ScoopTools {
     Write-Host ">>> Step 7: Cleaning User scope (Scoop overrides, user.* files)..." -ForegroundColor White
     Write-Host ""
     Set-ScoopBootTitle -Text "scoop-boot [$titleTotal/$titleTotal] clean-user-scope"
-    $null = Invoke-CleanUserScope
+    $userScopeChanges = [int](@(Invoke-CleanUserScope) | Where-Object { $_ -is [int] } | Select-Object -Last 1)
 
     # The scoop wrapper (bin\scoop.ps1, scoop.cmd, scoop) is not part of the Quick
     # Setup download; without it every manual "scoop update" writes to the User
@@ -3039,6 +3513,7 @@ function Install-ScoopTools {
     } else {
         Write-Host "=== Installation Complete! ===" -ForegroundColor Green
     }
+    Write-Host "Packages: $($installedNow.Count) installed, $($alreadyInstalled.Count) already installed, $($failedApps.Count) failed; User scope: $userScopeChanges change(s)" -ForegroundColor Gray
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
@@ -3055,7 +3530,7 @@ function Install-ScoopTools {
         Write-Host "  - Linux development (wsl)" -ForegroundColor Gray
         Write-Host ""
     }
-    return $true
+    return (New-RunResult -Command 'user-install' -Ok ($failedApps.Count -eq 0) -Data @{ Installed = $installedNow; AlreadyInstalled = $alreadyInstalled; Failed = $failedApps; UserScopeChanges = $userScopeChanges })
 }
 
 function Show-PackageList {
@@ -3073,31 +3548,32 @@ function Show-PackageList {
         $packageFile = Get-PackageListFile
         if (-not $packageFile) {
             Write-Host "[ERROR] No package list under $global:PackagesDir. Run: $ScoopDir\bin\scoop-boot.ps1 --update" -ForegroundColor Red
-            return $false
+            return (New-RunResult -Command 'list-packages' -Ok $false)
         }
         $apps = @(Read-PackageList -Path $packageFile)
         Write-Host ""
         Write-Host "Package list: $packageFile" -ForegroundColor Cyan
         Write-Host "Bootstrap (always, Step 1): 7zip git aria2 sudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
-        Write-Host "Buckets added in Step 2: java versions" -ForegroundColor Gray
+        Write-Host "Buckets added in Step 2: java versions$(@(Read-PackageListBuckets -Path $packageFile | ForEach-Object { ' ' + $_.Name }) -join '')" -ForegroundColor Gray
         Write-Host ""
         $n = 0
         foreach ($app in $apps) {
             $n++
             $name = Get-ManifestAppName -Package $app
             $state = if (Test-Path "$ScoopDir\apps\$name\current") { 'installed' } else { 'missing' }
-            $handler = if ($PackageHandlers.ContainsKey($name)) { "  <- $($PackageHandlers[$name])" } else { '' }
+            $entry = Get-PackageHandler -Name $name
+            $handler = if ($entry) { "  <- $($entry.Description)" } else { '' }
             Write-Host ("{0,3}  {1,-22} {2,-10}{3}" -f $n, $app, $state, $handler)
         }
         Write-Host ""
-        foreach ($handlerApp in ($PackageHandlers.Keys | Sort-Object)) {
-            if ($BootstrapPackages -contains $handlerApp) { continue }
-            if (@($apps | ForEach-Object { Get-ManifestAppName -Package $_ }) -notcontains $handlerApp) {
-                Write-Host "[WARN] $handlerApp has a post-install step but is not in the list" -ForegroundColor Yellow
+        foreach ($entry in $PackageHandlers) {
+            if ($BootstrapPackages -contains $entry.Name) { continue }
+            if (@($apps | ForEach-Object { Get-ManifestAppName -Package $_ }) -notcontains $entry.Name) {
+                Write-Host "[WARN] $($entry.Name) has a post-install step but is not in the list" -ForegroundColor Yellow
             }
         }
         Write-Host "$($apps.Count) packages. To change the list on this machine, create $global:PackagesDir\$(Get-Hostname).txt (it replaces default.txt)." -ForegroundColor Gray
-        return $true
+        return (New-RunResult -Command 'list-packages' -Ok $true -Data @{ Packages = $apps.Count })
 }
 
 # ============================================================================
@@ -3146,7 +3622,7 @@ function Invoke-ScoopReset {
         $confirm = Read-Host
         if ($confirm -ne 'y' -and $confirm -ne 'Y') {
             Write-Host "Cancelled." -ForegroundColor Gray
-            return $true
+            return (New-RunResult -Command 'admin-reset' -Ok $true -Data @{ Cancelled = $true })
         }
     }
 
@@ -3703,5 +4179,5 @@ function Invoke-ScoopReset {
     Write-Host "  3. Normal shell: scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""
     Write-Host "Backup location: $BackupDir" -ForegroundColor Gray
-    return $true
+    return (New-RunResult -Command 'admin-reset' -Ok ($remainingDirs.Count -eq 0) -Data @{ Remaining = $remainingDirs; Backup = $BackupDir })
 }
