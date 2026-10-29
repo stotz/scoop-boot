@@ -5,8 +5,8 @@
 ---
 
 How scoop-boot manages environment variables: which files exist, in which order they
-are applied, what the syntax allows, where Scoop puts things under `C:\usr`, and how to
-keep a tool at a fixed version.
+are applied, what the syntax allows, where Scoop puts things under `C:\usr`, why the
+User scope is cleaned, and how to keep a tool at a fixed version.
 
 ## Files and load order
 
@@ -112,16 +112,36 @@ C:\usr\
   persist\<app>\             app data that survives updates (settings, profiles)
   shims\                     one small exe per command, pointing at apps\<app>\current
   global\                    global installs (scoop-boot does not use them)
-  bin\                       scoop-boot scripts and the scoop wrapper
+  bin\                       scoop-boot.ps1, scoop-boot.psm1 and the scoop wrapper (scoop.ps1, scoop.cmd, scoop)
   etc\environments\          the environment files and their backups
-  logs\scoopboot\            daily logs, ASR reports
+  etc\packages\              default.txt (delivered by --update) and <host>.txt (yours, replaces default.txt)
+  etc\exports\               package exports (--export), input for --import
+  etc\scoop-boot.conf        DIR= lines: the directories --admin-init creates
+  etc\allowed_signers        the release signing key (first --update, trust on first use)
+  etc\release.manifest(.sig) hashes and signature of the installed release
+  logs\scoopboot\            daily logs, platform reports
   backups\                   reset backups and previous script versions (--update)
 ```
 
 `apps`, `buckets`, `cache`, `persist`, `shims` and `global` belong to Scoop and are
-removed by the reset. The rest belongs to scoop-boot or to you. Anything else placed
-under `C:\usr` (a database server, a GIS distribution, a workspace) is left alone by
-every script; its PATH entries and variables are yours to maintain.
+removed by the reset. The rest belongs to scoop-boot or to you; `--update` replaces
+only `bin\*` and `etc\packages\default.txt`. Anything else placed under `C:\usr` (a
+database server, a GIS distribution, a workspace) is left alone by every command; its
+PATH entries and variables are yours to maintain.
+
+## The User scope
+
+Scoop writes `JAVA_HOME`, `GRADLE_USER_HOME`, PATH entries and whatever a manifest's
+`env_set` names into the User scope on every install, update and reset, and Windows
+resolves User before Machine. `scoop install temurin11-jdk` therefore makes JDK 11 the
+default in every new shell although the `system.*` file says 25. `--clean-user-scope`
+removes those entries (User PATH entries inside Scoop's directories, User variables
+whose name a `system.*` file sets) and applies the `user.*` files; the scoop wrapper in
+`bin\` runs it after every state-changing Scoop command, `--user-install` once at the
+end. What you want at User scope goes into `user.<host>.<user>.env`, not into the
+Windows dialog: the cleanup leaves a User variable alone when no `system.*` file sets
+that name (User PATH entries inside Scoop's directories go regardless), but a User
+`JAVA_HOME` set by hand is removed like Scoop's, and the Machine value applies again.
 
 ## Fixed versions
 

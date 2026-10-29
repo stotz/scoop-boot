@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.21.0
+    Version: 1.22.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.21.0"
+$global:ScriptVersion = "1.22.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -182,7 +182,7 @@ function Initialize-ScoopBootLog {
         Microsoft.PowerShell.Utility\Write-Host "$ScriptName $Version (sha256 $hash) | $logNote" -ForegroundColor DarkCyan
     }
 
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $isAdmin = Test-AdminRights
     $os = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Version } catch { [Environment]::OSVersion.Version.ToString() }
     Write-ScoopBootLogLine -Level 'INFO' -Text "=== session start: $label $Version (sha256 $hash) ==="
     Write-ScoopBootLogLine -Level 'INFO' -Text "host=$env:COMPUTERNAME user=$env:USERDOMAIN\$env:USERNAME admin=$isAdmin windows=$os powershell=$($PSVersionTable.PSVersion) script=$ScriptPath args=[$($Arguments -join ' ')]"
@@ -303,8 +303,12 @@ function Write-DryRun {
 # ============================================================================
 
 function Test-AdminRights {
-    $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-    return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    # No Windows principal outside Windows (the self-tests run on Linux too)
+    if (-not (Test-Path variable:IsWindows) -or $IsWindows) {
+        $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    return $false
 }
 
 function Get-Hostname {
@@ -420,7 +424,10 @@ function Set-EnvValue {
         }
         return
     }
-    [Environment]::SetEnvironmentVariable($Name, $Value, $Scope)
+    # A PowerShell $null reaches .NET as an empty string on pwsh 7.6, which leaves the
+    # variable in place (empty) instead of removing it; NullString is a real null
+    $raw = if ($null -eq $Value) { [NullString]::Value } else { [string]$Value }
+    [Environment]::SetEnvironmentVariable($Name, $raw, $Scope)
 }
 
 function Get-EnvDryRunDiff {
@@ -591,7 +598,7 @@ function Show-Help {
     Write-Host "SETUP (Administrator shell unless noted; run in this order):" -ForegroundColor Yellow
     Write-Host "  --admin-init         1: directories, --update, environment files from the templates, opens the system file"
     Write-Host "  --admin-setenv       2: apply the environment files at Machine scope (Phase 1)"
-    Write-Host "      --dry-run          show the changes without applying them (no Administrator needed)"
+    Write-Host "      --dry-run          show the net effect without applying anything (no Administrator needed)"
     Write-Host "  --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)"
     Write-Host "      --force            no question when the shell is elevated (account with elevated shells only)"
     Write-Host "  --admin-reset        Remove Scoop again: apps, variables, PATH entries, registry; bin, etc and logs stay"
@@ -599,7 +606,7 @@ function Show-Help {
     Write-Host "      --keep-persist     keep $global:BaseDir\persist (app data, settings)"
     Write-Host ""
     Write-Host "MAINTENANCE:" -ForegroundColor Yellow
-    Write-Host "  --update             Download the current scripts, scoop wrapper and etc\packages\default.txt from GitHub"
+    Write-Host "  --update             Install the current signed release: scripts, scoop wrapper, etc\packages\default.txt"
     Write-Host "      --branch=NAME      download from this branch and remember it; --branch=main switches back"
     Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply the user.* files (no admin)"
     Write-Host "      --quiet            print only a summary when something changed"
@@ -616,7 +623,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "OTHER:" -ForegroundColor Yellow
     Write-Host "  --bootstrap          Install Scoop and the bootstrap packages only (part of --user-install)"
-    Write-Host "  --self-test          Run the self-tests (parser, expansion, package list, help)"
+    Write-Host "  --self-test          Run the self-tests (parser, expansion, package list, import, export, dry run, help, static check)"
     Write-Host "  --version, -v        Show version"
     Write-Host "  --help, -h           Show this help message"
     Write-Host ""
@@ -1754,6 +1761,75 @@ function Invoke-EnvStatus {
 # SELF-TEST FUNCTION
 # ============================================================================
 
+function Get-UnassignedVariableReads {
+    <#
+    .SYNOPSIS
+        Static check: variables a function reads but never assigns (parameters, foreach
+        variables, -OutVariable and the like count as assignments). Self-test 48.
+    .DESCRIPTION
+        Walks the AST of a script or module. For every function the set of assigned
+        names is collected (its own parameters and assignments plus, for a nested
+        function, those of the enclosing function, which it sees through dynamic
+        scoping). A read of a local name outside that set is reported, except for the
+        automatic variables. Globals, script-scope and drive-qualified names ($env:) are
+        not checked. One line per function and name; empty output means clean.
+    #>
+    param([string]$Path)
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors) { throw "parse error in $Path`: $($errors[0].Message)" }
+    $automatic = @('_', 'PSItem', 'null', 'true', 'false', 'args', 'input', 'this', 'PSBoundParameters', 'PSScriptRoot', 'PSCommandPath',
+        'MyInvocation', 'Error', 'PID', 'HOME', 'PWD', 'Host', 'PSVersionTable', 'ExecutionContext', 'LASTEXITCODE', 'Matches',
+        'IsWindows', 'IsLinux', 'IsMacOS', 'PSCulture', 'PSEdition', 'ErrorActionPreference', 'WarningPreference', 'VerbosePreference',
+        'ProgressPreference', 'InformationPreference', 'ConfirmPreference', 'foreach', 'switch', 'StackTrace', 'OutputEncoding',
+        'PROFILE', 'ShellId', 'PSDefaultParameterValues')
+    $fileName = Split-Path -Leaf $Path
+    $assignedOf = @{}
+    $functions = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+    foreach ($f in $functions) {
+        $assigned = @{}
+        $paramLists = @($f.Parameters)
+        if ($f.Body.ParamBlock) { $paramLists += @($f.Body.ParamBlock.Parameters) }
+        foreach ($p in $paramLists) { if ($p) { $assigned[$p.Name.VariablePath.UserPath] = $true } }
+        foreach ($a in $f.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            foreach ($v in $a.Left.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) { $assigned[$v.VariablePath.UserPath] = $true }
+        }
+        foreach ($fe in $f.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) { $assigned[$fe.Variable.VariablePath.UserPath] = $true }
+        foreach ($pb in $f.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.ParamBlockAst] }, $true)) {
+            foreach ($p in $pb.Parameters) { $assigned[$p.Name.VariablePath.UserPath] = $true }
+        }
+        foreach ($nf in $f.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+            foreach ($p in @($nf.Parameters)) { if ($p) { $assigned[$p.Name.VariablePath.UserPath] = $true } }
+        }
+        foreach ($cp in $f.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandParameterAst] }, $true)) {
+            if ($cp.ParameterName -in @('PipelineVariable', 'OutVariable', 'ErrorVariable', 'WarningVariable', 'pv', 'ov', 'ev') -and $cp.Argument) { $assigned[$cp.Argument.Value] = $true }
+        }
+        $assignedOf[$f] = $assigned
+    }
+    $result = @()
+    foreach ($f in $functions) {
+        $assigned = $assignedOf[$f]
+        # A nested function sees the variables of the function that defines it
+        $outer = $f.Parent
+        while ($outer) {
+            if ($outer -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $assignedOf.ContainsKey($outer)) {
+                foreach ($k in $assignedOf[$outer].Keys) { $assigned[$k] = $true }
+            }
+            $outer = $outer.Parent
+        }
+        $seen = @{}
+        foreach ($r in $f.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+            $vp = $r.VariablePath
+            if ($vp.IsGlobal -or $vp.IsScript -or $vp.DriveName) { continue }
+            $name = $vp.UserPath
+            if ($automatic -contains $name -or $assigned.ContainsKey($name) -or $seen.ContainsKey($name)) { continue }
+            $seen[$name] = $true
+            $result += [pscustomobject]@{ File = $fileName; Function = $f.Name; Variable = $name; Line = $r.Extent.StartLineNumber }
+        }
+    }
+    return $result
+}
+
 function Test-ScoopBoot {
     Write-Section "Self-Test"
 
@@ -1921,7 +1997,7 @@ function Test-ScoopBoot {
         [Environment]::SetEnvironmentVariable("TEST_VAR_TEMP", "TestValue", "Process")
         $expanded = Expand-EnvironmentVariables -Value "`$TEST_VAR_TEMP\path"
         $test.Result = $expanded -eq "TestValue\path"
-        [Environment]::SetEnvironmentVariable("TEST_VAR_TEMP", $null, "Process")
+        [Environment]::SetEnvironmentVariable("TEST_VAR_TEMP", [NullString]::Value, "Process")
     } catch {}
     $tests += $test
 
@@ -2015,10 +2091,10 @@ JAVA_HOME=C:\java
     try {
         [Environment]::SetEnvironmentVariable("TEST_PATH_VAR", "C:\existing", "Process")
         $ops = @(@{Type = "ListPrepend"; Name = "TEST_PATH_VAR"; Value = "C:\new"})
-        Apply-EnvironmentOperations -Operations $ops -Scope "Process" -SourceFile "test.env" -DryRun $false
+        $null = Apply-EnvironmentOperations -Operations $ops -Scope "Process" -SourceFile "test.env" -DryRun $false
         $result = [Environment]::GetEnvironmentVariable("TEST_PATH_VAR", "Process")
         $test.Result = $result -eq "C:\new;C:\existing"
-        [Environment]::SetEnvironmentVariable("TEST_PATH_VAR", $null, "Process")
+        [Environment]::SetEnvironmentVariable("TEST_PATH_VAR", [NullString]::Value, "Process")
     } catch {}
     $tests += $test
 
@@ -2057,7 +2133,7 @@ JAVA_HOME=C:\java
     # Test 31: package list parsing (comments, blanks, bucket/name, order)
     $test = @{Name = "Read-PackageList: comments, blanks, bucket/name, order kept"; Result = $false}
     try {
-        $listFile = Join-Path $env:TEMP "scoop-boot-selftest-packages.txt"
+        $listFile = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-selftest-packages.txt"
         @('# header', '', 'vcredist2022', 'java/temurin25-jdk   # jdk', '  nmap  ', '# trailing') | Set-Content -Path $listFile -Encoding ASCII
         $parsed = @(Read-PackageList -Path $listFile)
         $test.Result = ($parsed.Count -eq 3) -and ($parsed[0] -eq 'vcredist2022') -and ($parsed[1] -eq 'java/temurin25-jdk') -and ($parsed[2] -eq 'nmap')
@@ -2068,7 +2144,7 @@ JAVA_HOME=C:\java
     # Test 32: package list rejects malformed lines, empty file gives empty array
     $test = @{Name = "Read-PackageList: malformed line ignored, empty file is empty"; Result = $false}
     try {
-        $listFile = Join-Path $env:TEMP "scoop-boot-selftest-packages.txt"
+        $listFile = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-selftest-packages.txt"
         @('good-name', 'bad name with spaces', 'also/bad/name') | Set-Content -Path $listFile -Encoding ASCII
         $parsed = @(Read-PackageList -Path $listFile -Silent)
         $ok1 = ($parsed.Count -eq 1) -and ($parsed[0] -eq 'good-name')
@@ -2117,7 +2193,7 @@ JAVA_HOME=C:\java
         [Environment]::SetEnvironmentVariable("T_SELF", "old", "Process")
         Register-EnvFileDefinitions -Operations @(Parse-EnvironmentLine -Line 'T_SELF=$T_SELF;new')
         $test.Result = (Expand-EnvironmentVariables -Value '$T_SELF') -eq 'old;new'
-        [Environment]::SetEnvironmentVariable("T_SELF", $null, "Process")
+        [Environment]::SetEnvironmentVariable("T_SELF", [NullString]::Value, "Process")
         $global:EnvFileDefinitions = $savedDefs
     } catch { $global:EnvFileDefinitions = $savedDefs }
     $tests += $test
@@ -2313,7 +2389,7 @@ JAVA_HOME=C:\java
             ($list.Kind -eq 'changed') -and ($list.Added -join ',') -eq 'C:\d' -and ($list.Removed -join ',') -eq 'C:\b' -and $list.OrderChanged
     } catch {} finally {
         $global:EnvDryRunState = $null
-        foreach ($n in 'SB_T_LIST', 'SB_T_SAME', 'SB_T_GONE', 'SB_T_NEW') { [Environment]::SetEnvironmentVariable($n, $null, 'Process') }
+        foreach ($n in 'SB_T_LIST', 'SB_T_SAME', 'SB_T_GONE', 'SB_T_NEW') { [Environment]::SetEnvironmentVariable($n, [NullString]::Value, 'Process') }
     }
     $tests += $test
 
@@ -2348,6 +2424,19 @@ JAVA_HOME=C:\java
         $global:BaseDir = $savedBase
         if ($tempRoot) { Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
+    $tests += $test
+
+    # Test 48: no function reads a variable it never assigns (the static side of strict
+    # mode; Install and Reset run under version 1, where such a read is an error)
+    $test = @{Name = "Static: no function reads a variable it never assigns"; Result = $false}
+    try {
+        $reads = @()
+        foreach ($file in @('scoop-boot.ps1', 'scoop-boot.psm1')) {
+            $reads += @(Get-UnassignedVariableReads -Path (Join-Path $global:ScriptRoot $file))
+        }
+        foreach ($r in $reads) { Write-Warning "$($r.File):$($r.Line) $($r.Function) reads `$$($r.Variable) without assigning it" }
+        $test.Result = ($reads.Count -eq 0)
+    } catch {}
     $tests += $test
 
     # Display results
@@ -2775,7 +2864,7 @@ function Invoke-GccHandler {
 function Invoke-NcatShimHandler {
     # netcat aliases: the netcat package is blocked by Windows Defender (PUA), so nc and
     # netcat point to ncat from nmap. "scoop shim add" re-adds shims to the User PATH,
-    # which Step 7 cleans up again; that is why handlers run before Step 7.
+    # which Step 5 cleans up again; that is why handlers run before Step 5.
     param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
     $ncat = "$ScoopDir\apps\nmap\current\ncat.exe"
     if (-not (Test-Path $ncat)) {
@@ -2908,13 +2997,10 @@ function Set-DevelopmentEnvironment {
     .SYNOPSIS
         Phase 1 (Administrator): TMP/TEMP, environment files at Machine scope. Called by --admin-setenv.
     #>
-    # Formerly scoop-complete-install.ps1, written for the shell defaults: this
-    # function and everything it calls run without strict mode and with Continue
-    Set-StrictMode -Off
+    # Strict mode version 1 (undefined variables), see Install-ScoopTools
+    Set-StrictMode -Version 1
     $ErrorActionPreference = 'Continue'
     $ScoopDir = $global:BaseDir
-    $BootstrapPackages = $global:BootstrapPackages
-    $PackageHandlers = $global:PackageHandlers
     Write-Host ""
     Write-Host "=== Phase 1: Environment Setup (Administrator) ===" -ForegroundColor Cyan
     Write-Host ""
@@ -3116,9 +3202,11 @@ function Install-ScoopTools {
     param(
         [bool]$Force = $false
     )
-    # Formerly scoop-complete-install.ps1, written for the shell defaults: this
-    # function and everything it calls run without strict mode and with Continue
-    Set-StrictMode -Off
+    # Strict mode version 1 (undefined variables) for this function and everything it
+    # calls; version 2 and up would also refuse .Count on a single object and a missing
+    # property on Scoop's JSON, which this code relies on. Continue: a failing Scoop
+    # command or installer is this package's failure, not the end of the run.
+    Set-StrictMode -Version 1
     $ErrorActionPreference = 'Continue'
     $ScoopDir = $global:BaseDir
     $BootstrapPackages = $global:BootstrapPackages
@@ -3189,7 +3277,7 @@ function Install-ScoopTools {
     Write-Host ""
     Write-Host ">>> Step 1: Bootstrap Scoop..." -ForegroundColor White
     # Use the real Scoop shim during Phase 2; the wrapper in bin\ would run the
-    # user-scope cleanup after every single package instead of once in Step 7.
+    # user-scope cleanup after every single package instead of once in Step 5.
     # SCOOP_BOOT_CALLER tells --bootstrap to skip its manual "Next steps" guide.
     $env:SCOOP_BOOT_WRAPPER = 'off'
     $env:SCOOP_BOOT_CALLER = 'install'
@@ -3359,6 +3447,7 @@ function Install-ScoopTools {
     $failedApps = @()
     $installedNow = @()
     $alreadyInstalled = @()
+    $skippedApps = @()
     $userScopeChanges = 0
     $additionalBuckets = @(@{ Name = 'java'; Url = '' }, @{ Name = 'versions'; Url = '' })
     $listFileForBuckets = Get-PackageListFile
@@ -3420,6 +3509,7 @@ function Install-ScoopTools {
     $vcRuntime = Get-ItemProperty $global:VcRuntimeKey -ErrorAction SilentlyContinue
     if ($vcRuntime -and $vcRuntime.Installed -eq 1 -and $requestedNames -contains 'vcredist2022') {
         Write-Host "[OK] VC++ runtime already present ($($vcRuntime.Version)), skipping vcredist2022" -ForegroundColor Gray
+        $skippedApps += @($apps | Where-Object { (Get-ManifestAppName -Package $_) -eq 'vcredist2022' })
         $apps = @($apps | Where-Object { (Get-ManifestAppName -Package $_) -ne 'vcredist2022' })
     }
 
@@ -3486,13 +3576,13 @@ function Install-ScoopTools {
     }
 
     # ============================================================================
-    # STEP 7: CLEAN USER SCOPE
+    # STEP 5: CLEAN USER SCOPE
     # Scoop wrote JAVA_HOME, GRADLE_USER_HOME, ... and PATH entries into the User
     # scope during Step 3; User values override the Machine values from the .env
     # file. scoop-boot.ps1 --clean-user-scope removes them and applies user.* files.
     # ============================================================================
     Write-Host ""
-    Write-Host ">>> Step 7: Cleaning User scope (Scoop overrides, user.* files)..." -ForegroundColor White
+    Write-Host ">>> Step 5: Cleaning User scope (Scoop overrides, user.* files)..." -ForegroundColor White
     Write-Host ""
     Set-ScoopBootTitle -Text "scoop-boot [$titleTotal/$titleTotal] clean-user-scope"
     $userScopeChanges = [int](@(Invoke-CleanUserScope) | Where-Object { $_ -is [int] } | Select-Object -Last 1)
@@ -3513,7 +3603,7 @@ function Install-ScoopTools {
     } else {
         Write-Host "=== Installation Complete! ===" -ForegroundColor Green
     }
-    Write-Host "Packages: $($installedNow.Count) installed, $($alreadyInstalled.Count) already installed, $($failedApps.Count) failed; User scope: $userScopeChanges change(s)" -ForegroundColor Gray
+    Write-Host "Packages: $($installedNow.Count) installed, $($alreadyInstalled.Count) already installed, $($skippedApps.Count) skipped, $($failedApps.Count) failed; User scope: $userScopeChanges change(s)" -ForegroundColor Gray
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
@@ -3530,7 +3620,7 @@ function Install-ScoopTools {
         Write-Host "  - Linux development (wsl)" -ForegroundColor Gray
         Write-Host ""
     }
-    return (New-RunResult -Command 'user-install' -Ok ($failedApps.Count -eq 0) -Data @{ Installed = $installedNow; AlreadyInstalled = $alreadyInstalled; Failed = $failedApps; UserScopeChanges = $userScopeChanges })
+    return (New-RunResult -Command 'user-install' -Ok ($failedApps.Count -eq 0) -Data @{ Installed = $installedNow; AlreadyInstalled = $alreadyInstalled; Skipped = $skippedApps; Failed = $failedApps; UserScopeChanges = $userScopeChanges })
 }
 
 function Show-PackageList {
@@ -3538,42 +3628,37 @@ function Show-PackageList {
     .SYNOPSIS
         Shows the package list this machine would install, and the handlers, without installing. Called by --list-packages.
     #>
-    # Formerly scoop-complete-install.ps1, written for the shell defaults: this
-    # function and everything it calls run without strict mode and with Continue
-    Set-StrictMode -Off
-    $ErrorActionPreference = 'Continue'
     $ScoopDir = $global:BaseDir
-    $BootstrapPackages = $global:BootstrapPackages
-    $PackageHandlers = $global:PackageHandlers
-        $packageFile = Get-PackageListFile
-        if (-not $packageFile) {
-            Write-Host "[ERROR] No package list under $global:PackagesDir. Run: $ScoopDir\bin\scoop-boot.ps1 --update" -ForegroundColor Red
-            return (New-RunResult -Command 'list-packages' -Ok $false)
+    $packageFile = Get-PackageListFile
+    if (-not $packageFile) {
+        Write-Host "[ERROR] No package list under $global:PackagesDir. Run: $ScoopDir\bin\scoop-boot.ps1 --update" -ForegroundColor Red
+        return (New-RunResult -Command 'list-packages' -Ok $false)
+    }
+    $apps = @(Read-PackageList -Path $packageFile)
+    Write-Host ""
+    Write-Host "Package list: $packageFile" -ForegroundColor Cyan
+    Write-Host "Bootstrap (always, Step 1): 7zip git aria2 sudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
+    Write-Host "Buckets added in Step 2: java versions$(@(Read-PackageListBuckets -Path $packageFile | ForEach-Object { ' ' + $_.Name }) -join '')" -ForegroundColor Gray
+    Write-Host ""
+    $n = 0
+    foreach ($app in $apps) {
+        $n++
+        $name = Get-ManifestAppName -Package $app
+        $state = if (Test-Path "$ScoopDir\apps\$name\current") { 'installed' } else { 'missing' }
+        $entry = Get-PackageHandler -Name $name
+        $handler = if ($entry) { "  <- $($entry.Description)" } else { '' }
+        Write-Host ("{0,3}  {1,-22} {2,-10}{3}" -f $n, $app, $state, $handler)
+    }
+    Write-Host ""
+    $listedNames = @($apps | ForEach-Object { Get-ManifestAppName -Package $_ })
+    foreach ($entry in $global:PackageHandlers) {
+        if ($global:BootstrapPackages -contains $entry.Name) { continue }
+        if ($listedNames -notcontains $entry.Name) {
+            Write-Host "[WARN] $($entry.Name) has a post-install step but is not in the list" -ForegroundColor Yellow
         }
-        $apps = @(Read-PackageList -Path $packageFile)
-        Write-Host ""
-        Write-Host "Package list: $packageFile" -ForegroundColor Cyan
-        Write-Host "Bootstrap (always, Step 1): 7zip git aria2 sudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
-        Write-Host "Buckets added in Step 2: java versions$(@(Read-PackageListBuckets -Path $packageFile | ForEach-Object { ' ' + $_.Name }) -join '')" -ForegroundColor Gray
-        Write-Host ""
-        $n = 0
-        foreach ($app in $apps) {
-            $n++
-            $name = Get-ManifestAppName -Package $app
-            $state = if (Test-Path "$ScoopDir\apps\$name\current") { 'installed' } else { 'missing' }
-            $entry = Get-PackageHandler -Name $name
-            $handler = if ($entry) { "  <- $($entry.Description)" } else { '' }
-            Write-Host ("{0,3}  {1,-22} {2,-10}{3}" -f $n, $app, $state, $handler)
-        }
-        Write-Host ""
-        foreach ($entry in $PackageHandlers) {
-            if ($BootstrapPackages -contains $entry.Name) { continue }
-            if (@($apps | ForEach-Object { Get-ManifestAppName -Package $_ }) -notcontains $entry.Name) {
-                Write-Host "[WARN] $($entry.Name) has a post-install step but is not in the list" -ForegroundColor Yellow
-            }
-        }
-        Write-Host "$($apps.Count) packages. To change the list on this machine, create $global:PackagesDir\$(Get-Hostname).txt (it replaces default.txt)." -ForegroundColor Gray
-        return (New-RunResult -Command 'list-packages' -Ok $true -Data @{ Packages = $apps.Count })
+    }
+    Write-Host "$($apps.Count) packages. To change the list on this machine, create $global:PackagesDir\$(Get-Hostname).txt (it replaces default.txt)." -ForegroundColor Gray
+    return (New-RunResult -Command 'list-packages' -Ok $true -Data @{ Packages = $apps.Count })
 }
 
 # ============================================================================
@@ -3581,6 +3666,24 @@ function Show-PackageList {
 # ============================================================================
 
 if (-not (Test-Path variable:global:ScoopBootExplorerStopped)) { $global:ScoopBootExplorerStopped = $false }
+
+function Get-ScoopHostedAncestor {
+    <#
+    .SYNOPSIS
+        The nearest ancestor of this process whose image lives in a Scoop directory (a
+        Windows Terminal, a mintty), or $null. The reset refuses to run inside one.
+    #>
+    $processId = $PID
+    for ($depth = 0; $depth -lt 8; $depth++) {
+        $process = $null
+        try { $process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop } catch { }
+        if (-not $process) { return $null }
+        if ($depth -gt 0 -and $process.ExecutablePath -and (Test-ScoopOwnedPath $process.ExecutablePath)) { return $process }
+        if (-not $process.ParentProcessId -or $process.ParentProcessId -eq $processId) { return $null }
+        $processId = $process.ParentProcessId
+    }
+    return $null
+}
 
 function Invoke-ScoopReset {
     <#
@@ -3591,9 +3694,9 @@ function Invoke-ScoopReset {
         [switch]$Force,
         [switch]$KeepPersist
     )
-    # Formerly scoop-complete-reset.ps1, written for the shell defaults: this
-    # function and everything it calls run without strict mode and with Continue
-    Set-StrictMode -Off
+    # Strict mode version 1 (undefined variables), see Install-ScoopTools. Continue:
+    # a directory that cannot be deleted is reported, the rest is still cleaned up.
+    Set-StrictMode -Version 1
     $ErrorActionPreference = 'Continue'
     $ScoopDir = $global:BaseDir
     $BackupRoot = "$ScoopDir\backups"
@@ -3616,6 +3719,18 @@ function Invoke-ScoopReset {
     }
     Write-Host "  - Scoop itself" -ForegroundColor White
     Write-Host ""
+
+    # The shell running this reset must not live in a Scoop directory: a Windows
+    # Terminal or a Git Bash (mintty) from apps\ is stopped with the other Scoop
+    # processes, its console goes with it, and Windows ends this PowerShell
+    # halfway through. Walk the parent chain before anything is touched.
+    $hostProcess = Get-ScoopHostedAncestor
+    if ($hostProcess) {
+        Write-Host "[ERROR] This shell runs inside $($hostProcess.Name) (PID $($hostProcess.ProcessId)) from $($hostProcess.ExecutablePath)" -ForegroundColor Red
+        Write-Host "        The reset stops every process in Scoop's directories, that window included, and would end with it." -ForegroundColor Red
+        Write-Host "        Start PowerShell from the Start menu (Run as Administrator) and run the reset there." -ForegroundColor Yellow
+        return (New-RunResult -Command 'admin-reset' -Ok $false -Data @{ HostedBy = $hostProcess.ExecutablePath })
+    }
 
     if (-not $Force) {
         Write-Host "Continue? [y/N]: " -ForegroundColor Yellow -NoNewline
@@ -3828,8 +3943,14 @@ function Invoke-ScoopReset {
     }
 
     # Method 2: Use handle64.exe for COMPLETE detection (finds ALL processes with open handles)
+    # Every directory the reset deletes is scanned: apps\, and persist\ unless it is
+    # kept. JetBrains Toolbox installs its IDEs under persist\jetbrains-toolbox\apps,
+    # so Rider and PyCharm run from persist\ and held it on 29.10.
+    $scanDirs = @("$ScoopDir\apps", "$ScoopDir\shims", "$ScoopDir\global")
+    if (-not $KeepPersist) { $scanDirs += "$ScoopDir\persist" }
+    $scanDirs = @($scanDirs | Where-Object { Test-Path $_ })
     Write-Host ""
-    Write-Host "[INFO] Scanning for ALL processes with open handles to Scoop..." -ForegroundColor Gray
+    Write-Host "[INFO] Scanning for ALL processes with open handles to Scoop's directories ($(($scanDirs | ForEach-Object { Split-Path -Leaf $_ }) -join ', '))..." -ForegroundColor Gray
     Set-ScoopBootTitle -Text "scoop-boot reset processes"
     # A run that removed the junctions but could not delete apps\ leaves
     # sysinternals\current gone; the versioned directory still has handle64.exe
@@ -3839,33 +3960,49 @@ function Invoke-ScoopReset {
         if ($found) { $handle64Path = $found.FullName }
     }
     $usedHandle = $false
+    # Processes that are not Scoop's but hold its directories (a cmd whose working
+    # directory is under apps\, an IDE with a file open): spared, named at the end
+    $nonScoopHolders = @()
 
     if (Test-Path $handle64Path) {
         Write-Host "  [INFO] Using handle64.exe for comprehensive scan..." -ForegroundColor DarkGray
-        try {
-            # Get all processes with handles to C:\usr\apps
-            $handleOutput = & $handle64Path -accepteula -nobanner "$ScoopDir\apps" 2>&1 | Out-String
+        # Scan, stop, wait, scan again: the renderer children of a browser die with
+        # their parent (stopping them by PID then fails although they are gone), and
+        # a crash helper or a restarted app can take new handles after the first
+        # pass. Up to three passes; the deletion below reports whatever still holds.
+        $maxPasses = 3
+        for ($pass = 1; $pass -le $maxPasses; $pass++) {
+            try {
+                # Get all processes with handles into the directories to be deleted
+                $handleOutput = ''
+                foreach ($scanDir in $scanDirs) {
+                    $handleOutput += (& $handle64Path -accepteula -nobanner $scanDir 2>&1 | Out-String) + "`n"
+                }
 
-            # Parse output for process names and PIDs
-            $processesToKill = @{}
-            foreach ($line in ($handleOutput -split "`n")) {
-                # Format: "processname.exe pid: 12345 HOSTNAME\User"
-                if ($line -match '^\s*(\S+\.exe)\s+pid:\s+(\d+)') {
-                    $exeName = $Matches[1]
-                    $processId = [int]$Matches[2]
-                    if (-not $processesToKill.ContainsKey($processId)) {
-                        $processesToKill[$processId] = $exeName
+                # Parse output for process names and PIDs
+                $processesToKill = @{}
+                foreach ($line in ($handleOutput -split "`n")) {
+                    # Format: "processname.exe pid: 12345 HOSTNAME\User"
+                    if ($line -match '^\s*(\S+\.exe)\s+pid:\s+(\d+)') {
+                        $exeName = $Matches[1]
+                        $processId = [int]$Matches[2]
+                        if (-not $processesToKill.ContainsKey($processId)) {
+                            $processesToKill[$processId] = $exeName
+                        }
                     }
                 }
-            }
 
-            if ($processesToKill.Count -gt 0) {
+                if ($processesToKill.Count -eq 0) {
+                    if ($pass -eq 1) { Write-Host "  [OK] No processes found by handle64" -ForegroundColor Green }
+                    else { Write-Host "  [OK] Pass $pass`: nothing holds Scoop's directories any more" -ForegroundColor Green }
+                    break
+                }
+
                 # Only processes that belong to Scoop (image under $ScoopDir) are terminated.
                 # explorer.exe is the exception: shell extensions (7-Zip, TortoiseSVN, ...) load
                 # DLLs from $ScoopDir into it, so it must go, and it is restarted after the
                 # directories are gone. Anything else (Teams, Outlook, Edge with a file dialog
                 # open) keeps running; if it blocks the deletion, that is reported below.
-                Write-Host "  [FOUND] $($processesToKill.Count) processes with open handles:" -ForegroundColor Yellow
                 # Image paths: WMI first (it also answers for the sandboxed renderer
                 # processes of Chrome and Firefox, whose restricted tokens make
                 # Get-Process fail even for an administrator), then Get-Process. A
@@ -3880,41 +4017,60 @@ function Invoke-ScoopReset {
                     $imagePaths[$processId] = $imagePath
                 }
                 $scoopExeNames = @($processesToKill.Keys | Where-Object { $imagePaths[$_] -and ($imagePaths[$_] -like "$ScoopDir\*") } | ForEach-Object { $processesToKill[$_].ToLower() } | Sort-Object -Unique)
+                $toStop = @()
+                $others = @()
+                $nonScoopHolders = @()
                 foreach ($processId in $processesToKill.Keys) {
-                    $exeName = $processesToKill[$processId]
                     if ($processId -eq $PID) { continue }
-
+                    $exeName = $processesToKill[$processId]
                     $imagePath = $imagePaths[$processId]
                     $isScoopApp = ($imagePath -and ($imagePath -like "$ScoopDir\*")) -or ((-not $imagePath) -and ($scoopExeNames -contains $exeName.ToLower()))
                     $isExplorer = $exeName -ieq 'explorer.exe'
+                    if ($isExplorer -or $isScoopApp) { $toStop += @{ Id = $processId; Exe = $exeName; Path = $imagePath; Explorer = $isExplorer } }
+                    else { $others += @{ Id = $processId; Exe = $exeName; Path = $imagePath } }
+                }
+                $nonScoopHolders = $others
 
-                    if ($isExplorer) {
-                        Write-Host "    - $exeName (PID: $processId): Windows shell, holds Scoop shell extensions; restarted after cleanup" -ForegroundColor Yellow
-                    } elseif ($isScoopApp) {
-                        Write-Host "    - $exeName (PID: $processId): Scoop application$(if (-not $imagePath) { ' (path not readable, same name as one)' })" -ForegroundColor Yellow
-                    } else {
+                if ($pass -eq 1) {
+                    Write-Host "  [FOUND] $($processesToKill.Count) processes with open handles:" -ForegroundColor Yellow
+                    foreach ($o in $others) {
                         # The path tells which program to close by hand when the deletion
                         # below fails (a browser with a download dialog, an IDE, Teams)
-                        $where = if ($imagePath) { $imagePath } else { 'path not readable' }
-                        Write-Host "    - $exeName (PID: $processId): not a Scoop application, left running ($where)" -ForegroundColor DarkGray
-                        continue
+                        $where = if ($o.Path) { $o.Path } else { 'path not readable' }
+                        Write-Host "    - $($o.Exe) (PID: $($o.Id)): not a Scoop application, left running ($where)" -ForegroundColor DarkGray
                     }
+                } elseif ($toStop.Count -eq 0) {
+                    Write-Host "  [OK] Pass $pass`: only non-Scoop processes still hold Scoop's directories ($($others.Count), left running)" -ForegroundColor Green
+                    break
+                } else {
+                    Write-Host "  [INFO] Pass $pass`: $($toStop.Count) Scoop process(es) still hold Scoop's directories (children of stopped browsers, restarted apps):" -ForegroundColor Yellow
+                }
 
+                foreach ($p in $toStop) {
+                    if ($p.Explorer) {
+                        Write-Host "    - $($p.Exe) (PID: $($p.Id)): Windows shell, holds Scoop shell extensions; restarted after cleanup" -ForegroundColor Yellow
+                    } else {
+                        Write-Host "    - $($p.Exe) (PID: $($p.Id)): Scoop application$(if (-not $p.Path) { ' (path not readable, same name as one)' })" -ForegroundColor Yellow
+                    }
                     try {
-                        Stop-Process -Id $processId -Force -ErrorAction Stop
-                        Write-Host "      [OK] Stopped PID $processId" -ForegroundColor Green
-                        if ($isExplorer) { $global:ScoopBootExplorerStopped = $true }
+                        Stop-Process -Id $p.Id -Force -ErrorAction Stop
+                        Write-Host "      [OK] Stopped PID $($p.Id)" -ForegroundColor Green
+                        if ($p.Explorer) { $global:ScoopBootExplorerStopped = $true }
                     } catch {
-                        Write-Host "      [FAIL] Could not stop PID $processId" -ForegroundColor Red
+                        # A renderer dies with its browser before its own turn comes
+                        if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) {
+                            Write-Host "      [FAIL] Could not stop PID $($p.Id): $($_.Exception.Message)" -ForegroundColor Red
+                        } else {
+                            Write-Host "      [OK] Already gone (PID $($p.Id))" -ForegroundColor Gray
+                        }
                     }
                 }
                 Start-Sleep -Seconds 2
                 $usedHandle = $true
-            } else {
-                Write-Host "  [OK] No processes found by handle64" -ForegroundColor Green
+            } catch {
+                Write-Host "  [WARN] handle64.exe failed: $_" -ForegroundColor Yellow
+                break
             }
-        } catch {
-            Write-Host "  [WARN] handle64.exe failed: $_" -ForegroundColor Yellow
         }
     } else {
         Write-Host "  [WARN] handle64.exe not found at: $handle64Path" -ForegroundColor Yellow
@@ -3922,39 +4078,43 @@ function Invoke-ScoopReset {
         Write-Host "         scoop install sysinternals" -ForegroundColor Gray
     }
 
-    # Method 3: Fallback - Get-Process with Path check (may miss some processes)
-    if (-not $usedHandle) {
-        Write-Host ""
-        Write-Host "  [INFO] Using Get-Process fallback (may miss background services)..." -ForegroundColor Gray
-        $runningApps = Get-Process | Where-Object {
-            $_.Path -and $_.Path -like "$ScoopDir\apps\*"
-        } | Select-Object Name, Id, Path
 
-        if ($runningApps) {
-            Write-Host "  [FOUND] Scoop applications detected:" -ForegroundColor Yellow
-            $runningApps | ForEach-Object {
-                Write-Host "    - $($_.Name) (PID: $($_.Id))" -ForegroundColor Yellow
-            }
+    # Method 3: processes whose image lives in a Scoop directory (apps\, and persist\
+    # unless kept: the JetBrains IDEs run from there). handle64 lists open file
+    # handles only; a program that holds no file at the moment (a Git Bash shell, an
+    # idle editor) is invisible to it but keeps its own exe locked, so apps\git
+    # stayed behind on 29.10. This check therefore always runs.
+    Write-Host ""
+    if ($usedHandle) { Write-Host "  [INFO] Processes running from Scoop's directories (by image path)..." -ForegroundColor Gray }
+    else { Write-Host "  [INFO] Using Get-Process fallback (may miss background services)..." -ForegroundColor Gray }
+    $runningApps = Get-Process | Where-Object {
+        $_.Path -and $_.Id -ne $PID -and (Test-ScoopOwnedPath $_.Path) -and -not ($KeepPersist -and $_.Path -like "$ScoopDir\persist\*")
+    } | Select-Object Name, Id, Path
 
-            Write-Host "  [INFO] Stopping all detected processes..." -ForegroundColor Gray
-            $runningApps | ForEach-Object {
-                # Inside catch, $_ is the error record, hence the copy
-                $proc = $_
-                try {
-                    Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-                    Write-Host "    [OK] Stopped: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Green
-                } catch {
-                    if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
-                        Write-Host "    [FAIL] Could not stop: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Red
-                    } else {
-                        Write-Host "    [OK] Already gone: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Gray
-                    }
+    if ($runningApps) {
+        Write-Host "  [FOUND] Scoop applications detected:" -ForegroundColor Yellow
+        $runningApps | ForEach-Object {
+            Write-Host "    - $($_.Name) (PID: $($_.Id)): $($_.Path)" -ForegroundColor Yellow
+        }
+
+        Write-Host "  [INFO] Stopping all detected processes..." -ForegroundColor Gray
+        $runningApps | ForEach-Object {
+            # Inside catch, $_ is the error record, hence the copy
+            $proc = $_
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                Write-Host "    [OK] Stopped: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Green
+            } catch {
+                if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
+                    Write-Host "    [FAIL] Could not stop: $($proc.Name) (PID: $($proc.Id)): $($_.Exception.Message)" -ForegroundColor Red
+                } else {
+                    Write-Host "    [OK] Already gone: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Gray
                 }
             }
-            Start-Sleep -Seconds 2
-        } else {
-            Write-Host "  [OK] No Scoop processes detected via Get-Process" -ForegroundColor Green
         }
+        Start-Sleep -Seconds 2
+    } else {
+        Write-Host "  [OK] No processes running from Scoop's directories" -ForegroundColor Green
     }
 
     # Method 4: Kill any remaining GnuPG/SSH agents (common blockers that Get-Process misses)
@@ -4041,7 +4201,7 @@ function Invoke-ScoopReset {
             $byName  = $varsToRemove -contains $name
             $byValue = @($value -split ';' | Where-Object { Test-ScoopOwnedPath $_ }).Count -gt 0
             if ($byName -or $byValue) {
-                [System.Environment]::SetEnvironmentVariable($name, $null, $Scope)
+                [System.Environment]::SetEnvironmentVariable($name, [NullString]::Value, $Scope)
                 Write-Host "[OK] Removed $Scope variable: $name" -ForegroundColor Green
                 $removed++
             }
@@ -4159,14 +4319,21 @@ function Invoke-ScoopReset {
         Write-Host ""
         Write-Host "Diagnostic commands:" -ForegroundColor Cyan
         Write-Host "  # Check for running processes:" -ForegroundColor Gray
-        Write-Host "  Get-Process | Where-Object { `$_.Path -like '*usr*' }" -ForegroundColor Gray
+        Write-Host "  Get-Process | Where-Object { `$_.Path -like '$ScoopDir\*' }" -ForegroundColor Gray
         Write-Host ""
         Write-Host "  # Check for open handles (if Sysinternals installed):" -ForegroundColor Gray
-        Write-Host "  handle64.exe $ScoopDir\apps" -ForegroundColor Gray
+        Write-Host "  handle64.exe $ScoopDir" -ForegroundColor Gray
         Write-Host ""
         Write-Host "Manual cleanup commands:" -ForegroundColor Cyan
         $remainingDirs | ForEach-Object {
             Write-Host "  rd /s /q `"\\?\$ScoopDir\$_`"" -ForegroundColor Gray
+        }
+        if ($nonScoopHolders.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Held by processes that are not Scoop's (left running on purpose); close them or move their working directory, then run the reset again:" -ForegroundColor Yellow
+            foreach ($h in $nonScoopHolders) {
+                Write-Host "  - $($h.Exe) (PID: $($h.Id)): $(if ($h.Path) { $h.Path } else { 'path not readable' })" -ForegroundColor Yellow
+            }
         }
     } else {
         Write-Host "[OK] All directories successfully removed!" -ForegroundColor Green
@@ -4174,7 +4341,8 @@ function Invoke-ScoopReset {
 
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  1. Check in a new shell: gci env: | ? { `$_.Value -like '*usr*' }" -ForegroundColor White
+    Write-Host "  1. Check in a new shell (must print nothing; $ScoopDir\bin in PATH is scoop-boot's and stays):" -ForegroundColor White
+    Write-Host "     gci env: | ? { `$_.Value -match '$([regex]::Escape($ScoopDir))\\($($global:ScoopOwnedDirs -join '|'))' }" -ForegroundColor Gray
     Write-Host "  2. Set up again (Administrator): scoop-boot.ps1 --admin-init, then --admin-setenv" -ForegroundColor White
     Write-Host "  3. Normal shell: scoop-boot.ps1 --user-install" -ForegroundColor White
     Write-Host ""

@@ -1,0 +1,53 @@
+# scoop-boot checks: tools/test.ps1 (parse check, self-tests, dry run against the
+# templates, command line) on Linux and Windows, and for every release tag the
+# manifest signature and hashes. Nothing here installs Scoop or writes to a registry.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  linux:
+    name: pwsh on ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: tools/test.ps1
+        shell: pwsh
+        run: ./tools/test.ps1
+
+  windows:
+    name: Windows PowerShell 5.1 and pwsh on windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: tools/test.ps1 (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./tools/test.ps1
+      - name: tools/test.ps1 (pwsh)
+        shell: pwsh
+        run: ./tools/test.ps1
+
+  release:
+    name: release manifest
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: verify signature and hashes
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          grep -qx "tag $tag" etc/release.manifest || { echo "manifest does not name $tag"; exit 1; }
+          ssh-keygen -Y verify -f etc/allowed_signers -I scoop-boot -n scoop-boot -s etc/release.manifest.sig < etc/release.manifest
+          while read -r kind hash path; do
+            [ "$kind" = "sha256" ] || continue
+            actual=$(git cat-file blob "HEAD:$path" | sha256sum | cut -c1-64)
+            if [ "$actual" != "$hash" ]; then echo "hash mismatch: $path"; exit 1; fi
+            echo "ok $path"
+          done < etc/release.manifest
+          [ "$(cat etc/LATEST)" = "$tag" ] || { echo "etc/LATEST is $(cat etc/LATEST), tag is $tag"; exit 1; }
+          echo "release $tag verified"

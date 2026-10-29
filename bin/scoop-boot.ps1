@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.21.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.22.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -16,7 +16,8 @@
       --export and --import to carry the packages of one machine to another
     - --platform-report: what Defender/ASR and a profile container do to the setup
     - --update installs signed releases: manifest with SHA-256 of every file,
-      SSH signature, trust on first use; rescue path; daily log; 41 self-tests
+      SSH signature, trust on first use; rescue path; daily log
+    - --self-test on the machine, a Pester suite in tests\ for development and CI
     - ASCII-only output for console compatibility
 
 .PARAMETER (Dynamic)
@@ -24,9 +25,66 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.21.0
+    Version: 1.22.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.22.0:
+    - Pester suite in tests\ (tests\*.Tests.ps1, run with tools\test.ps1 or
+      Invoke-Pester): parser, expansion, apply and dry-run store, package list,
+      import plan, export, handler table, result objects, configuration, help
+      against parser, and a static check that no function reads a variable it
+      never assigns. Runs on Windows PowerShell 5.1 and on pwsh (Linux included:
+      the registry is replaced by the dry-run store). GitHub Actions workflow
+      .github\workflows\ci.yml runs the suite on ubuntu-latest and windows-latest
+      plus --self-test and the parse check on every push and pull request
+    - Set-DevelopmentEnvironment, Install-ScoopTools and Invoke-ScoopReset run
+      under Set-StrictMode -Version 1 (undefined variables are errors) instead of
+      strict mode off; Show-PackageList under the module's strict mode. Version 2
+      and up stay off there: .Count on a single object and missing properties of
+      Scoop's JSON are part of that code
+    - --user-install: the user-scope cleanup is Step 5 (it said Step 7 since the
+      handlers replaced Steps 4 to 6); the summary counts skipped packages
+      ("1 skipped" when the VC++ runtime guard left out vcredist2022), so the
+      numbers add up to the list
+    - --update on a remembered branch that answers 404 for every file says that
+      the branch is probably merged and deleted, and names --update --branch=main
+    - FIX --self-test exited with 0 even when a test failed: test 26 leaked the
+      return value of Apply-EnvironmentOperations into the pipeline, so the
+      function returned @(1, $false), which is true. Found by the first CI run.
+      The leak is fixed and the dispatch takes the last object as the verdict;
+      tools\test.ps1 also checks the summary line
+    - --admin-reset scans with handle64 in up to three passes: stop the Scoop
+      processes, wait two seconds, scan again, until nothing holds apps\ (or only
+      processes that are not Scoop's). The renderer children of Chrome and
+      Firefox die with their parent and were reported as "Could not stop"; a
+      crash helper or a restarted app took new handles after the single pass and
+      apps\ and persist\ stayed behind (laptop, 29.10.). A PID that is gone by
+      its turn is "Already gone"; a real failure now names the reason
+    - --admin-reset always checks the image path of every process after the
+      handle64 scan (it was the fallback when handle64 was missing): handle64
+      lists open file handles only, a Git Bash shell or an idle editor started
+      from apps\ holds no file but locks its own exe, and apps\git stayed behind
+    - --admin-reset scans and stops processes in every directory it deletes, not
+      only apps\: JetBrains Toolbox installs Rider and PyCharm under
+      persist\jetbrains-toolbox\apps, they ran from there and persist\ stayed
+      behind. With --keep-persist those processes are left alone. The diagnostic
+      hints name the Scoop root exactly instead of '*usr*'
+    - --admin-reset refuses to run from a shell hosted by a process in a Scoop
+      directory (a Windows Terminal or a Git Bash mintty from apps\): that host
+      is stopped with the other Scoop processes and takes the console and this
+      PowerShell with it, leaving the reset half done. Get-ScoopHostedAncestor
+      walks the parent chain before anything is touched
+    - --admin-reset names the processes that are not Scoop's but hold its
+      directories (a cmd whose working directory is under apps\) in the final
+      summary when a directory could not be deleted; the environment hint at the
+      end checks for Scoop's own directories only (C:\usr\bin in PATH stays)
+    - FIX Removing a variable left it empty instead of gone on pwsh 7.6 (a
+      PowerShell $null reaches .NET as an empty string there): Set-EnvValue and
+      the reset pass [NullString]::Value. Self-test 39 was red on ubuntu-latest
+    - README: Quick Setup with the export of the old machine, the scoop wrapper
+      explained with the JDK example, why scoop export/import is not used;
+      docs\environment-files.md reviewed
 
     Changes in v1.21.0:
     - Post-install handlers are a table ($global:PackageHandlers: Name, Handler
@@ -334,7 +392,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.21.0"
+$global:ScriptVersion = "1.22.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -700,6 +758,11 @@ function Invoke-SelfUpdate {
     }
     if ($failed) {
         Write-ErrorMsg "Update aborted, nothing was changed"
+        if (-not $manifest -and $Branch -ne 'main') {
+            # Every file of a branch head came back 404: the branch was merged and
+            # deleted, which is the normal end of a test branch
+            Write-ErrorMsg "Branch '$Branch' is probably deleted (merged); back to the signed release with: scoop-boot.ps1 --update --branch=main"
+        }
         Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
         return $false
     }
@@ -831,7 +894,9 @@ if ($global:ParsedArgs.Bootstrap) {
 }
 
 if ($global:ParsedArgs.SelfTest) {
-    $success = Test-ScoopBoot
+    # The verdict is the last object; anything a test leaks into the pipeline before
+    # it must not turn a failure into exit 0 (it did until 1.22.0)
+    $success = [bool](@(Test-ScoopBoot) | Select-Object -Last 1)
     exit $(if ($success) { 0 } else { 1 })
 }
 
