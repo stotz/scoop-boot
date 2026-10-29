@@ -14,7 +14,8 @@
 #      committed blobs (git cat-file): raw.githubusercontent.com serves the blob, and
 #      .gitattributes checks bin/scoop.cmd out with CRLF
 #   4. etc/release.manifest.sig: ssh-keygen -Y sign (a passphrase is asked for, or
-#      the agent answers)
+#      the agent answers); a failed signature restores the manifest and the old
+#      signature from HEAD
 #   5. verified with ssh-keygen -Y verify, the manifest bytes on standard input, as
 #      scoop-boot.ps1 --update does it
 #   6. etc/LATEST = tag; commit "release <tag>", tag, push main and the tag
@@ -24,8 +25,19 @@
 # writing anything.
 
 set -euo pipefail
-# A command that fails under set -e would otherwise end the script without a word
-trap 'echo "[ERROR] aborted at line $LINENO: $BASH_COMMAND" >&2' ERR
+# A command that fails under set -e would otherwise end the script without a word.
+# Once the manifest is rewritten (and the old signature removed), an abort, for
+# example a mistyped passphrase at ssh-keygen, restores both files from HEAD so
+# that the next run starts from a clean tree.
+manifest_written=
+abort() {
+    echo "[ERROR] aborted at line $1: $2" >&2
+    if [ -n "$manifest_written" ]; then
+        git checkout -- etc/release.manifest etc/release.manifest.sig 2>/dev/null || true
+        echo "[INFO] etc/release.manifest and etc/release.manifest.sig restored from HEAD; run the script again" >&2
+    fi
+}
+trap 'abort $LINENO "$BASH_COMMAND"' ERR
 
 TAG="${1:-}"
 NO_PUSH="${2:-}"
@@ -76,6 +88,7 @@ manifest=etc/release.manifest
         echo "sha256 $(git cat-file blob "HEAD:$rel" | sha256sum | cut -c1-64) $rel"
     done
 } > "$manifest"
+manifest_written=1
 ok "$manifest written ($(grep -c '^sha256 ' "$manifest") files)"
 
 # 4. Signature
@@ -92,6 +105,7 @@ ok "$result"
 printf '%s\n' "$TAG" > etc/LATEST
 git add etc/release.manifest etc/release.manifest.sig etc/allowed_signers etc/LATEST
 git commit -m "release $TAG"
+manifest_written=
 git tag "$TAG"
 if [ "$NO_PUSH" = "--no-push" ]; then
     ok "committed and tagged; push with: git push origin main $TAG"

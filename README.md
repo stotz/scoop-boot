@@ -217,7 +217,8 @@ file; do not edit it. To change the list on one machine, copy it to
 `C:\usr\etc\packages\<hostname>.txt` (lower case): that file replaces `default.txt`
 completely and is never touched by `--update` (`--import` creates it for you). The
 bootstrap packages (7-Zip, Git, aria2 and the extractors) are installed before the list
-and are not part of it.
+and are not part of it. A line `# bucket NAME URL` in the list adds a bucket in Step 2,
+which is how a private bucket comes in (see [docs/private-bucket.md](docs/private-bucket.md)).
 
 A few packages need more than `scoop install` (the VC++ runtime check, the MSYS2/GCC
 setup, the `nc`/`netcat` shims, registry imports, tray apps). Those steps run only when
@@ -356,7 +357,9 @@ To test a branch on one machine: `scoop-boot.ps1 --update --branch=NAME`, and
 `--update --branch=main` when done. Releases are cut on `main` with
 `tools/release.sh vNNNN` (Git Bash): manifest from the committed blobs, SSH signature,
 `etc/LATEST`, commit, tag, push. The signing key's fingerprint must appear in this
-README (above); a new key is a new trust anchor and is changed on purpose.
+README (above); a new key is a new trust anchor and is changed on purpose. A run that
+fails after the manifest was written (a mistyped passphrase) restores the manifest and
+the previous signature, so the next run starts from a clean tree.
 
 ## Documents
 

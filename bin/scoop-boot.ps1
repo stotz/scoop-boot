@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.22.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.22.1 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -25,9 +25,19 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.22.0
+    Version: 1.22.1
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.22.1:
+    - tools\release.sh restores etc\release.manifest and the previous signature
+      from HEAD when it aborts after writing the manifest (a mistyped passphrase
+      at ssh-keygen left a dirty tree on 30.10.); tested with a passphrase key
+      and closed stdin, and the happy path with --no-push
+    - Documentation: "# bucket NAME URL" lines explained in the package list
+      header, README and docs\private-bucket.md (a private bucket needs no code
+      change); user template names Step 5 and the wrapper; README notes the
+      release.sh behaviour. No functional change in the scripts
 
     Changes in v1.22.0:
     - Pester suite in tests\ (tests\*.Tests.ps1, run with tools\test.ps1 or
@@ -392,7 +402,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.22.0"
+$global:ScriptVersion = "1.22.1"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
