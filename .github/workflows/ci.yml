@@ -1,6 +1,8 @@
 # scoop-boot checks: tools/test.ps1 (parse check, self-tests, dry run against the
 # templates, command line) on Linux and Windows, and for every release tag the
-# manifest signature and hashes. Nothing here installs Scoop or writes to a registry.
+# manifest signature and hashes; PSScriptAnalyzer and ShellCheck; the WSL setup
+# script in a debian:stable container (dry run, install, second run, tools start).
+# Nothing here installs Scoop or writes to a registry.
 name: ci
 
 on:
@@ -30,6 +32,74 @@ jobs:
       - name: tools/test.ps1 (pwsh)
         shell: pwsh
         run: ./tools/test.ps1
+
+  lint:
+    name: PSScriptAnalyzer and ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: PSScriptAnalyzer (severity Error)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Force
+          $findings = @(Invoke-ScriptAnalyzer -Path bin, tools -Recurse -Severity Error)
+          $findings | Format-Table RuleName, ScriptName, Line, Message -AutoSize -Wrap
+          if ($findings.Count -gt 0) { exit 1 }
+      - name: ShellCheck (WSL setup script)
+        run: shellcheck etc/wsl/debian-setup.sh
+
+  debian:
+    # fresh: an empty image. existing: a distribution someone already uses, with
+    # packages of the list and others; after the setup every package that was
+    # installed before must still be installed (the script only adds)
+    name: debian-setup.sh in ${{ matrix.image }} (${{ matrix.state }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:stable', 'ubuntu:24.04']
+        state: [fresh, existing]
+    steps:
+      - uses: actions/checkout@v5
+      - name: apt package index
+        run: apt-get update -qq
+      - name: existing distribution (packages of the list and others, a file in ~/.local/bin)
+        if: matrix.state == 'existing'
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git jq nano cowsay python3
+          mkdir -p "$HOME/.local/bin" && printf '#!/bin/sh\necho own fd\n' > "$HOME/.local/bin/fd" && chmod +x "$HOME/.local/bin/fd"
+          dpkg-query -W -f='${Package}\n' | sort > installed-before.txt
+          wc -l < installed-before.txt
+      - name: a wrong package name fails the dry run
+        run: |
+          printf 'jq\nno-such-package-xyz\n' > bad-list.txt
+          if bash etc/wsl/debian-setup.sh --packages bad-list.txt --dry-run --no-claude; then echo "[FAIL] dry run passed a wrong name"; exit 1; fi
+          echo "[OK] wrong name rejected"
+      - name: dry run (apt-get simulation, nothing installed, 0 removed)
+        run: |
+          bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --dry-run --no-claude | tee dry-run.txt
+          grep -q ', 0 removed' dry-run.txt
+      - name: install the package list
+        run: bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --yes --no-claude
+      - name: nothing that was installed before is gone, own files untouched
+        if: matrix.state == 'existing'
+        run: |
+          dpkg-query -W -f='${Package}\n' | sort > installed-after.txt
+          gone=$(comm -23 installed-before.txt installed-after.txt)
+          [ -z "$gone" ] || { echo "[FAIL] removed: $gone"; exit 1; }
+          [ "$("$HOME/.local/bin/fd")" = "own fd" ] || { echo "[FAIL] ~/.local/bin/fd was replaced"; exit 1; }
+          echo "[OK] $(wc -l < installed-before.txt) packages kept, ~/.local/bin/fd kept"
+      - name: second run finds nothing missing
+        run: |
+          bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --yes --no-claude | tee second-run.txt
+          grep -q ' 0 missing' second-run.txt
+      - name: the tools of the list start
+        run: |
+          for c in git git-lfs jq rg fdfind batcat python3 pipx java mvn cmake ninja make shellcheck tmux vim dig; do
+            command -v "$c" > /dev/null || { echo "[FAIL] $c not found"; exit 1; }
+            echo "[OK] $c"
+          done
 
   release:
     name: release manifest

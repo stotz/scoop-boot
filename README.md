@@ -103,6 +103,41 @@ gcc C:\tmp\hello.c -o C:\tmp\hello.exe; C:\tmp\hello.exe; $LASTEXITCODE   # 42 w
 scoop-boot.ps1 --platform-report                                             # evidence for the platform team (Administrator for the full report)
 ```
 
+### 5. WSL and Debian (optional)
+
+A Debian distribution in WSL 2 next to the Windows tools, with build tools, Python,
+Java, the usual command line tools and Claude Code. Both commands show their plan with
+`--dry-run` first and install nothing then.
+
+```powershell
+C:\usr\bin\scoop-boot.ps1 --wsl-install --dry-run   # which wsl.exe commands would run
+C:\usr\bin\scoop-boot.ps1 --wsl-install             # Administrator: WSL and Debian, not started
+wsl -d Debian                                       # first start: Linux user and password, then exit
+C:\usr\bin\scoop-boot.ps1 --wsl-setup --dry-run     # apt-get resolves every package in simulation mode
+C:\usr\bin\scoop-boot.ps1 --wsl-setup               # normal shell: apt packages and Claude Code inside Debian
+```
+
+`--wsl-install` runs `wsl --install --no-distribution` when WSL 2 is missing (restart
+Windows, then run it again) and `wsl --install -d Debian --no-launch` for the
+distribution; `--distro=NAME` takes another one. On an Azure Virtual Desktop WSL 2
+needs a VM size with nested virtualization.
+
+`--wsl-setup` runs `etc\wsl\debian-setup.sh` inside the distribution, reading it and
+the package list from `C:\usr` under `/mnt/c`: the missing packages of
+`etc\packages\debian.txt` with `--no-install-recommends` (sudo asks for the Linux
+password), `fd` and `bat` under their usual names (Debian calls them `fdfind` and
+`batcat`), and Claude Code with the official installer (`https://claude.ai/install.sh`,
+skipped when `claude` exists; `--no-claude` leaves it out). Running it again installs
+only what is missing.
+
+On a WSL someone already uses, `--wsl-setup` only adds: the missing packages, installed
+with `apt-get --no-remove` (apt stops instead of removing a package), no `upgrade`, no
+`autoremove`; files already in `~/.local/bin` and an existing `claude` stay as they
+are. The dry run reports "N installed, 0 removed" and fails when apt would remove
+anything. Ubuntu and other Debian derivatives work too (`--distro=Ubuntu-24.04`);
+when Debian is missing, `--wsl-setup` names the installed distributions. `etc\packages\<host>.debian.txt` replaces the delivered list on
+one machine, as `<host>.txt` does for Scoop.
+
 ### Moving from an existing Scoop machine
 
 If an older machine already has the packages you want, export its list before you
@@ -315,7 +350,7 @@ Setup (Administrator shell unless noted)
 --admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
 
 Maintenance
---update             Install the current signed release (scripts, scoop wrapper, etc\packages\default.txt)
+--update             Install the current signed release (scripts, scoop wrapper, etc\packages\default.txt, debian.txt, etc\wsl\debian-setup.sh)
 --branch=NAME        With --update: download from a branch and remember it (etc\scoop-boot.branch); --branch=main switches back
 --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no Administrator)
 --quiet              With --clean-user-scope: one summary line, and only when something changed
@@ -323,6 +358,10 @@ Maintenance
 --platform-report    Defender/ASR, profile container, TMP: what the platform does to the setup; exit 1 on findings
 --export[=NAME]      Installed packages and buckets to etc\exports\NAME.txt (default: hostname)
 --import=NAME|FILE   Append what this machine's list lacks to etc\packages\HOSTNAME.txt; --dry-run shows it; --replace clones the list
+
+WSL (optional, after the setup)
+--wsl-install        Administrator: WSL and Debian, not started; --distro=NAME for another one; --dry-run shows the commands
+--wsl-setup          Normal shell: apt packages of etc\packages\debian.txt and Claude Code inside Debian; --no-claude, --dry-run
 
 Environment files
 --env-status         Environment files found and their load order
@@ -352,7 +391,13 @@ tools\test.ps1               # parse check, --self-test, dry run against the tem
 `tools\test.ps1` runs on Windows PowerShell 5.1 and on pwsh, Linux included (the
 dry run uses a scratch copy of `bin\` and the templates, the registry is replaced by
 the dry-run store). The same script runs in GitHub Actions (`.github/workflows/ci.yml`)
-on `ubuntu-latest` and `windows-latest` for every push and pull request; for a release
+on `ubuntu-latest` and `windows-latest` for every push and pull request, together with
+PSScriptAnalyzer (errors), ShellCheck for the shell scripts and `etc/wsl/debian-setup.sh`
+in `debian:stable` and `ubuntu:24.04` containers, each fresh and as an existing
+distribution with packages already installed: a wrong package name must fail the dry
+run, the dry run must report 0 removals, after the installation every package that was
+there before must still be there (and an own `~/.local/bin/fd` untouched), a second run
+must find nothing missing, and the tools of the list must start. For a release
 tag the workflow also verifies the manifest signature and compares every hash with the
 committed file. From Git Bash, call `powershell -File tools/test.ps1` with the POSIX
 path; a Windows path with backslashes is eaten by the shell.
