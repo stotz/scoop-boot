@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.22.2
+    Version: 1.22.3
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.22.2"
+$global:ScriptVersion = "1.22.3"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3667,6 +3667,69 @@ function Show-PackageList {
 
 if (-not (Test-Path variable:global:ScoopBootExplorerStopped)) { $global:ScoopBootExplorerStopped = $false }
 
+function Get-ModuleHolders {
+    <#
+    .SYNOPSIS
+        Processes that have a DLL or exe from under $Path loaded (shell extensions in
+        Explorer and in every program with a file dialog, a file manager). No handle scan
+        shows loaded modules; this is what keeps apps\tortoisesvn alive after everything
+        else is gone. Returns Name, Id, Path per process, this process excluded.
+    #>
+    param([string]$Path)
+    $result = @()
+    foreach ($process in @(Get-Process | Where-Object { $_.Id -ne $PID })) {
+        $hit = $false
+        try {
+            foreach ($module in @($process.Modules)) {
+                if ($module.FileName -and $module.FileName -like "$Path\*") { $hit = $true; break }
+            }
+        } catch { }
+        if ($hit) { $result += [pscustomobject]@{ Name = $process.Name; Id = $process.Id; Path = $process.Path } }
+    }
+    return $result
+}
+
+function Start-ExplorerWithRegistryEnvironment {
+    <#
+    .SYNOPSIS
+        Starts explorer.exe with an environment block built from the registry (Machine,
+        User, the volatile user values), not inherited from this process.
+    .DESCRIPTION
+        An Explorer started by Windows after the shell was stopped reuses the block of
+        the logon, and one started by a script inherits the script's block; both still
+        carry the variables the reset removed, and every shell opened from the Start
+        menu inherits them (the AVD, 30.10.). Only a block read from the registry now
+        gives new shells the cleaned environment without logging off.
+    #>
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = Join-Path $env:SystemRoot 'explorer.exe'
+    $psi.UseShellExecute = $false
+    $psi.EnvironmentVariables.Clear()
+    foreach ($scope in @('Machine', 'User')) {
+        $vars = [System.Environment]::GetEnvironmentVariables($scope)
+        foreach ($key in @($vars.Keys)) {
+            if ($key -ieq 'Path') { continue }
+            $psi.EnvironmentVariables[$key] = [string]$vars[$key]
+        }
+    }
+    $psi.EnvironmentVariables['Path'] = (@([System.Environment]::GetEnvironmentVariable('Path', 'Machine'), [System.Environment]::GetEnvironmentVariable('Path', 'User')) | Where-Object { $_ }) -join ';'
+    # Logon-time values (USERPROFILE, APPDATA, LOCALAPPDATA, USERNAME, LOGONSERVER, ...)
+    $volatile = Get-ItemProperty -Path 'HKCU:\Volatile Environment' -ErrorAction SilentlyContinue
+    if ($volatile) {
+        foreach ($property in $volatile.PSObject.Properties) {
+            if ($property.Name -like 'PS*') { continue }
+            $psi.EnvironmentVariables[$property.Name] = [string]$property.Value
+        }
+    }
+    foreach ($name in @('USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'USERNAME', 'USERDOMAIN', 'HOMEDRIVE', 'HOMEPATH')) {
+        if (-not $psi.EnvironmentVariables.ContainsKey($name)) {
+            $value = [System.Environment]::GetEnvironmentVariable($name)
+            if ($value) { $psi.EnvironmentVariables[$name] = $value }
+        }
+    }
+    [void][System.Diagnostics.Process]::Start($psi)
+}
+
 function Get-ScoopHostedAncestor {
     <#
     .SYNOPSIS
@@ -3702,6 +3765,9 @@ function Invoke-ScoopReset {
     $BackupRoot = "$ScoopDir\backups"
     $BackupDir = "$BackupRoot\$(Get-Date -Format 'yyyyMMdd_HHmmss')"
     $BackupsToKeep = 5
+    # Programs that are not Scoop's but have DLLs from a Scoop directory loaded; filled
+    # by the deletion routine (a nested function, hence script scope), named at the end
+    $script:ScoopBootDllHolders = @()
 
     # Scoop owns only the subdirectories in $global:ScoopOwnedDirs (Test-ScoopOwnedPath).
     # Everything else under C:\usr (bin, etc, or software the user installed there,
@@ -3869,6 +3935,20 @@ function Invoke-ScoopReset {
                 Stop-Process -Name StartMenuExperienceHost -Force -ErrorAction SilentlyContinue
                 $global:ScoopBootExplorerStopped = $true
                 Start-Sleep -Seconds 2
+
+                # Shell extensions load into every program with a file dialog or a file
+                # manager, not only into Explorer. Scoop's own processes are stopped; any
+                # other program is named, it is the user's to close (FreeCommander from
+                # its own directory held apps\tortoisesvn on the AVD, 30.10.)
+                foreach ($holder in @(Get-ModuleHolders -Path $Path)) {
+                    if ($holder.Name -ieq 'explorer') { continue }
+                    if ($holder.Path -and (Test-ScoopOwnedPath $holder.Path)) {
+                        try { Stop-Process -Id $holder.Id -Force -ErrorAction Stop; Write-Host "  -> Stopped $($holder.Name) (PID $($holder.Id)), has DLLs from $Path loaded" -ForegroundColor Yellow } catch { }
+                    } else {
+                        Write-Host "  -> $($holder.Name) (PID $($holder.Id)) has DLLs from $Path loaded, left running: $(if ($holder.Path) { $holder.Path } else { 'path not readable' })" -ForegroundColor Yellow
+                        $script:ScoopBootDllHolders += [pscustomobject]@{ Name = $holder.Name; Id = $holder.Id; Path = $holder.Path; Directory = $Path }
+                    }
+                }
 
                 # An IDE that keeps running (--keep-persist) respawns its terminal bash.exe
                 # from apps\git, a shell-extension helper (TSVNCache.exe) comes back with
@@ -4248,11 +4328,21 @@ function Invoke-ScoopReset {
     # after the cleanup, and through it every shell opened from the Start menu)
     # inherits this environment, which until now still carried the removed values
     # (the AVD, 30.10.: registry clean, new shells with the old JAVA_HOME)
-    foreach ($name in @($removedVariableNames | Sort-Object -Unique)) {
-        [System.Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+    # The same rule as for the registry, because this shell may have inherited values
+    # that an earlier run already removed from the registry
+    $processAligned = 0
+    foreach ($name in @([System.Environment]::GetEnvironmentVariables('Process').Keys)) {
+        if ($varsToKeep -contains $name) { continue }
+        $value = [string][System.Environment]::GetEnvironmentVariable($name, 'Process')
+        $byName  = ($varsToRemove -contains $name) -or ($removedVariableNames -contains $name)
+        $byValue = @($value -split ';' | Where-Object { Test-ScoopOwnedPath $_ }).Count -gt 0
+        if ($byName -or $byValue) {
+            [System.Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+            $processAligned++
+        }
     }
     $env:Path = (@([System.Environment]::GetEnvironmentVariable("Path", "Machine"), [System.Environment]::GetEnvironmentVariable("Path", "User")) | Where-Object { $_ }) -join ';'
-    Write-Host "[OK] Process environment of this shell aligned ($(@($removedVariableNames | Sort-Object -Unique).Count) variable(s), PATH)" -ForegroundColor Gray
+    Write-Host "[OK] Process environment of this shell aligned ($processAligned variable(s), PATH)" -ForegroundColor Gray
 
     # 7. Remove directories with aggressive deletion
     Write-Host ""
@@ -4274,14 +4364,26 @@ function Invoke-ScoopReset {
         $null = Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
     }
 
-    # Bring the desktop back if explorer.exe had to be stopped for the cleanup
-    if ($global:ScoopBootExplorerStopped) {
-        if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+    # Explorer is restarted in every case, with an environment block read from the
+    # registry: a running Explorer (the one of the logon, or one Windows restarted
+    # after the stop above) still carries the removed variables and would pass them
+    # to every shell opened from the Start menu until the next logon
+    Write-Host ""
+    Write-Host ">>> Restarting Explorer with the cleaned environment..." -ForegroundColor Cyan
+    if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
+        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+        try {
+            Start-ExplorerWithRegistryEnvironment
+            Write-Host "[OK] explorer.exe restarted (environment from the registry; shells opened from the Start menu see the cleaned values)" -ForegroundColor Green
+        } catch {
             Start-Process -FilePath "$env:SystemRoot\explorer.exe"
-            Write-Host "[OK] explorer.exe restarted" -ForegroundColor Green
-        } else {
-            Write-Host "[OK] explorer.exe already running again" -ForegroundColor Gray
+            Write-Host "[WARN] explorer.exe restarted with this shell's environment ($($_.Exception.Message)); log off and on for a clean environment" -ForegroundColor Yellow
         }
+    } else {
+        Write-Host "[WARN] explorer.exe came back on its own before the restart; its environment is the one of the logon, log off and on for a clean one" -ForegroundColor Yellow
     }
 
     # 8. Clean registry
@@ -4344,6 +4446,13 @@ function Invoke-ScoopReset {
         Write-Host "Manual cleanup commands:" -ForegroundColor Cyan
         $remainingDirs | ForEach-Object {
             Write-Host "  rd /s /q `"\\?\$ScoopDir\$_`"" -ForegroundColor Gray
+        }
+        if ($script:ScoopBootDllHolders.Count -gt 0) {
+            Write-Host ""
+            Write-Host "DLLs from the remaining directories are loaded in programs that are not Scoop's (shell extensions; left running on purpose); close them, then run the reset again:" -ForegroundColor Yellow
+            foreach ($h in $script:ScoopBootDllHolders) {
+                Write-Host "  - $($h.Name) (PID: $($h.Id)): $(if ($h.Path) { $h.Path } else { 'path not readable' }) holds $($h.Directory)" -ForegroundColor Yellow
+            }
         }
         if ($nonScoopHolders.Count -gt 0) {
             Write-Host ""
