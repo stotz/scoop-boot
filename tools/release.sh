@@ -42,7 +42,7 @@ trap 'abort $LINENO "$BASH_COMMAND"' ERR
 TAG="${1:-}"
 NO_PUSH="${2:-}"
 KEY="${KEY:-$HOME/.ssh/id_ed25519}"
-DELIVERED="bin/scoop-boot.ps1 bin/scoop-boot.psm1 bin/scoop.ps1 bin/scoop.cmd bin/scoop etc/packages/default.txt etc/packages/debian.txt etc/wsl/debian-setup.sh"
+DELIVERED="bin/scoop-boot.ps1 bin/scoop-boot.psm1 bin/scoop.ps1 bin/scoop.cmd bin/scoop etc/packages/default.txt etc/packages/debian.txt etc/packages/devops.txt etc/packages/devops.debian.txt etc/wsl/debian-setup.sh"
 
 fail() { echo "[ERROR] $*" >&2; exit 1; }
 ok()   { echo "[OK] $*"; }

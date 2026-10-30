@@ -81,6 +81,8 @@ jobs:
         run: |
           bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --dry-run --no-claude | tee dry-run.txt
           grep -q ', 0 removed' dry-run.txt
+      - name: dry run of the devops template list (apt-get simulation)
+        run: bash etc/wsl/debian-setup.sh --packages etc/packages/devops.debian.txt --dry-run --no-claude
       - name: install the package list
         run: bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --yes --no-claude
       - name: nothing that was installed before is gone, own files untouched

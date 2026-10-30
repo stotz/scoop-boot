@@ -138,6 +138,25 @@ anything. Ubuntu and other Debian derivatives work too (`--distro=Ubuntu-24.04`)
 when Debian is missing, `--wsl-setup` names the installed distributions. `etc\packages\<host>.debian.txt` replaces the delivered list on
 one machine, as `<host>.txt` does for Scoop.
 
+### DevOps and infrastructure instead of the developer set (optional)
+
+`etc\packages\devops.txt` and `etc\packages\devops.debian.txt` are templates with the
+tools for infrastructure work: Azure CLI, AzCopy, Service Bus Explorer, Storage Explorer,
+Terraform with tflint, terraform-docs and trivy, network diagnostics (nmap, Wireshark,
+tcping, trippy, doggo, dig, sslscan, iperf3), remote access, database clients and
+Postman instead of compilers, build tools and IDEs; for Debian ansible and the usual
+network tools. Use them before step 3:
+
+```powershell
+C:\usr\bin\scoop-boot.ps1 --package-template=devops --dry-run   # what would be copied
+C:\usr\bin\scoop-boot.ps1 --package-template=devops             # devops.txt -> <host>.txt, devops.debian.txt -> <host>.debian.txt
+C:\usr\bin\scoop-boot.ps1 --list-packages                       # check the list, then --user-install
+```
+
+The host lists replace `default.txt` and `debian.txt` on this machine and are never
+touched by `--update`; edit them freely. Existing host lists are kept unless `--force`
+(the old file is saved as `.bak`).
+
 ### Moving from an existing Scoop machine
 
 If an older machine already has the packages you want, export its list before you
@@ -355,6 +374,7 @@ Maintenance
 --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no Administrator)
 --quiet              With --clean-user-scope: one summary line, and only when something changed
 --list-packages      Package list in use, status of each package and its post-install steps; installs nothing
+--package-template=NAME  Use a list template on this machine (devops); --dry-run shows it, --force replaces host lists (.bak)
 --platform-report    Defender/ASR, profile container, TMP: what the platform does to the setup; exit 1 on findings
 --export[=NAME]      Installed packages and buckets to etc\exports\NAME.txt (default: hostname)
 --import=NAME|FILE   Append what this machine's list lacks to etc\packages\HOSTNAME.txt; --dry-run shows it; --replace clones the list

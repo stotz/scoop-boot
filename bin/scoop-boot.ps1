@@ -42,8 +42,13 @@
       autoremove; the dry run fails when apt would remove a package; files in
       ~/.local/bin and an existing claude stay as they are
     - --update also delivers etc\packages\debian.txt and etc\wsl\debian-setup.sh
-    - Self-tests 49 to 52: WSL options, Windows-to-WSL path, Debian package list,
-      the setup script is delivered
+    - --package-template=NAME: copies etc\packages\NAME.txt and NAME.debian.txt to
+      the host lists (<host>.txt, <host>.debian.txt); existing ones only with
+      --force (kept as .bak); --dry-run writes nothing. Template devops: Azure,
+      Terraform, Service Bus and Storage Explorer, network and database clients
+      instead of compilers and IDEs; for Debian network and automation tools
+    - Self-tests 49 to 53: WSL options, Windows-to-WSL path, Debian package list,
+      WSL distribution list, package templates
 
     Changes in v1.22.4:
     - --admin-reset ends with a WM_SETTINGCHANGE "Environment" broadcast (a User
@@ -800,7 +805,7 @@ function Invoke-SelfUpdate {
         $ref = $Branch
         $base = "$repo/$ref"
         Write-Warning "Downloading from branch '$Branch' WITHOUT signature check (remembered in $global:BranchFile; back to signed releases with --update --branch=main)"
-        $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt', 'etc/packages/debian.txt', 'etc/wsl/debian-setup.sh')
+        $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt', 'etc/packages/debian.txt', 'etc/packages/devops.txt', 'etc/packages/devops.debian.txt', 'etc/wsl/debian-setup.sh')
     }
 
     # Phase 1: download everything and check it against the manifest; no file is
@@ -1011,6 +1016,10 @@ if ($global:ParsedArgs.UserInstall) {
 
 if ($global:ParsedArgs.ListPackages) {
     if (Invoke-ListPackages) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.PackageTemplate) {
+    if (Invoke-PackageTemplate -Name $global:ParsedArgs.PackageTemplate -DryRun $global:ParsedArgs.DryRun -Force $global:ParsedArgs.Force) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.WslInstall) {

@@ -219,6 +219,7 @@ $global:ParsedArgs = @{
     WslSetup = $false
     Distro = 'Debian'
     NoClaude = $false
+    PackageTemplate = ''
     Unknown = @()
 }
 
@@ -256,6 +257,7 @@ function Parse-Arguments {
             '^--wsl-setup$' { $global:ParsedArgs.WslSetup = $true }
             '^--distro=(.+)$' { $global:ParsedArgs.Distro = $Matches[1] }
             '^--no-claude$' { $global:ParsedArgs.NoClaude = $true }
+            '^--package-template=(.+)$' { $global:ParsedArgs.PackageTemplate = $Matches[1] }
             # Anything else is reported by the caller: a typo, or a command that was
             # removed (--status, --suggest, --install, --environment, --init-env,
             # --apply-env, --rollback in 1.18.0)
@@ -627,6 +629,9 @@ function Show-Help {
     Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply the user.* files (no admin)"
     Write-Host "      --quiet            print only a summary when something changed"
     Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
+    Write-Host "  --package-template=NAME  Use a list template on this machine, e.g. devops (infrastructure tools instead of the developer set)"
+    Write-Host "      --dry-run          show what would be copied, write nothing"
+    Write-Host "      --force            replace existing host lists (kept as .bak)"
     Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
     Write-Host "  --export[=NAME]      Write the installed packages and buckets to etc\exports\NAME.txt (default: hostname)"
     Write-Host "  --import=NAME|FILE   Add the packages of an export that this machine's list lacks to etc\packages\HOSTNAME.txt"
@@ -650,6 +655,7 @@ function Show-Help {
     Write-Host "  user.HOSTNAME.USERNAME.env      User scope, this host and user"
     Write-Host "  etc\packages\default.txt        Package list (delivered); etc\packages\HOSTNAME.txt replaces it"
     Write-Host "  etc\packages\debian.txt         apt packages for --wsl-setup; etc\packages\HOSTNAME.debian.txt replaces it"
+    Write-Host "  etc\packages\devops.txt         Template (with devops.debian.txt) for --package-template=devops"
     Write-Host "  etc\scoop-boot.conf             DIR=<path> lines: directories --admin-init creates (tmp, devl, data)"
     Write-Host "  etc\exports\NAME.txt            Package export of a machine (--export), input for --import=NAME"
     Write-Host ""
@@ -2506,6 +2512,27 @@ JAVA_HOME=C:\java
     } catch {}
     $tests += $test
 
+    # Test 53: package templates: devops lists parse, plan targets the host files, default/debian are no templates
+    $test = @{Name = "Package templates (devops)"; Result = $false}
+    try {
+        $ok = $true
+        $scoopTemplate = Join-Path $global:PackagesDir 'devops.txt'
+        if (Test-Path $scoopTemplate) {
+            $names = @(Read-PackageList -Path $scoopTemplate)
+            $debNames = @(Read-DebianPackageList -Path (Join-Path $global:PackagesDir 'devops.debian.txt'))
+            $plan = @(Get-PackageTemplatePlan -Name 'devops')
+            $hostName = Get-Hostname
+            $ok = ($names.Count -gt 10) -and ($debNames.Count -gt 10) -and ($plan.Count -eq 2) -and
+                ((Split-Path -Leaf $plan[0].Target) -eq "$hostName.txt") -and
+                ((Split-Path -Leaf $plan[1].Target) -eq "$hostName.debian.txt")
+        }
+        $ok = $ok -and (@(Get-PackageTemplatePlan -Name 'default').Count -eq 0) -and
+            (@(Get-PackageTemplatePlan -Name 'debian').Count -eq 0) -and
+            (@(Get-PackageTemplatePlan -Name '..\x').Count -eq 0)
+        $test.Result = $ok
+    } catch {}
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -3263,6 +3290,83 @@ function Invoke-WslSetup {
         return $false
     }
     return $true
+}
+
+function Get-PackageTemplatePlan {
+    <#
+    .SYNOPSIS
+        What --package-template=NAME copies: etc\packages\NAME.txt to <host>.txt and,
+        when it exists, NAME.debian.txt to <host>.debian.txt. Each entry: Source,
+        Target, Exists (the target is there already).
+    .DESCRIPTION
+        Returns nothing when NAME.txt does not exist. The names "default" and
+        "debian" are the delivered lists, not templates, and return nothing.
+    #>
+    param(
+        [string]$Name,
+        [string]$Dir = $global:PackagesDir
+    )
+    if ($Name -notmatch '^[a-z0-9][a-z0-9-]*$' -or $Name -in @('default', 'debian')) { return @() }
+    $hostName = Get-Hostname
+    $plan = @()
+    foreach ($pair in @(@("$Name.txt", "$hostName.txt"), @("$Name.debian.txt", "$hostName.debian.txt"))) {
+        $source = Join-Path $Dir $pair[0]
+        if (-not (Test-Path $source)) {
+            if ($pair[0] -eq "$Name.txt") { return @() }
+            continue
+        }
+        $target = Join-Path $Dir $pair[1]
+        $plan += [pscustomobject]@{ Source = $source; Target = $target; Exists = (Test-Path $target) }
+    }
+    return $plan
+}
+
+function Invoke-PackageTemplate {
+    <#
+    .SYNOPSIS
+        Uses a package list template on this machine (--package-template=NAME), e.g.
+        devops: tools for infrastructure work instead of the developer set.
+    .DESCRIPTION
+        Copies etc\packages\NAME.txt to etc\packages\<host>.txt (replaces default.txt
+        for --user-install and --list-packages) and NAME.debian.txt to
+        <host>.debian.txt (replaces debian.txt for --wsl-setup). An existing host
+        list is kept unless --force; with --force it is saved as .bak first.
+        --dry-run shows the plan and writes nothing. Installs nothing: run
+        --user-install and --wsl-setup afterwards.
+    #>
+    param(
+        [string]$Name,
+        [bool]$DryRun = $false,
+        [bool]$Force = $false
+    )
+    Write-Section "Package template: $Name"
+    $plan = @(Get-PackageTemplatePlan -Name $Name)
+    if ($plan.Count -eq 0) {
+        $available = @(Get-ChildItem -Path $global:PackagesDir -Filter '*.txt' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '\.debian\.txt$' -and $_.BaseName -notin @('default', (Get-Hostname)) } |
+            ForEach-Object { $_.BaseName })
+        Write-ErrorMsg "No template '$Name' in $global:PackagesDir$(if ($available.Count -gt 0) { " (available: $($available -join ', '))" })"
+        return $false
+    }
+    $blocked = @($plan | Where-Object { $_.Exists -and -not $Force })
+    foreach ($p in $plan) {
+        $what = "$(Split-Path -Leaf $p.Source) -> $(Split-Path -Leaf $p.Target)"
+        if ($p.Exists -and -not $Force) {
+            Write-Warning "$what skipped: $(Split-Path -Leaf $p.Target) exists (--force replaces it, a .bak copy is kept)"
+            continue
+        }
+        if ($DryRun) {
+            Write-DryRun "copy $what$(if ($p.Exists) { ' (existing file saved as .bak)' })"
+            continue
+        }
+        if ($p.Exists) { Copy-Item -Path $p.Target -Destination "$($p.Target).bak" -Force }
+        Copy-Item -Path $p.Source -Destination $p.Target -Force
+        Write-Success $what
+    }
+    if (-not $DryRun -and $blocked.Count -lt $plan.Count) {
+        Write-Info "Next: scoop-boot.ps1 --list-packages, then --user-install (and --wsl-setup for Debian)"
+    }
+    return ($blocked.Count -eq 0)
 }
 
 function Set-DevelopmentEnvironment {

@@ -1,0 +1,91 @@
+# scoop-boot package list TEMPLATE for DevOps and infrastructure (delivered by
+# scoop-boot.ps1 --update; do not edit). Not used directly: scoop-boot.ps1
+# --package-template=devops copies it to etc\packages\<hostname>.txt, which then
+# replaces default.txt on this machine (edit the copy, it is never updated).
+# Same format as default.txt: one manifest per line in install order, "#" starts a
+# comment. Bootstrap packages (7zip, git, aria2, sudo, ...) are installed before.
+# Compared with default.txt: cloud, infrastructure-as-code, network and server
+# tools instead of compilers, build tools and IDEs.
+
+# System libraries
+vcredist2022
+
+# Browser (Azure portal, Entra admin center)
+firefox
+
+# Shells and scripting
+pwsh
+python314
+
+# Azure (Service Bus Explorer: dead letters, resubmit; Storage Explorer: blobs, file shares)
+azure-cli
+azcopy
+servicebusexplorer
+azurestorageexplorer
+
+# Infrastructure as code
+terraform
+tflint
+terraform-docs
+trivy
+
+# Kubernetes is left out: Container Apps are managed with azure-cli. For AKS add
+# kubectl, kubelogin and helm to the host copy.
+
+# GitHub
+gh
+
+# Data formats and HTTP (Postman: API and health-endpoint checks)
+jq
+yq
+curl
+postman
+
+# Network diagnostics: port scan and ncat (nmap), packet capture (wireshark),
+# TCP port check through firewalls (tcping), traceroute with loss per hop
+# (trippy), DNS queries against a chosen server (doggo, dig from bind), TLS and
+# certificate check (sslscan), bandwidth (iperf3). Sysinternals adds psping,
+# tcpview and whois.
+nmap
+wireshark
+tcping
+trippy
+doggo
+bind
+sslscan
+iperf3
+
+# Remote access
+openssh
+putty
+winscp
+mremoteng
+
+# Databases (clients)
+go-sqlcmd
+postgresql
+dbeaver
+
+# Security
+openssl
+keepass
+
+# Editors and terminal
+vscode
+windows-terminal
+notepadplusplus
+winmerge
+
+# Command line tools
+ripgrep
+fd
+bat
+less
+fzf
+lazygit
+
+# Windows tools
+sysinternals
+everything
+greenshot
+draw.io
