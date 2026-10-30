@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.22.3 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.22.4 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -25,9 +25,19 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.22.3
+    Version: 1.22.4
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.22.4:
+    - --admin-reset ends with a WM_SETTINGCHANGE "Environment" broadcast (a User
+      variable written and removed again) instead of restarting Explorer: Windows
+      restarts a stopped Explorer at once with the block of the logon, which still
+      held the removed values, and the restart in 1.22.3 lost that race on the
+      AVD. On the message Explorer reads the registry again and drops removed
+      variables; a shell opened from the Start menu afterwards was clean without
+      logging off (confirmed on the AVD, 30.10.). Explorer is started, with a
+      registry-built environment, only when it is not running at all
 
     Changes in v1.22.3:
     - --admin-reset restarts Explorer at the end in every case, with an
@@ -436,7 +446,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.22.3"
+$global:ScriptVersion = "1.22.4"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

@@ -276,9 +276,9 @@ The reset stops the processes that run from or hold Scoop's directories (`apps`,
 which holds shell extensions), writes a backup to `C:\usr\backups\<timestamp>` (the last
 five are kept), removes Scoop's variables and PATH entries, the Scoop directories, registry
 entries and shortcuts. `bin`, `etc`, `logs` and everything that is not Scoop's stay, so
-the setup starts again at `--admin-init`. Explorer is restarted at the end with an
-environment read from the registry, so a shell opened from the Start menu afterwards
-sees the cleaned environment without logging off. Exit code 1 when a directory could
+the setup starts again at `--admin-init`. At the end Explorer is told to reload the
+environment from the registry, so a shell opened from the Start menu afterwards sees
+the cleaned environment without logging off. Exit code 1 when a directory could
 not be removed; the output names it, the command to remove it by hand, and the
 programs that still hold it (a shell extension's DLL loaded into a file manager, a
 shell whose working directory is inside): those are not Scoop's and are left to you.

@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.22.3
+    Version: 1.22.4
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.22.3"
+$global:ScriptVersion = "1.22.4"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -4364,27 +4364,28 @@ function Invoke-ScoopReset {
         $null = Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
     }
 
-    # Explorer is restarted in every case, with an environment block read from the
-    # registry: a running Explorer (the one of the logon, or one Windows restarted
-    # after the stop above) still carries the removed variables and would pass them
-    # to every shell opened from the Start menu until the next logon
+    # Explorer and every shell opened from it: a running Explorer keeps the environment
+    # block it was started with (the logon's, or an inherited one) and reads the
+    # registry again only when WM_SETTINGCHANGE "Environment" arrives. .NET sends that
+    # message on every Machine or User write, so a run that removed nothing never sent
+    # it and new shells kept values the registry no longer had (the AVD, 30.10.; after
+    # the message a new shell was clean without logging off). Stopping Explorer does
+    # not help: Windows restarts it at once with the block of the logon.
     Write-Host ""
-    Write-Host ">>> Restarting Explorer with the cleaned environment..." -ForegroundColor Cyan
-    if (Get-Process -Name explorer -ErrorAction SilentlyContinue) {
-        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-    }
+    Write-Host ">>> Telling Explorer to reload the environment from the registry..." -ForegroundColor Cyan
     if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
         try {
             Start-ExplorerWithRegistryEnvironment
-            Write-Host "[OK] explorer.exe restarted (environment from the registry; shells opened from the Start menu see the cleaned values)" -ForegroundColor Green
+            Write-Host "[OK] explorer.exe started (environment from the registry)" -ForegroundColor Green
         } catch {
             Start-Process -FilePath "$env:SystemRoot\explorer.exe"
-            Write-Host "[WARN] explorer.exe restarted with this shell's environment ($($_.Exception.Message)); log off and on for a clean environment" -ForegroundColor Yellow
+            Write-Host "[WARN] explorer.exe started with this shell's environment ($($_.Exception.Message))" -ForegroundColor Yellow
         }
-    } else {
-        Write-Host "[WARN] explorer.exe came back on its own before the restart; its environment is the one of the logon, log off and on for a clean one" -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
     }
+    [System.Environment]::SetEnvironmentVariable('SCOOP_BOOT_ENV_REFRESH', '1', 'User')
+    [System.Environment]::SetEnvironmentVariable('SCOOP_BOOT_ENV_REFRESH', [NullString]::Value, 'User')
+    Write-Host "[OK] Environment change broadcast (WM_SETTINGCHANGE); shells opened from the Start menu see the cleaned values" -ForegroundColor Green
 
     # 8. Clean registry
     Write-Host ""
