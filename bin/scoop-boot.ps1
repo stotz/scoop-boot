@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.22.1 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.22.2 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -25,9 +25,26 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.22.1
+    Version: 1.22.2
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.22.2:
+    - --admin-reset aligns its own process environment with the registry after the
+      cleanup (removed variables, PATH from Machine plus User). Explorer, started
+      again by the reset, inherited the old values and handed them to every shell
+      opened from the Start menu: the AVD showed JAVA_HOME and friends in new
+      shells although the registry was clean (30.10.)
+    - --admin-reset no longer restarts Explorer inside the deletion routine: a
+      shell extension (TortoiseSVN, 7-Zip) is a DLL in Explorer that no handle
+      scan shows, and the restarted Explorer loaded it back before the retry, so
+      apps\tortoisesvn stayed. Explorer is stopped, the deletion retried, and
+      Explorer started once at the end, after every directory is gone. Processes
+      that started again from the directory meanwhile (an IDE kept running by
+      --keep-persist respawns its terminal bash.exe from apps\git) are stopped
+      before the retry
+    - --admin-reset checks the image paths in up to three passes, like the handle
+      scan; the summary names what still runs from a remaining directory
 
     Changes in v1.22.1:
     - tools\release.sh restores etc\release.manifest and the previous signature
@@ -402,7 +419,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.22.1"
+$global:ScriptVersion = "1.22.2"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

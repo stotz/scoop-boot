@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.22.1
+    Version: 1.22.2
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.22.1"
+$global:ScriptVersion = "1.22.2"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3855,41 +3855,38 @@ function Invoke-ScoopReset {
             } catch {}
         }
 
-        # Method 3: Restart Explorer if DLLs are locked
+        # Method 3: shell extensions (7-Zip, TortoiseSVN) are DLLs loaded into Explorer,
+        # which no handle scan shows. Stop Explorer and the shell hosts and retry; Explorer
+        # is started again at the end of the reset, after every directory is gone. Started
+        # here, it would load the same DLLs back before the retry (the AVD, 30.10.), and it
+        # would inherit this process's environment, which still holds the removed
+        # variables, and pass it on to every shell opened from the Start menu.
         if (-not $deleted -and (Test-Path $Path)) {
-            Write-Host "  -> Files locked, restarting Explorer and Shell components..." -ForegroundColor Yellow
+            Write-Host "  -> Files locked, stopping Explorer and the shell hosts (restarted after the cleanup)..." -ForegroundColor Yellow
             try {
-                # Stop all relevant processes
                 Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
                 Stop-Process -Name ShellExperienceHost -Force -ErrorAction SilentlyContinue
                 Stop-Process -Name StartMenuExperienceHost -Force -ErrorAction SilentlyContinue
+                $global:ScoopBootExplorerStopped = $true
                 Start-Sleep -Seconds 2
 
-                # Restart Explorer
-                Start-Process "C:\Windows\explorer.exe"
-                Start-Sleep -Seconds 2
-
-                # Restart Taskbar and Start Menu components
-                $shellExperienceHost = "C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"
-                $startMenuHost = "C:\Windows\SystemApps\StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe"
-
-                if (Test-Path $shellExperienceHost) {
-                    Start-Process $shellExperienceHost -ErrorAction SilentlyContinue
+                # An IDE that keeps running (--keep-persist) respawns its terminal bash.exe
+                # from apps\git, a shell-extension helper (TSVNCache.exe) comes back with
+                # Explorer: stop whatever runs from here now, then try once more
+                $respawned = @(Get-Process | Where-Object { $_.Path -and $_.Path -like "$Path\*" -and $_.Id -ne $PID })
+                foreach ($r in $respawned) {
+                    try { Stop-Process -Id $r.Id -Force -ErrorAction Stop; Write-Host "  -> Stopped $($r.Name) (PID $($r.Id)), started again from $Path" -ForegroundColor Yellow } catch { }
                 }
-                if (Test-Path $startMenuHost) {
-                    Start-Process $startMenuHost -ErrorAction SilentlyContinue
-                }
-
-                Start-Sleep -Seconds 2
+                if ($respawned.Count -gt 0) { Start-Sleep -Seconds 2 }
 
                 # Try deletion again with cmd rd
                 & $env:ComSpec /c "rd /s /q `"\\?\$Path`"" 2>$null
                 if (-not (Test-Path $Path)) {
                     $deleted = $true
-                    Write-Host "  -> Deleted after Explorer restart" -ForegroundColor Green
+                    Write-Host "  -> Deleted with Explorer stopped" -ForegroundColor Green
                 }
             } catch {
-                Write-Host "  -> Explorer restart failed" -ForegroundColor Yellow
+                Write-Host "  -> Stopping Explorer failed" -ForegroundColor Yellow
             }
         }
 
@@ -4087,12 +4084,20 @@ function Invoke-ScoopReset {
     Write-Host ""
     if ($usedHandle) { Write-Host "  [INFO] Processes running from Scoop's directories (by image path)..." -ForegroundColor Gray }
     else { Write-Host "  [INFO] Using Get-Process fallback (may miss background services)..." -ForegroundColor Gray }
-    $runningApps = Get-Process | Where-Object {
-        $_.Path -and $_.Id -ne $PID -and (Test-ScoopOwnedPath $_.Path) -and -not ($KeepPersist -and $_.Path -like "$ScoopDir\persist\*")
-    } | Select-Object Name, Id, Path
+    # Up to three passes: an IDE restarts its terminal shell when it is stopped, a
+    # launcher restarts its helper; the second pass catches what came back
+    for ($pathPass = 1; $pathPass -le 3; $pathPass++) {
+        $runningApps = @(Get-Process | Where-Object {
+            $_.Path -and $_.Id -ne $PID -and (Test-ScoopOwnedPath $_.Path) -and -not ($KeepPersist -and $_.Path -like "$ScoopDir\persist\*")
+        } | Select-Object Name, Id, Path)
 
-    if ($runningApps) {
-        Write-Host "  [FOUND] Scoop applications detected:" -ForegroundColor Yellow
+        if ($runningApps.Count -eq 0) {
+            if ($pathPass -eq 1) { Write-Host "  [OK] No processes running from Scoop's directories" -ForegroundColor Green }
+            else { Write-Host "  [OK] Pass $pathPass`: nothing runs from Scoop's directories any more" -ForegroundColor Green }
+            break
+        }
+        if ($pathPass -eq 1) { Write-Host "  [FOUND] Scoop applications detected:" -ForegroundColor Yellow }
+        else { Write-Host "  [INFO] Pass $pathPass`: $($runningApps.Count) process(es) started again from Scoop's directories:" -ForegroundColor Yellow }
         $runningApps | ForEach-Object {
             Write-Host "    - $($_.Name) (PID: $($_.Id)): $($_.Path)" -ForegroundColor Yellow
         }
@@ -4113,8 +4118,6 @@ function Invoke-ScoopReset {
             }
         }
         Start-Sleep -Seconds 2
-    } else {
-        Write-Host "  [OK] No processes running from Scoop's directories" -ForegroundColor Green
     }
 
     # Method 4: Kill any remaining GnuPG/SSH agents (common blockers that Get-Process misses)
@@ -4194,6 +4197,7 @@ function Invoke-ScoopReset {
         Write-Host ""
         Write-Host ">>> Cleaning $Scope environment variables..." -ForegroundColor Cyan
         $removed = 0
+        $removedNames = @()
         $all = [System.Environment]::GetEnvironmentVariables($Scope)
         foreach ($name in @($all.Keys)) {
             if ($varsToKeep -contains $name) { continue }
@@ -4204,15 +4208,18 @@ function Invoke-ScoopReset {
                 [System.Environment]::SetEnvironmentVariable($name, [NullString]::Value, $Scope)
                 Write-Host "[OK] Removed $Scope variable: $name" -ForegroundColor Green
                 $removed++
+                $removedNames += $name
             }
         }
         if ($removed -eq 0) {
             Write-Host "[OK] No $Scope variables to remove" -ForegroundColor Gray
         }
+        return $removedNames
     }
 
-    Remove-ScoopEnvironmentVariables -Scope "User"
-    Remove-ScoopEnvironmentVariables -Scope "Machine"
+    $removedVariableNames = @()
+    $removedVariableNames += @(Remove-ScoopEnvironmentVariables -Scope "User")
+    $removedVariableNames += @(Remove-ScoopEnvironmentVariables -Scope "Machine")
 
     # 5. Clean User PATH
     Write-Host ""
@@ -4236,6 +4243,16 @@ function Invoke-ScoopReset {
         [System.Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
         Write-Host "[OK] Machine PATH cleaned" -ForegroundColor Green
     }
+
+    # 6b. The same for this process: everything the reset starts from here (Explorer
+    # after the cleanup, and through it every shell opened from the Start menu)
+    # inherits this environment, which until now still carried the removed values
+    # (the AVD, 30.10.: registry clean, new shells with the old JAVA_HOME)
+    foreach ($name in @($removedVariableNames | Sort-Object -Unique)) {
+        [System.Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+    }
+    $env:Path = (@([System.Environment]::GetEnvironmentVariable("Path", "Machine"), [System.Environment]::GetEnvironmentVariable("Path", "User")) | Where-Object { $_ }) -join ';'
+    Write-Host "[OK] Process environment of this shell aligned ($(@($removedVariableNames | Sort-Object -Unique).Count) variable(s), PATH)" -ForegroundColor Gray
 
     # 7. Remove directories with aggressive deletion
     Write-Host ""
@@ -4334,6 +4351,15 @@ function Invoke-ScoopReset {
             foreach ($h in $nonScoopHolders) {
                 Write-Host "  - $($h.Exe) (PID: $($h.Id)): $(if ($h.Path) { $h.Path } else { 'path not readable' })" -ForegroundColor Yellow
             }
+        }
+        # Processes that started from the remaining directories after the scan (a
+        # terminal respawned by an IDE, a shell-extension helper): named here so that
+        # the next run has a target
+        $stillRunning = @(Get-Process | Where-Object { $p = $_.Path; $p -and $_.Id -ne $PID -and @($remainingDirs | Where-Object { $p -like "$ScoopDir\$_\*" }).Count -gt 0 })
+        if ($stillRunning.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Running from the remaining directories now (started after the scan; close them or run the reset again):" -ForegroundColor Yellow
+            foreach ($r in $stillRunning) { Write-Host "  - $($r.Name) (PID: $($r.Id)): $($r.Path)" -ForegroundColor Yellow }
         }
     } else {
         Write-Host "[OK] All directories successfully removed!" -ForegroundColor Green
