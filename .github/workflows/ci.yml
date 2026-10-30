@@ -42,7 +42,8 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Force
-          $findings = @(Invoke-ScriptAnalyzer -Path bin, tools -Recurse -Severity Error)
+          # -Path takes one path: one call per directory
+          $findings = @(foreach ($dir in 'bin', 'tools') { Invoke-ScriptAnalyzer -Path $dir -Recurse -Severity Error })
           $findings | Format-Table RuleName, ScriptName, Line, Message -AutoSize -Wrap
           if ($findings.Count -gt 0) { exit 1 }
       - name: ShellCheck (WSL setup script)

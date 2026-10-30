@@ -77,13 +77,18 @@ fi
 info "apt packages from $PACKAGES_FILE"
 mapfile -t wanted < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$PACKAGES_FILE" | awk 'NF && !seen[$0]++')
 [ "${#wanted[@]}" -gt 0 ] || fail "package list $PACKAGES_FILE is empty"
+# Names that installed packages provide count as installed too: on Debian 13
+# "dnsutils" is a virtual package, provided by bind9-dnsutils
+provided=$(dpkg-query -W -f='${db:Status-Abbrev}|${Provides}\n' 2>/dev/null \
+    | awk -F'|' '$1 ~ /^ii/ {print $2}' | tr ',' '\n' \
+    | sed -e 's/([^)]*)//g' -e 's/[[:space:]]//g' -e 's/:.*//' | awk 'NF' | sort -u)
+is_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed' && return 0
+    grep -qxF "$1" <<< "$provided"
+}
 missing=()
 for p in "${wanted[@]}"; do
-    if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
-        :
-    else
-        missing+=("$p")
-    fi
+    is_installed "$p" || missing+=("$p")
 done
 ok "${#wanted[@]} in the list, $(( ${#wanted[@]} - ${#missing[@]} )) installed, ${#missing[@]} missing"
 

@@ -49,6 +49,6 @@ htop
 tmux
 vim
 shellcheck
-dnsutils
+bind9-dnsutils
 iputils-ping
 netcat-openbsd
