@@ -62,9 +62,11 @@ if [ "$(id -u)" -eq 0 ]; then SUDO=''; else SUDO='sudo'; fi
 
 # 1. Debian check
 info "Distribution"
-os_id=$(. /etc/os-release && echo "${ID:-unknown}")
-os_like=$(. /etc/os-release && echo "${ID_LIKE:-}")
-os_name=$(. /etc/os-release && echo "${PRETTY_NAME:-unknown}")
+# Read the fields instead of sourcing the file: nothing of it is executed
+os_field() { sed -n "s/^$1=//p" /etc/os-release | tr -d '"' | head -1; }
+os_id=$(os_field ID); os_id=${os_id:-unknown}
+os_like=$(os_field ID_LIKE)
+os_name=$(os_field PRETTY_NAME); os_name=${os_name:-unknown}
 if [ "$os_id" = "debian" ]; then
     ok "$os_name"
 elif [[ " $os_like " == *" debian "* ]]; then
