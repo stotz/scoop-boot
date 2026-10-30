@@ -171,6 +171,13 @@ again.
 - `pip` broken after a Python update: `python -m ensurepip --upgrade`, then
   `python -m pip install --upgrade pip`. `persist\python314\Lib\site-packages` keeps
   the installed packages.
+- After `--admin-reset --keep-persist` and a new `--user-install`, the Python manifest's
+  `post_install` may fail with "Failed to write executable - trying to use .deleteme
+  logic": `current\Scripts` points into `persist\`, where the previous `pip.exe` still
+  lives, and the upgrade cannot replace it through the junction (the same error from
+  `python -m pip install --upgrade pip`). Python is installed and the old pip works. To
+  get the current pip: `Remove-Item C:\usr\persist\python314\Scripts\pip*.exe`, then
+  `python -m ensurepip --upgrade`.
 - Git credentials after an update: they are in the Windows Credential Manager, not in
   Scoop's directories; `git config --global credential.helper manager` if the setting
   was lost.
