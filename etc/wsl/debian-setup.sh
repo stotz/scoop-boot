@@ -126,7 +126,12 @@ if [ "${#missing[@]}" -gt 0 ]; then
             [ "$answer" = "y" ] || [ "$answer" = "Y" ] || fail "cancelled"
         fi
         $SUDO apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq --no-install-recommends --no-remove "${missing[@]}"
+        # No questions during the install (debconf dialogs, needrestart, changed
+        # config files keep the existing version). The variables go through env
+        # after sudo: "VAR=x sudo cmd" loses them, sudo resets the environment.
+        $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            apt-get install -y -qq --no-install-recommends --no-remove \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${missing[@]}"
         ok "installed: ${missing[*]}"
     fi
 fi

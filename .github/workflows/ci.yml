@@ -85,6 +85,18 @@ jobs:
         run: |
           cat etc/profiles/*/debian.txt > all-profiles.debian.txt
           bash etc/wsl/debian-setup.sh --packages all-profiles.debian.txt --dry-run --no-claude
+      - name: no question stops the install (normal user through sudo, in a terminal)
+        # keyboard-configuration asks with a dialog unless DEBIAN_FRONTEND reaches
+        # apt-get; sudo drops it from the environment. A question waits for input
+        # until the timeout, so a hang fails this step.
+        shell: bash
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo whiptail > /dev/null
+          useradd -m tester && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester
+          printf 'keyboard-configuration\n' > /tmp/ask-list.txt
+          TERM=xterm-256color timeout 180 script -qfec "sudo -u tester -H bash $PWD/etc/wsl/debian-setup.sh --packages /tmp/ask-list.txt --yes --no-claude" /tmp/ask-out.txt > /dev/null < <(sleep 300)
+          dpkg-query -W -f='${Status}\n' keyboard-configuration | grep -q 'install ok installed'
+          echo "[OK] installed without a question"
       - name: install the package list
         run: bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --yes --no-claude
       - name: nothing that was installed before is gone, own files untouched
