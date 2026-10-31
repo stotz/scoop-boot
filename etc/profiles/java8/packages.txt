@@ -1,0 +1,2 @@
+# Temurin JDK 8, next to the default JDK of the java profile (java bucket)
+temurin8-jdk

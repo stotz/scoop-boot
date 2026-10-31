@@ -1,0 +1,2 @@
+# Temurin JDK 11, next to the default JDK of the java profile (java bucket)
+temurin11-jdk

@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.24.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.24.1 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,15 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.24.0
+    Version: 1.24.1
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.24.1:
+    - Profiles java8, java11, java17, java21: the Temurin JDK and its
+      JAVA_HOME_NN_X64, no PATH entry; --profile=devel,java17,java21 installs them
+      next to JDK 25. The java profile no longer sets JAVA_HOME_8_X64 to
+      JAVA_HOME_21_X64 for JDKs that are not installed
 
     Changes in v1.24.0:
     - Profiles: etc\profiles holds one directory per part of a workplace (base,
@@ -510,7 +516,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.24.0"
+$global:ScriptVersion = "1.24.1"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

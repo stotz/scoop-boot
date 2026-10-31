@@ -1,0 +1,2 @@
+# Temurin JDK 17, next to the default JDK of the java profile (java bucket)
+temurin17-jdk

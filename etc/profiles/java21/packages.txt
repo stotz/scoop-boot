@@ -1,0 +1,2 @@
+# Temurin JDK 21, next to the default JDK of the java profile (java bucket)
+temurin21-jdk

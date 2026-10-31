@@ -33,6 +33,14 @@ etc/profiles/ide/packages.txt
 etc/profiles/java/debian.txt
 etc/profiles/java/packages.txt
 etc/profiles/java/system.env
+etc/profiles/java11/packages.txt
+etc/profiles/java11/system.env
+etc/profiles/java17/packages.txt
+etc/profiles/java17/system.env
+etc/profiles/java21/packages.txt
+etc/profiles/java21/system.env
+etc/profiles/java8/packages.txt
+etc/profiles/java8/system.env
 etc/profiles/media/packages.txt
 etc/profiles/netdiag/debian.txt
 etc/profiles/netdiag/packages.txt
