@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.24.3
+    Version: 1.24.4
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.24.3"
+$global:ScriptVersion = "1.24.4"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -1672,6 +1672,46 @@ function Read-PackageList {
     return $packages
 }
 
+# Verification commands shown at the end of --user-install, per package of the
+# list: name -> one command with the expected answer. Packages without an entry
+# print nothing; the order of the list decides the order of the lines.
+$global:VerifyCommands = @(
+    @{ Name = 'temurin25-jdk'; Line = 'java -version          # openjdk 25.x' },
+    @{ Name = 'temurin21-jdk'; Line = '& "$env:JAVA_HOME_21_X64\bin\java.exe" -version   # openjdk 21.x' },
+    @{ Name = 'temurin17-jdk'; Line = '& "$env:JAVA_HOME_17_X64\bin\java.exe" -version   # openjdk 17.x' },
+    @{ Name = 'temurin11-jdk'; Line = '& "$env:JAVA_HOME_11_X64\bin\java.exe" -version   # openjdk 11.x' },
+    @{ Name = 'temurin8-jdk';  Line = '& "$env:JAVA_HOME_8_X64\bin\java.exe" -version    # openjdk 1.8' },
+    @{ Name = 'maven';         Line = 'mvn -version           # Apache Maven' },
+    @{ Name = 'gradle';        Line = 'gradle --version       # Gradle' },
+    @{ Name = 'kotlin';        Line = 'kotlinc -version       # kotlinc-jvm' },
+    @{ Name = 'python314';     Line = 'python --version       # Python 3.14.x' },
+    @{ Name = 'nodejs';        Line = 'node --version         # v26.x' },
+    @{ Name = 'perl';          Line = 'perl --version         # Strawberry Perl 5.42' },
+    @{ Name = 'msys2';         Line = 'gcc --version          # gcc.exe (Built by MSYS2 project)' },
+    @{ Name = 'cmake';         Line = 'cmake --version        # cmake version' },
+    @{ Name = 'tortoisesvn';   Line = 'svn --version          # svn, version 1.15' },
+    @{ Name = 'pwsh';          Line = 'pwsh --version         # PowerShell 7.x' },
+    @{ Name = 'azure-cli';     Line = 'az version             # azure-cli' },
+    @{ Name = 'terraform';     Line = 'terraform version      # Terraform v1.x' },
+    @{ Name = 'nmap';          Line = 'nmap --version         # Nmap version' },
+    @{ Name = 'openssl';       Line = 'openssl version        # OpenSSL' },
+    @{ Name = 'sqlite';        Line = 'sqlite3 --version      # 3.x' }
+)
+
+function Get-VerifyCommands {
+    <#
+    .SYNOPSIS
+        The verification lines for the packages of a list, in list order.
+    #>
+    param([string[]]$Packages)
+    $result = @()
+    foreach ($name in $Packages) {
+        $entry = $global:VerifyCommands | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+        if ($entry) { $result += $entry.Line }
+    }
+    return $result
+}
+
 function Test-ManifestNeedsAdmin {
     <#
     .SYNOPSIS
@@ -2852,6 +2892,16 @@ JAVA_HOME=C:\java
         $np = '{ "pre_install": "if (!(is_admin)) { error \"Admin rights required to install TortoiseGit\"; exit 1 }", "installer": { "script": "msiexec" } }'
         $plain = '{ "version": "1.0", "url": "https://example.invalid/x.zip", "bin": "x.exe" }'
         $test.Result = (Test-ManifestNeedsAdmin -Text $np) -and -not (Test-ManifestNeedsAdmin -Text $plain) -and -not (Test-ManifestNeedsAdmin -Text '')
+    } catch {}
+    $tests += $test
+
+    # Test 52c: verification lines follow the package list (profile-aware --user-install summary)
+    $test = @{Name = "Verify commands: per package of the list, in list order"; Result = $false}
+    try {
+        $lines = @(Get-VerifyCommands -Packages @('firefox', 'terraform', 'azure-cli', 'no-such-package'))
+        $test.Result = ($lines.Count -eq 2) -and ($lines[0] -like 'terraform version*') -and ($lines[1] -like 'az version*') -and
+            (@(Get-VerifyCommands -Packages @()).Count -eq 0) -and
+            (@($global:VerifyCommands | Where-Object { $_.Name -eq 'temurin25-jdk' }).Count -eq 1)
     } catch {}
     $tests += $test
 
@@ -4384,32 +4434,14 @@ function Install-ScoopTools {
     # ============================================================================
     # WSL2 CHECK (optional - for Docker alternatives and Linux development)
     # ============================================================================
+    # WSL is optional and has its own commands (--wsl-install, --wsl-setup); one line
+    # here says whether they are an option on this machine
     Write-Host ""
-    Write-Host ">>> Checking WSL2 (optional for Docker/Linux development)..." -ForegroundColor White
-    Write-Host ""
-
     $wsl2Installed = if (Test-ScoopBootFake) { Write-Host "[FAKE] WSL check skipped" -ForegroundColor DarkCyan; $false } else { Test-WSL2Installed }
-
-    if (-not $wsl2Installed) {
-        Write-Host ""
-        Write-Host "=== WSL2 Not Detected ===" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "WSL2 is recommended for:" -ForegroundColor White
-        Write-Host "  - Docker Desktop / Rancher Desktop" -ForegroundColor Gray
-        Write-Host "  - Linux development tools" -ForegroundColor Gray
-        Write-Host "  - Cross-platform testing" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "To install WSL2:" -ForegroundColor Cyan
-        Write-Host "  1. Run as Administrator: wsl --install" -ForegroundColor White
-        Write-Host "  2. Reboot system" -ForegroundColor White
-        Write-Host "  3. Verify: wsl --status" -ForegroundColor White
-        Write-Host ""
-        Write-Host "For more information: https://aka.ms/wsl2" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "[INFO] Continuing installation without WSL2..." -ForegroundColor Yellow
+    if ($wsl2Installed) {
+        Write-Host "[OK] WSL 2 is available; after the setup, --wsl-install and --wsl-setup put a Debian next to the tools" -ForegroundColor Gray
     } else {
-        Write-Host ""
-        Write-Host "[OK] WSL2 is installed and ready for Docker/Linux tools" -ForegroundColor Green
+        Write-Host "[INFO] WSL 2 not detected; the setup does not need it (--wsl-install installs it later if wanted)" -ForegroundColor Gray
     }
 
     # ============================================================================
@@ -4635,12 +4667,6 @@ function Install-ScoopTools {
     $apps = @(Read-PackageList -Path $packageFile)
     $requestedNames = @($apps | ForEach-Object { Get-ManifestAppName -Package $_ })
     Write-Host "[INFO] Package list: $packageFile ($($apps.Count) packages)" -ForegroundColor Gray
-    foreach ($entry in $PackageHandlers) {
-        if ($BootstrapPackages -contains $entry.Name) { continue }
-        if ($requestedNames -notcontains $entry.Name -and -not (Test-Path "$ScoopDir\apps\$($entry.Name)\current")) {
-            Write-Host "[WARN] $($entry.Name) is not in the package list; its post-install step ($($entry.Description)) will not run" -ForegroundColor Yellow
-        }
-    }
     if ($apps.Count -eq 0) {
         Write-Host "[FATAL] Package list is empty: $packageFile" -ForegroundColor Red
         return (New-RunResult -Command 'user-install' -Ok $false)
@@ -4772,17 +4798,15 @@ function Install-ScoopTools {
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Verify:" -ForegroundColor Cyan
-    Write-Host "  java -version    # Should show openjdk 25.x" -ForegroundColor Gray
-    Write-Host "  python --version # Should show Python 3.14.x" -ForegroundColor Gray
-    Write-Host "  gcc --version    # Should show GCC from MSYS2/UCRT64" -ForegroundColor Gray
-    Write-Host ""
-
-    if ($wsl2Installed) {
-        Write-Host "WSL2 is ready for:" -ForegroundColor Cyan
-        Write-Host "  - Docker Desktop (download: https://www.docker.com/products/docker-desktop)" -ForegroundColor Gray
-        Write-Host "  - Rancher Desktop (download: https://rancherdesktop.io)" -ForegroundColor Gray
-        Write-Host "  - Linux development (wsl)" -ForegroundColor Gray
+    # Verification commands for what this list installs (one per tool, in list order)
+    $verify = @(Get-VerifyCommands -Packages $requestedNames)
+    if ($verify.Count -gt 0) {
+        Write-Host "Verify (new shell):" -ForegroundColor Cyan
+        foreach ($line in $verify) { Write-Host "  $line" -ForegroundColor Gray }
+        Write-Host ""
+    }
+    if ($wsl2Installed -and (Test-Path (Get-DebianPackageListFile))) {
+        Write-Host "WSL 2 is available: $global:ScoopBootScript --wsl-install (Administrator), then --wsl-setup installs the apt list of your profiles" -ForegroundColor Gray
         Write-Host ""
     }
     return (New-RunResult -Command 'user-install' -Ok ($failedApps.Count -eq 0) -Data @{ Installed = $installedNow; AlreadyInstalled = $alreadyInstalled; Skipped = $skippedApps; Failed = $failedApps; UserScopeChanges = $userScopeChanges })
@@ -4817,13 +4841,6 @@ function Show-PackageList {
         Write-Host ("{0,3}  {1,-22} {2,-10}{3}" -f $n, $app, $state, $handler)
     }
     Write-Host ""
-    $listedNames = @($apps | ForEach-Object { Get-ManifestAppName -Package $_ })
-    foreach ($entry in $global:PackageHandlers) {
-        if ($global:BootstrapPackages -contains $entry.Name) { continue }
-        if ($listedNames -notcontains $entry.Name) {
-            Write-Host "[WARN] $($entry.Name) has a post-install step but is not in the list" -ForegroundColor Yellow
-        }
-    }
     if ((Split-Path -Leaf $packageFile) -eq 'default.txt') {
         Write-Host "$($apps.Count) packages. This machine uses the delivered list; $global:ScoopBootScript --profile=NAMES composes $global:PackagesDir\$(Get-Hostname).txt, which replaces it." -ForegroundColor Gray
     } else {

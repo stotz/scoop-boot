@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.24.3 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.24.4 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,20 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.24.3
+    Version: 1.24.4
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.24.4:
+    - --user-install and --list-packages no longer warn about packages with a
+      post-install step that are not in the list: with profiles that is the normal
+      case (devops has no JDK, MSYS2 or Toolbox), not a mistake
+    - The "Verify" lines at the end of --user-install follow the list: one command
+      per installed tool (java, python, gcc, az, terraform, pwsh, ...), nothing for
+      what the profile does not install
+    - WSL: one line at the start says whether WSL 2 is there, one at the end points
+      to --wsl-install/--wsl-setup when it is; the Docker Desktop and Rancher
+      Desktop advertisement is gone (review of the devops profile by Christian, 31.10.)
 
     Changes in v1.24.3:
     - --user-install tells a package apart that its manifest refuses to install
@@ -531,7 +542,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.24.3"
+$global:ScriptVersion = "1.24.4"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
