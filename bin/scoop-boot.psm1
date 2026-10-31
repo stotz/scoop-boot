@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.24.2
+    Version: 1.24.3
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.24.2"
+$global:ScriptVersion = "1.24.3"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -867,6 +867,8 @@ function Invoke-FakeScoop {
                 $bucket = if ($package -match '^([^/]+)/') { $Matches[1] } else { 'main' }
                 $current = Join-Path (Join-Path $appsDir $name) 'current'
                 if (Test-Path $current) { Write-Host "WARN  '$name' ($((Get-Content (Join-Path $current 'scoop-manifest.json') -Raw | ConvertFrom-Json).version)) is already installed."; continue }
+                # A "-np" package behaves like the nonportable bucket: its pre_install refuses a normal shell
+                if ($name -like '*-np') { Write-Host "Running pre_install script... ERROR Admin rights required to install $name"; continue }
                 if (-not (Test-Path $bucketsDir)) { New-Item -ItemType Directory -Path $bucketsDir -Force | Out-Null }
                 New-Item -ItemType Directory -Path $current -Force | Out-Null
                 [IO.File]::WriteAllText((Join-Path $current 'scoop-install.json'), "{`n    `"bucket`":  `"$bucket`",`n    `"architecture`":  `"64bit`"`n}`n")
@@ -958,6 +960,12 @@ function Invoke-FakeScoop {
             return 0
         }
         'prefix' { Write-Host (Join-Path (Join-Path $appsDir (Get-ManifestAppName -Package $rest[0])) 'current'); return 0 }
+        'cat' {
+            $name = Get-ManifestAppName -Package $rest[0]
+            if ($name -like '*-np') { Write-Host "{`n    `"version`": `"1.0.0`",`n    `"pre_install`": `"if (!(is_admin)) { error 'Admin rights required to install $name'; exit 1 }`"`n}" }
+            else { Write-Host "{`n    `"version`": `"1.0.0`",`n    `"url`": `"https://example.invalid/$name.zip`"`n}" }
+            return 0
+        }
         'which' { Write-Host (Join-Path $shimsDir "$($rest[0]).exe"); return 0 }
         'hold' { foreach ($p in $rest) { Write-Host "$p is now held and can not be updated anymore." }; return 0 }
         'unhold' { foreach ($p in $rest) { Write-Host "$p is no longer held and can be updated again." }; return 0 }
@@ -1662,6 +1670,27 @@ function Read-PackageList {
     # Plain return: callers wrap the result in @(). A "return ,$packages" would survive
     # @() as a nested array (one element of type Object[]), which -ListPackages showed.
     return $packages
+}
+
+function Test-ManifestNeedsAdmin {
+    <#
+    .SYNOPSIS
+        True when a manifest's text refuses a normal shell: the nonportable bucket
+        checks is_admin in pre_install and stops with "Admin rights required" before
+        msiexec could ask for elevation.
+    #>
+    param([string]$Text)
+    if (-not $Text) { return $false }
+    return ($Text -match 'is_admin|Admin rights required|Requires-RunAsAdministrator|requires admin')
+}
+
+function Get-ManifestText {
+    <#
+    .SYNOPSIS
+        The manifest JSON of a package as Scoop shows it (scoop cat); '' when Scoop does not know it.
+    #>
+    param([string]$Package)
+    try { return ((scoop cat $Package *>&1 | Out-String)) } catch { return '' }
 }
 
 function Get-ManifestAppName {
@@ -2814,6 +2843,15 @@ JAVA_HOME=C:\java
         $two = @(ConvertFrom-WslList -Text "Debian`r`nUbuntu-24.04`r`n`r`n")
         $none = @(ConvertFrom-WslList -Text "Windows Subsystem for Linux has no installed distributions.`r`n")
         $test.Result = ($two.Count -eq 2) -and ($two[0] -eq 'Debian') -and ($none.Count -eq 0)
+    } catch {}
+    $tests += $test
+
+    # Test 52b: a manifest that insists on an elevated shell (nonportable bucket) is recognised from its text
+    $test = @{Name = "Manifest needs admin: nonportable pre_install recognised"; Result = $false}
+    try {
+        $np = '{ "pre_install": "if (!(is_admin)) { error \"Admin rights required to install TortoiseGit\"; exit 1 }", "installer": { "script": "msiexec" } }'
+        $plain = '{ "version": "1.0", "url": "https://example.invalid/x.zip", "bin": "x.exe" }'
+        $test.Result = (Test-ManifestNeedsAdmin -Text $np) -and -not (Test-ManifestNeedsAdmin -Text $plain) -and -not (Test-ManifestNeedsAdmin -Text '')
     } catch {}
     $tests += $test
 
@@ -4548,6 +4586,7 @@ function Install-ScoopTools {
     # Bootstrap already added main + extras, we add java + versions, plus the
     # "# bucket NAME URL" lines of the package list (written by --import)
     $failedApps = @()
+    $needsAdmin = @()
     $installedNow = @()
     $alreadyInstalled = @()
     $skippedApps = @()
@@ -4637,6 +4676,12 @@ function Install-ScoopTools {
         if (Test-Path $appDir) {
             Write-Host "[OK] Installed: $app" -ForegroundColor Green
             $installedNow += $app
+        } elseif (Test-ManifestNeedsAdmin -Text (Get-ManifestText -Package $app)) {
+            # The manifest itself insists on an elevated shell (nonportable bucket);
+            # nothing this run can do, the command for an Administrator shell comes at the end
+            Write-Host "[ERROR] Not installed: $app (the manifest requires an elevated shell; see the end of the run)" -ForegroundColor Red
+            $failedApps += $app
+            $needsAdmin += $app
         } else {
             Write-Host "[ERROR] Not installed: $app" -ForegroundColor Red
             $failedApps += $app
@@ -4646,7 +4691,9 @@ function Install-ScoopTools {
     if ($failedApps.Count -gt 0) {
         Write-Host ""
         Write-Host "[WARN] $($failedApps.Count) package(s) failed: $($failedApps -join ', ')" -ForegroundColor Yellow
-        Write-Host "       Retry later with: scoop install <name>; remove leftovers with: scoop uninstall <name>" -ForegroundColor Gray
+        if (@($failedApps | Where-Object { $needsAdmin -notcontains $_ }).Count -gt 0) {
+            Write-Host "       Retry later with: scoop install <name>; remove leftovers with: scoop uninstall <name>" -ForegroundColor Gray
+        }
     }
 
     # ============================================================================
@@ -4709,6 +4756,15 @@ function Install-ScoopTools {
     if ($failedApps.Count -gt 0) {
         Write-Host "=== Installation Complete with $($failedApps.Count) failure(s) ===" -ForegroundColor Yellow
         Write-Host "Failed: $($failedApps -join ', ')" -ForegroundColor Yellow
+        if ($needsAdmin.Count -gt 0) {
+            Write-Host ""
+            Write-Host "$($needsAdmin.Count) package(s) need an elevated shell (their manifest checks for Administrator before installing):" -ForegroundColor Yellow
+            Write-Host "  Open PowerShell as Administrator and run:" -ForegroundColor White
+            foreach ($p in $needsAdmin) { Write-Host "    scoop install $p" -ForegroundColor White }
+            Write-Host "  or stay here and let the sudo package ask for elevation (one UAC prompt each):" -ForegroundColor Gray
+            foreach ($p in $needsAdmin) { Write-Host "    sudo scoop install $p" -ForegroundColor Gray }
+            Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray
+        }
     } else {
         Write-Host "=== Installation Complete! ===" -ForegroundColor Green
     }

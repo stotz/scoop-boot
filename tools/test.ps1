@@ -212,6 +212,19 @@ try {
         param($o)
         if (-not ($o -match 'Packages: 0 installed, 10 already installed, 0 skipped, 0 failed')) { return 'second run did not find everything installed' }
     }
+    Invoke-FakeStep -Name '--profile=java,python,tortoisegit --force' -Arguments @('--profile=java,python,tortoisegit', '--force') -Check {
+        param($o)
+        if (-not ((Get-Content (Join-Path $fakeRoot "etc/packages/$hostName.txt") -Raw) -match '(?m)^nonportable/tortoisegit-np$')) { return 'tortoisegit-np not in the host list' }
+        if (-not ((Get-Content (Join-Path $fakeRoot "etc/packages/$hostName.txt") -Raw) -match '(?m)^# bucket nonportable ')) { return 'bucket line missing' }
+    }
+    Invoke-FakeStep -Name '--user-install with a package that needs an elevated shell' -Arguments @('--user-install') -ExpectedExit 1 -Check {
+        param($o)
+        if (Test-Path (Join-Path $fakeRoot 'apps/tortoisegit-np')) { return 'tortoisegit-np installed although the manifest refuses a normal shell' }
+        if (-not (Test-Path (Join-Path $fakeRoot 'buckets/nonportable/bucket'))) { return 'nonportable bucket not added' }
+        if (-not ($o -match 'Open PowerShell as Administrator and run:')) { return 'no elevated-shell hint' }
+        if (-not ($o -match '^\s+scoop install nonportable/tortoisegit-np$')) { return 'no scoop install command in the hint' }
+        if (-not ($o -match 'Packages: 0 installed, 10 already installed, 0 skipped, 1 failed')) { return 'summary line not as expected' }
+    }
     $wrapper = Join-Path $fakeRoot 'bin/scoop.ps1'
     $output = & $wrapper install extras/hxd *>&1 | ForEach-Object { "$_" }
     $store = Read-FakeStore

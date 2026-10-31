@@ -162,7 +162,9 @@ Maven, Gradle, Ant, Kotlin), `java8`, `java11`, `java17`, `java21` (one more JDK
 reachable as `JAVA_HOME_NN_X64` for toolchains, not on the PATH), `node`, `perl`,
 `python`, `c++` (MSYS2/GCC, make, cmake,
 ninja, vcpkg), `tortoisegit` (from the nonportable bucket: an MSI into Program Files
-that asks for elevation and survives the reset), `docs`, `network`, `netdiag`, `db`,
+whose manifest refuses a normal shell: `--user-install` lists it at the end with the
+`scoop install` command for an Administrator shell or `sudo scoop install`), `docs`,
+`network`, `netdiag`, `db`,
 `dbclients`, `server`, `azure`,
 `azure-tools`, `iac` (Terraform), `pwsh`, `automation`, `media`. Two virtual profiles
 bundle them: `devel`, the developer workplace this project was written for (and the
@@ -266,6 +268,10 @@ leaves the installation untouched and says why. `allowed_signers` arrives once, 
 first `--update` of a machine (fingerprint above), and is never replaced automatically.
 `--update` never touches `etc\environments`, `etc\scoop-boot.conf` or a host package
 list; those files are yours.
+
+`raw.githubusercontent.com` caches `etc/LATEST` for up to five minutes: an `--update`
+right after a release can still report the previous one; run it again a few minutes
+later.
 
 `--update --branch=NAME` downloads a branch head without any check, for testing on one
 machine; every run says so until `--update --branch=main`. A branch that was merged and

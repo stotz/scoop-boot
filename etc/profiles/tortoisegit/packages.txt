@@ -1,5 +1,7 @@
 # TortoiseGit from the nonportable bucket: an MSI that installs to C:\Program Files.
-# It asks for elevation (UAC) during --user-install, is not under C:\usr and is
+# Its pre_install refuses a normal shell ("Admin rights required"): --user-install
+# reports it at the end with the command for an Administrator shell (scoop install
+# nonportable/tortoisegit-np) or "sudo scoop install ..." from the normal one. It is not under C:\usr and is
 # therefore not removed by --admin-reset (scoop uninstall tortoisegit-np does it).
 # It finds git.exe through the PATH (apps\git\current\cmd); if not, set
 # Settings > General > Git.exe Path to C:\usr\apps\git\current\bin once.

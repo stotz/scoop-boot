@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.24.2 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.24.3 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,16 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.24.2
+    Version: 1.24.3
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.24.3:
+    - --user-install tells a package apart that its manifest refuses to install
+      from a normal shell (the nonportable bucket checks is_admin in pre_install:
+      "Admin rights required", seen with tortoisegit-np on the AVD, 31.10.): the
+      summary lists those with the exact commands for an Administrator shell and
+      for "sudo scoop install" from the normal one
 
     Changes in v1.24.2:
     - --profile=devel,java17 typed without quotes in PowerShell arrives as an array
@@ -524,7 +531,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.24.2"
+$global:ScriptVersion = "1.24.3"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
