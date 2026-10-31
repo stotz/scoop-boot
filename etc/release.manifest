@@ -1,5 +1,5 @@
 # scoop-boot release manifest: written by tools/release.sh, verified by scoop-boot.ps1 --update
-tag v0034
+tag v0035
 date 2026-10-31
 sha256 cdbe1e95992a4fd8f6e7e260c50ffa59b360288931bd0e1d667735e93964f142 bin/scoop-boot.ps1
 sha256 289b1f4ba6a637f33a40e522a668a52c91e801c62ca9d576cb173748f246cf8c bin/scoop-boot.psm1
@@ -8,7 +8,7 @@ sha256 a10bc1c9e7fa82b50b6433ab9ec3112687c11d5f61bf0b5418da03ebb47e1431 bin/scoo
 sha256 5f7f5dc90056d60d73319cb524cd8157dc2920371faa38dca2249b676a48af89 bin/scoop
 sha256 d77618f12b94a9529172de93fbde72b4ee07c71da65c0a8ca2fdb0fb6231a00b etc/packages/default.txt
 sha256 4d61faf38a068b2e8cfc6c9a2e2a6476ca7ad252d873e6abd7f8b3a823a28f46 etc/packages/debian.txt
-sha256 7dab0908098510aa8d51b9412c06fed270f3ad23adb3cf63060dadfedc120d8f etc/wsl/debian-setup.sh
+sha256 371a3246ac4502232e976ba69e02a468a04e136c59158c249093453c2ded530c etc/wsl/debian-setup.sh
 sha256 297a77b7e216ed4478524e1c370b989f028883fa68ec5eff8261aabbd7ff691e etc/profiles/profiles.conf
 sha256 83b73005adec42373a76b6682845da80fc651cd7eb3e2c47964c77647ead48ab etc/profiles/system.footer.env
 sha256 6bd00051796bec2440df3ff1d961a9977b2e03e1530c745e15538969b4b367ed etc/profiles/automation/debian.txt
