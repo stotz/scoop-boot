@@ -12,8 +12,8 @@ etc/wsl/debian-setup.sh
 etc/profiles/profiles.conf
 etc/profiles/system.footer.env
 etc/profiles/automation/debian.txt
-etc/profiles/azure/packages.txt
 etc/profiles/azure-tools/packages.txt
+etc/profiles/azure/packages.txt
 etc/profiles/base/debian.txt
 etc/profiles/base/packages.txt
 etc/profiles/base/system.env
@@ -57,3 +57,4 @@ etc/profiles/python/system.env
 etc/profiles/server/packages.txt
 etc/profiles/svn/packages.txt
 etc/profiles/svn/system.env
+etc/profiles/tortoisegit/packages.txt

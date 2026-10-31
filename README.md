@@ -161,7 +161,9 @@ screenshot tools), `ide` (JetBrains Toolbox), `cli`, `svn`, `java` (Temurin JDK 
 Maven, Gradle, Ant, Kotlin), `java8`, `java11`, `java17`, `java21` (one more JDK each,
 reachable as `JAVA_HOME_NN_X64` for toolchains, not on the PATH), `node`, `perl`,
 `python`, `c++` (MSYS2/GCC, make, cmake,
-ninja, vcpkg), `docs`, `network`, `netdiag`, `db`, `dbclients`, `server`, `azure`,
+ninja, vcpkg), `tortoisegit` (from the nonportable bucket: an MSI into Program Files
+that asks for elevation and survives the reset), `docs`, `network`, `netdiag`, `db`,
+`dbclients`, `server`, `azure`,
 `azure-tools`, `iac` (Terraform), `pwsh`, `automation`, `media`. Two virtual profiles
 bundle them: `devel`, the developer workplace this project was written for (and the
 content of `default.txt`), and `devops` for infrastructure work (Azure CLI, AzCopy,
