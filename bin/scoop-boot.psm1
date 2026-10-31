@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.24.4
+    Version: 1.24.5
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.24.4"
+$global:ScriptVersion = "1.24.5"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3779,7 +3779,10 @@ function Invoke-WslSetup {
         Write-ErrorMsg "$global:BaseDir has no drive letter; WSL cannot read it under /mnt"
         return $false
     }
-    $shArgs = @($wslScript, '--packages', $wslList)
+    # --yes: the command is the consent (--dry-run is the preview), and the script's
+    # own question cannot be answered here: wsl.exe started from PowerShell hands the
+    # script no console on stdin, read gets EOF at once and the setup cancelled (AVD, 31.10.)
+    $shArgs = @($wslScript, '--packages', $wslList, '--yes')
     if ($DryRun) { $shArgs += '--dry-run' }
     if ($NoClaude) { $shArgs += '--no-claude' }
 

@@ -10,7 +10,7 @@
 #                    (resolves every package, installs nothing; root only for the
 #                    apt-get update a fresh distribution needs first)
 #   --no-claude      leaves out Claude Code
-#   --yes            no question before the installation (for CI)
+#   --yes            no question before the installation (--wsl-setup passes it; for CI)
 #
 # Steps:
 #   1. Debian check (ID=debian, or a Debian derivative such as Ubuntu: ID_LIKE=debian)
@@ -121,8 +121,11 @@ if [ "${#missing[@]}" -gt 0 ]; then
         dry "apt-get install --no-install-recommends --no-remove ${missing[*]}"
         dry "simulation: $installs package(s) installed (list and dependencies), 0 removed"
     else
-        if [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
-            read -r -p "Install ${#missing[@]} packages with apt-get? [y/N] " answer
+        # The question goes to the terminal, not to stdin: started through wsl.exe from
+        # PowerShell the script has no console on stdin (read would get EOF at once),
+        # but /dev/tty is there. Without a terminal and without --yes nothing is asked.
+        if [ "$ASSUME_YES" -eq 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+            read -r -p "Install ${#missing[@]} packages with apt-get? [y/N] " answer < /dev/tty 2> /dev/tty
             [ "$answer" = "y" ] || [ "$answer" = "Y" ] || fail "cancelled"
         fi
         $SUDO apt-get update -qq

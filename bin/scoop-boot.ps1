@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.24.4 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.24.5 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,16 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.24.4
+    Version: 1.24.5
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.24.5:
+    - --wsl-setup passes --yes to debian-setup.sh: started through wsl.exe from
+      PowerShell the script has no console on stdin, its "Install N packages?"
+      question got EOF at once and the setup cancelled (AVD, 31.10.). The command
+      is the consent, --dry-run the preview. Run by hand inside the distribution,
+      the script now asks on /dev/tty, which works from a pipe too
 
     Changes in v1.24.4:
     - --user-install and --list-packages no longer warn about packages with a
@@ -542,7 +549,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.24.4"
+$global:ScriptVersion = "1.24.5"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
