@@ -4607,7 +4607,8 @@ function Install-ScoopTools {
 
     # VC++ 2015-2022 runtime: the vcredist2022 post_install needs elevation.
     # Skip it when the runtime is already present (usual on managed images).
-    $vcRuntime = Get-ItemProperty $global:VcRuntimeKey -ErrorAction SilentlyContinue
+    # Fake mode does not look at the real registry: the runtime counts as missing
+    $vcRuntime = if (Test-ScoopBootFake) { $null } else { Get-ItemProperty $global:VcRuntimeKey -ErrorAction SilentlyContinue }
     if ($vcRuntime -and $vcRuntime.Installed -eq 1 -and $requestedNames -contains 'vcredist2022') {
         Write-Host "[OK] VC++ runtime already present ($($vcRuntime.Version)), skipping vcredist2022" -ForegroundColor Gray
         $skippedApps += @($apps | Where-Object { (Get-ManifestAppName -Package $_) -eq 'vcredist2022' })
