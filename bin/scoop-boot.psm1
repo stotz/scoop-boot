@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.22.4
+    Version: 1.23.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.22.4"
+$global:ScriptVersion = "1.23.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -215,6 +215,11 @@ $global:ParsedArgs = @{
     KeepPersist = $false
     Replace = $false
     DryRun = $false
+    WslInstall = $false
+    WslSetup = $false
+    Distro = 'Debian'
+    NoClaude = $false
+    PackageTemplate = ''
     Unknown = @()
 }
 
@@ -248,6 +253,11 @@ function Parse-Arguments {
             '^--keep-persist$' { $global:ParsedArgs.KeepPersist = $true }
             '^--replace$' { $global:ParsedArgs.Replace = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
+            '^--wsl-install$' { $global:ParsedArgs.WslInstall = $true }
+            '^--wsl-setup$' { $global:ParsedArgs.WslSetup = $true }
+            '^--distro=(.+)$' { $global:ParsedArgs.Distro = $Matches[1] }
+            '^--no-claude$' { $global:ParsedArgs.NoClaude = $true }
+            '^--package-template=(.+)$' { $global:ParsedArgs.PackageTemplate = $Matches[1] }
             # Anything else is reported by the caller: a typo, or a command that was
             # removed (--status, --suggest, --install, --environment, --init-env,
             # --apply-env, --rollback in 1.18.0)
@@ -605,12 +615,23 @@ function Show-Help {
     Write-Host "      --force            no confirmation prompt"
     Write-Host "      --keep-persist     keep $global:BaseDir\persist (app data, settings)"
     Write-Host ""
+    Write-Host "WSL (optional, after the setup):" -ForegroundColor Yellow
+    Write-Host "  --wsl-install        Administrator: WSL and the Debian distribution, not started; a restart may follow"
+    Write-Host "      --distro=NAME      another distribution than Debian (list: wsl -l -o)"
+    Write-Host "      --dry-run          show the wsl.exe commands, run nothing"
+    Write-Host "  --wsl-setup          Normal shell: apt packages of etc\packages\debian.txt and Claude Code inside the distribution"
+    Write-Host "      --no-claude        leave out Claude Code"
+    Write-Host "      --dry-run          apt-get resolves every package in simulation mode, nothing is installed"
+    Write-Host ""
     Write-Host "MAINTENANCE:" -ForegroundColor Yellow
     Write-Host "  --update             Install the current signed release: scripts, scoop wrapper, etc\packages\default.txt"
     Write-Host "      --branch=NAME      download from this branch and remember it; --branch=main switches back"
     Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply the user.* files (no admin)"
     Write-Host "      --quiet            print only a summary when something changed"
     Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
+    Write-Host "  --package-template=NAME  Use a list template on this machine, e.g. devops (infrastructure tools instead of the developer set)"
+    Write-Host "      --dry-run          show what would be copied, write nothing"
+    Write-Host "      --force            replace existing host lists (kept as .bak)"
     Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
     Write-Host "  --export[=NAME]      Write the installed packages and buckets to etc\exports\NAME.txt (default: hostname)"
     Write-Host "  --import=NAME|FILE   Add the packages of an export that this machine's list lacks to etc\packages\HOSTNAME.txt"
@@ -633,6 +654,8 @@ function Show-Help {
     Write-Host "  user.default.env                User scope, all hosts"
     Write-Host "  user.HOSTNAME.USERNAME.env      User scope, this host and user"
     Write-Host "  etc\packages\default.txt        Package list (delivered); etc\packages\HOSTNAME.txt replaces it"
+    Write-Host "  etc\packages\debian.txt         apt packages for --wsl-setup; etc\packages\HOSTNAME.debian.txt replaces it"
+    Write-Host "  etc\packages\devops.txt         Template (with devops.debian.txt) for --package-template=devops"
     Write-Host "  etc\scoop-boot.conf             DIR=<path> lines: directories --admin-init creates (tmp, devl, data)"
     Write-Host "  etc\exports\NAME.txt            Package export of a machine (--export), input for --import=NAME"
     Write-Host ""
@@ -2439,6 +2462,77 @@ JAVA_HOME=C:\java
     } catch {}
     $tests += $test
 
+    # Test 49: WSL options parse (--wsl-install, --wsl-setup, --distro=NAME, --no-claude)
+    $test = @{Name = "WSL options parse"; Result = $false}
+    try {
+        $savedArgs = $global:ParsedArgs.Clone()
+        $global:ParsedArgs = @{WslInstall = $false; WslSetup = $false; Distro = 'Debian'; NoClaude = $false; DryRun = $false; Unknown = @()}
+        Parse-Arguments -Arguments @('--wsl-install', '--wsl-setup', '--distro=Ubuntu-24.04', '--no-claude', '--dry-run')
+        $test.Result = $global:ParsedArgs.WslInstall -and $global:ParsedArgs.WslSetup -and
+            $global:ParsedArgs.Distro -eq 'Ubuntu-24.04' -and $global:ParsedArgs.NoClaude -and
+            $global:ParsedArgs.DryRun -and @($global:ParsedArgs.Unknown).Count -eq 0
+        $global:ParsedArgs = $savedArgs
+    } catch {}
+    $tests += $test
+
+    # Test 50: Windows path to WSL path (drive letter lower case, no drive letter: $null)
+    $test = @{Name = "Windows path to WSL path"; Result = $false}
+    try {
+        $test.Result = ((ConvertTo-WslPath -Path 'C:\usr\etc\wsl\debian-setup.sh') -eq '/mnt/c/usr/etc/wsl/debian-setup.sh') -and
+            ((ConvertTo-WslPath -Path 'D:\') -eq '/mnt/d') -and
+            ($null -eq (ConvertTo-WslPath -Path '\\server\share\x'))
+    } catch {}
+    $tests += $test
+
+    # Test 51: Debian package list: comments, blanks and duplicates dropped; the delivered list is valid
+    $test = @{Name = "Debian package list"; Result = $false}
+    try {
+        $tmp = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $tmp -Value @('git', '# comment', '  jq  # tool', '', 'git') -Encoding ASCII
+        $parsed = @(Read-DebianPackageList -Path $tmp)
+        Remove-Item $tmp -Force
+        $ok = ($parsed.Count -eq 2) -and ($parsed[0] -eq 'git') -and ($parsed[1] -eq 'jq')
+        $delivered = Join-Path $global:BaseDir 'etc\packages\debian.txt'
+        if (Test-Path $delivered) {
+            $names = @(Read-DebianPackageList -Path $delivered)
+            $bad = @($names | Where-Object { $_ -notmatch '^[a-z0-9][a-z0-9+.-]+$' })
+            if ($bad.Count -gt 0) { Write-Warning "debian.txt: not an apt package name: $($bad -join ', ')" }
+            $ok = $ok -and ($names.Count -gt 0) -and ($bad.Count -eq 0)
+        }
+        $test.Result = $ok
+    } catch {}
+    $tests += $test
+
+    # Test 52: wsl --list --quiet text: names kept, blank lines and messages dropped
+    $test = @{Name = "WSL distribution list"; Result = $false}
+    try {
+        $two = @(ConvertFrom-WslList -Text "Debian`r`nUbuntu-24.04`r`n`r`n")
+        $none = @(ConvertFrom-WslList -Text "Windows Subsystem for Linux has no installed distributions.`r`n")
+        $test.Result = ($two.Count -eq 2) -and ($two[0] -eq 'Debian') -and ($none.Count -eq 0)
+    } catch {}
+    $tests += $test
+
+    # Test 53: package templates: devops lists parse, plan targets the host files, default/debian are no templates
+    $test = @{Name = "Package templates (devops)"; Result = $false}
+    try {
+        $ok = $true
+        $scoopTemplate = Join-Path $global:PackagesDir 'devops.txt'
+        if (Test-Path $scoopTemplate) {
+            $names = @(Read-PackageList -Path $scoopTemplate)
+            $debNames = @(Read-DebianPackageList -Path (Join-Path $global:PackagesDir 'devops.debian.txt'))
+            $plan = @(Get-PackageTemplatePlan -Name 'devops')
+            $hostName = Get-Hostname
+            $ok = ($names.Count -gt 10) -and ($debNames.Count -gt 10) -and ($plan.Count -eq 2) -and
+                ((Split-Path -Leaf $plan[0].Target) -eq "$hostName.txt") -and
+                ((Split-Path -Leaf $plan[1].Target) -eq "$hostName.debian.txt")
+        }
+        $ok = $ok -and (@(Get-PackageTemplatePlan -Name 'default').Count -eq 0) -and
+            (@(Get-PackageTemplatePlan -Name 'debian').Count -eq 0) -and
+            (@(Get-PackageTemplatePlan -Name '..\x').Count -eq 0)
+        $test.Result = $ok
+    } catch {}
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -2990,6 +3084,289 @@ function Test-WSL2Installed {
 
     Write-Host "  [FAIL] WSL2 not detected by any method" -ForegroundColor Red
     return $false
+}
+
+# ============================================================================
+# WSL: the Debian distribution next to the Scoop tools (--wsl-install, --wsl-setup)
+# ============================================================================
+
+function ConvertTo-WslPath {
+    <#
+    .SYNOPSIS
+        Windows path to the path WSL mounts it under: C:\usr\etc -> /mnt/c/usr/etc.
+    .DESCRIPTION
+        A string conversion, no wslpath call, so it runs in the self-tests on every
+        platform. The drive letter becomes lower case, backslashes become slashes. A
+        path without drive letter (UNC, relative) returns $null: WSL does not mount it
+        under /mnt.
+    #>
+    param([string]$Path)
+    if ($Path -match '^([A-Za-z]):[\\/]?(.*)$') {
+        $rest = $Matches[2] -replace '\\', '/'
+        return ("/mnt/$($Matches[1].ToLower())/$rest").TrimEnd('/')
+    }
+    return $null
+}
+
+function Get-DebianPackageListFile {
+    <#
+    .SYNOPSIS
+        The apt package list in use: etc\packages\<host>.debian.txt when it exists,
+        otherwise the delivered etc\packages\debian.txt.
+    #>
+    $dir = Join-Path $global:BaseDir 'etc\packages'
+    $hostFile = Join-Path $dir "$(Get-Hostname).debian.txt"
+    if (Test-Path $hostFile) { return $hostFile }
+    return (Join-Path $dir 'debian.txt')
+}
+
+function Read-DebianPackageList {
+    <#
+    .SYNOPSIS
+        Package names of an apt list: comments and blank lines removed, duplicates
+        dropped, order kept. The same rules as etc\wsl\debian-setup.sh.
+    #>
+    param([string]$Path)
+    $seen = @{}
+    $names = @()
+    foreach ($line in @(Get-Content -Path $Path -ErrorAction Stop)) {
+        $name = ($line -replace '#.*$', '') -replace '\s', ''
+        if ($name -and -not $seen.ContainsKey($name)) {
+            $seen[$name] = $true
+            $names += $name
+        }
+    }
+    return $names
+}
+
+function ConvertFrom-WslList {
+    <#
+    .SYNOPSIS
+        Distribution names from the text of "wsl --list --quiet": one per line. Blank
+        lines and messages (they contain spaces, a distribution name does not, e.g.
+        "Windows Subsystem for Linux has no installed distributions.") are dropped.
+    #>
+    param([string]$Text)
+    $names = @()
+    foreach ($line in ($Text -split "`r?`n")) {
+        $t = $line.Trim()
+        if ($t -and $t -notmatch '\s') { $names += $t }
+    }
+    return $names
+}
+
+function Get-WslDistributions {
+    <#
+    .SYNOPSIS
+        Names of the installed WSL distributions; empty when wsl.exe is missing.
+        wsl.exe writes UTF-16 (see Test-WSL2Installed), read it as Unicode.
+    #>
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return @() }
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        $raw = (wsl.exe --list --quiet 2>&1 | Out-String) -replace "`0", ''
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
+    return @(ConvertFrom-WslList -Text $raw)
+}
+
+function Invoke-WslInstall {
+    <#
+    .SYNOPSIS
+        WSL and a distribution (default Debian), installed but not started (--wsl-install).
+    .DESCRIPTION
+        Administrator. Without a usable WSL 2: wsl --install --no-distribution; a
+        restart of Windows may follow, then --wsl-install again. With WSL and without
+        the distribution: wsl --install -d <name> --no-launch. The first start (Linux
+        user name and password) is left to the user: wsl -d <name>. --dry-run prints
+        the commands, runs none and needs no Administrator.
+        On an Azure Virtual Desktop WSL 2 needs a VM size with nested virtualization.
+    #>
+    param(
+        [string]$Distro = 'Debian',
+        [bool]$DryRun = $false
+    )
+    Write-Section "WSL: $Distro"
+    if (-not $DryRun -and -not (Test-AdminRights)) {
+        Write-ErrorMsg "--wsl-install needs an Administrator shell (--dry-run works without)"
+        return $false
+    }
+
+    if (-not (Test-WSL2Installed)) {
+        if ($DryRun) {
+            Write-DryRun "wsl.exe --install --no-distribution   (restart Windows, then --wsl-install again)"
+            Write-DryRun "wsl.exe --install -d $Distro --no-launch"
+            return $true
+        }
+        # Out-Host: inside a function the output would become part of the return value
+        & wsl.exe --install --no-distribution | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorMsg "wsl --install failed (exit $LASTEXITCODE); on an AVD the VM size must support nested virtualization"
+            return $false
+        }
+        Write-Warning "WSL installed: restart Windows, then run scoop-boot.ps1 --wsl-install again for $Distro"
+        return $true
+    }
+
+    if (@(Get-WslDistributions) -contains $Distro) {
+        Write-Success "$Distro is installed (wsl -d $Distro); next: scoop-boot.ps1 --wsl-setup"
+        return $true
+    }
+    if ($DryRun) {
+        Write-DryRun "wsl.exe --install -d $Distro --no-launch"
+        return $true
+    }
+    & wsl.exe --install -d $Distro --no-launch | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorMsg "wsl --install -d $Distro failed (exit $LASTEXITCODE)"
+        return $false
+    }
+    Write-Success "$Distro installed. First start (Linux user and password): wsl -d $Distro; then: scoop-boot.ps1 --wsl-setup"
+    return $true
+}
+
+function Invoke-WslSetup {
+    <#
+    .SYNOPSIS
+        Runs etc\wsl\debian-setup.sh inside the distribution (--wsl-setup).
+    .DESCRIPTION
+        Normal shell. The script and the package list are read from the Scoop root
+        under /mnt/<drive>; nothing is copied into the distribution. apt-get runs
+        through sudo inside Debian, which asks for the Linux password. --dry-run is
+        passed on: apt-get resolves every package in simulation mode and nothing is
+        installed. Without the distribution, --dry-run prints the plan.
+        On an existing distribution (also Ubuntu, --distro=NAME) it only adds: missing
+        packages with apt-get --no-remove, no upgrade, no autoremove; files already
+        in ~/.local/bin and an existing claude are left as they are.
+    #>
+    param(
+        [string]$Distro = 'Debian',
+        [bool]$DryRun = $false,
+        [bool]$NoClaude = $false
+    )
+    Write-Section "WSL setup: $Distro"
+    $setupScript = Join-Path $global:BaseDir 'etc\wsl\debian-setup.sh'
+    $listFile = Get-DebianPackageListFile
+    foreach ($f in @($setupScript, $listFile)) {
+        if (-not (Test-Path $f)) {
+            Write-ErrorMsg "$f is missing (scoop-boot.ps1 --update delivers it)"
+            return $false
+        }
+    }
+    $packages = @(Read-DebianPackageList -Path $listFile)
+    Write-Info "Package list $listFile ($($packages.Count) packages)"
+
+    $wslScript = ConvertTo-WslPath -Path $setupScript
+    $wslList = ConvertTo-WslPath -Path $listFile
+    if (-not $wslScript -or -not $wslList) {
+        Write-ErrorMsg "$global:BaseDir has no drive letter; WSL cannot read it under /mnt"
+        return $false
+    }
+    $shArgs = @($wslScript, '--packages', $wslList)
+    if ($DryRun) { $shArgs += '--dry-run' }
+    if ($NoClaude) { $shArgs += '--no-claude' }
+
+    $installed = @(Get-WslDistributions)
+    if (-not ($installed -contains $Distro)) {
+        if ($installed.Count -gt 0) {
+            Write-Warning "$Distro is not installed; installed: $($installed -join ', '). For one of them: --wsl-setup --distro=NAME"
+        }
+        if ($DryRun) {
+            Write-DryRun "$Distro is not installed: scoop-boot.ps1 --wsl-install first"
+            Write-DryRun "wsl.exe -d $Distro -- bash $($shArgs -join ' ')"
+            return $true
+        }
+        Write-ErrorMsg "$Distro is not installed: run scoop-boot.ps1 --wsl-install (Administrator) first"
+        return $false
+    }
+
+    # Out-Host: inside a function the output would become part of the return value
+    & wsl.exe -d $Distro -- bash @shArgs | Out-Host
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        Write-ErrorMsg "debian-setup.sh ended with exit $code"
+        return $false
+    }
+    return $true
+}
+
+function Get-PackageTemplatePlan {
+    <#
+    .SYNOPSIS
+        What --package-template=NAME copies: etc\packages\NAME.txt to <host>.txt and,
+        when it exists, NAME.debian.txt to <host>.debian.txt. Each entry: Source,
+        Target, Exists (the target is there already).
+    .DESCRIPTION
+        Returns nothing when NAME.txt does not exist. The names "default" and
+        "debian" are the delivered lists, not templates, and return nothing.
+    #>
+    param(
+        [string]$Name,
+        [string]$Dir = $global:PackagesDir
+    )
+    if ($Name -notmatch '^[a-z0-9][a-z0-9-]*$' -or $Name -in @('default', 'debian')) { return @() }
+    $hostName = Get-Hostname
+    $plan = @()
+    foreach ($pair in @(@("$Name.txt", "$hostName.txt"), @("$Name.debian.txt", "$hostName.debian.txt"))) {
+        $source = Join-Path $Dir $pair[0]
+        if (-not (Test-Path $source)) {
+            if ($pair[0] -eq "$Name.txt") { return @() }
+            continue
+        }
+        $target = Join-Path $Dir $pair[1]
+        $plan += [pscustomobject]@{ Source = $source; Target = $target; Exists = (Test-Path $target) }
+    }
+    return $plan
+}
+
+function Invoke-PackageTemplate {
+    <#
+    .SYNOPSIS
+        Uses a package list template on this machine (--package-template=NAME), e.g.
+        devops: tools for infrastructure work instead of the developer set.
+    .DESCRIPTION
+        Copies etc\packages\NAME.txt to etc\packages\<host>.txt (replaces default.txt
+        for --user-install and --list-packages) and NAME.debian.txt to
+        <host>.debian.txt (replaces debian.txt for --wsl-setup). An existing host
+        list is kept unless --force; with --force it is saved as .bak first.
+        --dry-run shows the plan and writes nothing. Installs nothing: run
+        --user-install and --wsl-setup afterwards.
+    #>
+    param(
+        [string]$Name,
+        [bool]$DryRun = $false,
+        [bool]$Force = $false
+    )
+    Write-Section "Package template: $Name"
+    $plan = @(Get-PackageTemplatePlan -Name $Name)
+    if ($plan.Count -eq 0) {
+        $available = @(Get-ChildItem -Path $global:PackagesDir -Filter '*.txt' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '\.debian\.txt$' -and $_.BaseName -notin @('default', (Get-Hostname)) } |
+            ForEach-Object { $_.BaseName })
+        Write-ErrorMsg "No template '$Name' in $global:PackagesDir$(if ($available.Count -gt 0) { " (available: $($available -join ', '))" })"
+        return $false
+    }
+    $blocked = @($plan | Where-Object { $_.Exists -and -not $Force })
+    foreach ($p in $plan) {
+        $what = "$(Split-Path -Leaf $p.Source) -> $(Split-Path -Leaf $p.Target)"
+        if ($p.Exists -and -not $Force) {
+            Write-Warning "$what skipped: $(Split-Path -Leaf $p.Target) exists (--force replaces it, a .bak copy is kept)"
+            continue
+        }
+        if ($DryRun) {
+            Write-DryRun "copy $what$(if ($p.Exists) { ' (existing file saved as .bak)' })"
+            continue
+        }
+        if ($p.Exists) { Copy-Item -Path $p.Target -Destination "$($p.Target).bak" -Force }
+        Copy-Item -Path $p.Source -Destination $p.Target -Force
+        Write-Success $what
+    }
+    if (-not $DryRun -and $blocked.Count -lt $plan.Count) {
+        Write-Info "Next: scoop-boot.ps1 --list-packages, then --user-install (and --wsl-setup for Debian)"
+    }
+    return ($blocked.Count -eq 0)
 }
 
 function Set-DevelopmentEnvironment {

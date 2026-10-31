@@ -1,0 +1,64 @@
+# scoop-boot apt package list TEMPLATE for DevOps and infrastructure (delivered by
+# scoop-boot.ps1 --update; do not edit). scoop-boot.ps1 --package-template=devops
+# copies it to etc\packages\<hostname>.debian.txt, which --wsl-setup then uses
+# instead of debian.txt. Network, automation and server tools instead of compilers.
+# Azure CLI and kubectl come from the Windows side (Scoop): Debian's azure-cli is
+# old and Ubuntu has no kubectl package.
+
+# Base system and certificates
+ca-certificates
+curl
+wget
+gnupg
+unzip
+zip
+xz-utils
+locales
+sudo
+
+# Version control and remote access
+git
+openssh-client
+rsync
+
+# Scripting and automation
+python3
+python3-venv
+python3-pip
+pipx
+ansible
+
+# Data formats
+jq
+yq
+
+# Network diagnostics
+bind9-dnsutils
+iputils-ping
+iproute2
+net-tools
+netcat-openbsd
+nmap
+tcpdump
+traceroute
+mtr-tiny
+socat
+iperf3
+whois
+telnet
+
+# Clients
+openssl
+postgresql-client
+ldap-utils
+
+# Command line tools
+ripgrep
+fd-find
+bat
+less
+tree
+htop
+tmux
+vim
+shellcheck

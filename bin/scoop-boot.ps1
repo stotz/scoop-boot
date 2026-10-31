@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.22.4 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.23.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -25,9 +25,30 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.22.4
+    Version: 1.23.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.23.0:
+    - --wsl-install (Administrator): WSL and the Debian distribution (--distro=NAME
+      for another one), without starting it; --dry-run shows the wsl.exe commands
+    - --wsl-setup (normal shell): runs etc\wsl\debian-setup.sh inside the
+      distribution: the missing apt packages of etc\packages\debian.txt (or
+      etc\packages\<host>.debian.txt), fd and bat under their usual names, Claude
+      Code with the official installer (--no-claude leaves it out); --dry-run lets
+      apt-get resolve every package in simulation mode and installs nothing
+    - --wsl-setup only adds, also on a distribution someone already uses (Ubuntu
+      and other Debian derivatives too): apt-get --no-remove, no upgrade, no
+      autoremove; the dry run fails when apt would remove a package; files in
+      ~/.local/bin and an existing claude stay as they are
+    - --update also delivers etc\packages\debian.txt and etc\wsl\debian-setup.sh
+    - --package-template=NAME: copies etc\packages\NAME.txt and NAME.debian.txt to
+      the host lists (<host>.txt, <host>.debian.txt); existing ones only with
+      --force (kept as .bak); --dry-run writes nothing. Template devops: Azure,
+      Terraform, Service Bus and Storage Explorer, network and database clients
+      instead of compilers and IDEs; for Debian network and automation tools
+    - Self-tests 49 to 53: WSL options, Windows-to-WSL path, Debian package list,
+      WSL distribution list, package templates
 
     Changes in v1.22.4:
     - --admin-reset ends with a WM_SETTINGCHANGE "Environment" broadcast (a User
@@ -446,7 +467,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.22.4"
+$global:ScriptVersion = "1.23.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -784,7 +805,7 @@ function Invoke-SelfUpdate {
         $ref = $Branch
         $base = "$repo/$ref"
         Write-Warning "Downloading from branch '$Branch' WITHOUT signature check (remembered in $global:BranchFile; back to signed releases with --update --branch=main)"
-        $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt')
+        $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt', 'etc/packages/debian.txt', 'etc/packages/devops.txt', 'etc/packages/devops.debian.txt', 'etc/wsl/debian-setup.sh')
     }
 
     # Phase 1: download everything and check it against the manifest; no file is
@@ -915,7 +936,7 @@ if (-not $script:ModuleLoaded) {
 }
 
 # The command goes into the log context ("scoop-boot.ps1 --user-install (1.16.0)")
-$logMode = @($args | Where-Object { $_ -match '^--' -and $_ -notmatch '^--(quiet|dry-run|force|keep-persist|branch=)' } | Select-Object -First 1)
+$logMode = @($args | Where-Object { $_ -match '^--' -and $_ -notmatch '^--(quiet|dry-run|force|keep-persist|branch=|distro=|no-claude)' } | Select-Object -First 1)
 Initialize-ScoopBootLog -ScriptName 'scoop-boot.ps1' -Version $global:ScriptVersion -Mode "$logMode" -ScriptPath $PSCommandPath -Arguments $args
 
 # Parse arguments; an unknown option stops here (a typo, or a command removed in 1.18.0)
@@ -995,6 +1016,18 @@ if ($global:ParsedArgs.UserInstall) {
 
 if ($global:ParsedArgs.ListPackages) {
     if (Invoke-ListPackages) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.PackageTemplate) {
+    if (Invoke-PackageTemplate -Name $global:ParsedArgs.PackageTemplate -DryRun $global:ParsedArgs.DryRun -Force $global:ParsedArgs.Force) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.WslInstall) {
+    if (Invoke-WslInstall -Distro $global:ParsedArgs.Distro -DryRun $global:ParsedArgs.DryRun) { exit 0 } else { exit 1 }
+}
+
+if ($global:ParsedArgs.WslSetup) {
+    if (Invoke-WslSetup -Distro $global:ParsedArgs.Distro -DryRun $global:ParsedArgs.DryRun -NoClaude $global:ParsedArgs.NoClaude) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.AdminReset) {

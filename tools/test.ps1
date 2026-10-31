@@ -85,7 +85,34 @@ if (-not $SkipDryRun) {
     Write-Host ""
 }
 
-# 4. Help, version and the unknown-option path
+# 4. Package template dry run in a scratch installation: the plan names the host
+#    lists, nothing is written; an unknown template exits with 1
+Write-Host ">>> Package template (scratch installation)"
+$scratch = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-tpl-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+try {
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    Copy-Item -Path (Join-Path $root 'bin') -Destination (Join-Path $scratch 'bin') -Recurse
+    Copy-Item -Path (Join-Path $root 'etc') -Destination (Join-Path $scratch 'etc') -Recurse
+    $hostName = [System.Net.Dns]::GetHostName().ToLower()
+    $tplScript = Join-Path $scratch 'bin/scoop-boot.ps1'
+    $output = & $tplScript --package-template=devops --dry-run *>&1 | ForEach-Object { "$_" }
+    $exit = $LASTEXITCODE
+    $written = Test-Path (Join-Path $scratch "etc/packages/$hostName.txt")
+    if ($exit -ne 0 -or $written -or -not ($output -match "devops\.txt -> $([regex]::Escape($hostName))\.txt") -or -not ($output -match 'devops\.debian\.txt')) {
+        $output | ForEach-Object { Write-Host "    $_" }
+        Write-Host "[FAIL] --package-template=devops --dry-run: exit $exit, host list written: $written"
+        $failed++
+    } else {
+        Write-Host "[OK] --package-template=devops --dry-run (plan for $hostName.txt and $hostName.debian.txt, nothing written)"
+    }
+    & $tplScript --package-template=no-such-template *> $null
+    if ($LASTEXITCODE -ne 1) { Write-Host "[FAIL] unknown template exited with $LASTEXITCODE, expected 1"; $failed++ } else { Write-Host "[OK] unknown template exits with 1" }
+} finally {
+    Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+}
+Write-Host ""
+
+# 5. Help, version and the unknown-option path
 Write-Host ">>> Command line"
 & $scoopBoot --help *> $null
 if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] --help exited with $LASTEXITCODE"; $failed++ } else { Write-Host "[OK] --help" }
