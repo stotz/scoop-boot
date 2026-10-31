@@ -1,0 +1,11 @@
+# CLI tools
+jq
+yq
+curl
+ripgrep
+fd
+bat
+fzf
+jid
+btop
+less

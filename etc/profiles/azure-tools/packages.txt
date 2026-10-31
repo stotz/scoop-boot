@@ -1,0 +1,4 @@
+# Azure (Service Bus Explorer: dead letters, resubmit; Storage Explorer: blobs, file shares)
+azcopy
+servicebusexplorer
+azurestorageexplorer

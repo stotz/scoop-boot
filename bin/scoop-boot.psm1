@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.23.0
+    Version: 1.24.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,11 +27,17 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.23.0"
+$global:ScriptVersion = "1.24.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
 $global:PackagesDir = Join-Path $global:BaseDir "etc\packages"
+# Delivered profiles (profiles.conf and one directory per profile) that --profile
+# composes into this machine's package lists and environment files
+$global:ProfilesDir = Join-Path $global:BaseDir "etc\profiles"
+# Full path for the "run this next" hints: bin\ is on the PATH only after
+# --admin-setenv and a new shell, and not at all after a reset
+$global:ScoopBootScript = Join-Path $global:ScriptRoot "scoop-boot.ps1"
 # Branch that --update downloads from; written by --update --branch=NAME, removed by
 # --branch=main. A test machine stays on its branch until it is switched back.
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
@@ -219,7 +225,8 @@ $global:ParsedArgs = @{
     WslSetup = $false
     Distro = 'Debian'
     NoClaude = $false
-    PackageTemplate = ''
+    Profile = ''
+    ListProfiles = $false
     Unknown = @()
 }
 
@@ -257,7 +264,8 @@ function Parse-Arguments {
             '^--wsl-setup$' { $global:ParsedArgs.WslSetup = $true }
             '^--distro=(.+)$' { $global:ParsedArgs.Distro = $Matches[1] }
             '^--no-claude$' { $global:ParsedArgs.NoClaude = $true }
-            '^--package-template=(.+)$' { $global:ParsedArgs.PackageTemplate = $Matches[1] }
+            '^--profile=(.+)$' { $global:ParsedArgs.Profile = $Matches[1] }
+            '^--list-profiles$' { $global:ParsedArgs.ListProfiles = $true }
             # Anything else is reported by the caller: a typo, or a command that was
             # removed (--status, --suggest, --install, --environment, --init-env,
             # --apply-env, --rollback in 1.18.0)
@@ -313,6 +321,8 @@ function Write-DryRun {
 # ============================================================================
 
 function Test-AdminRights {
+    # Fake mode: the setup commands run end to end without an elevated shell
+    if (Test-ScoopBootFake) { return $true }
     # No Windows principal outside Windows (the self-tests run on Linux too)
     if (-not (Test-Path variable:IsWindows) -or $IsWindows) {
         $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -357,7 +367,8 @@ function Get-ScoopBootConfigDefaultText {
     $lines = @(
         '# scoop-boot configuration (read by --admin-init and --platform-report; never touched by --update)',
         '# DIR: directories created when missing, one per line, absolute path without spaces.',
-        '# TMP, DEVL_ROOT and DATA in the environment file should point to these.'
+        '# TMP, DEVL_ROOT and DATA in the environment file should point to these.',
+        '# PROFILE: the profiles this machine was set up with (written by --profile and --admin-init).'
     )
     foreach ($name in @('tmp', 'devl', 'data')) { $lines += "DIR=$(Join-Path $drive $name)" }
     return ($lines -join "`n") + "`n"
@@ -369,14 +380,16 @@ function Get-ScoopBootConfig {
         Reads etc\scoop-boot.conf: Path, Exists, Dirs (valid DIR lines), Invalid (rejected lines).
     #>
     $path = Join-Path $global:BaseDir 'etc\scoop-boot.conf'
-    $config = @{ Path = $path; Exists = (Test-Path $path); Dirs = @(); Invalid = @() }
+    $config = @{ Path = $path; Exists = (Test-Path $path); Dirs = @(); Invalid = @(); Profile = '' }
     if (-not $config.Exists) {
         $drive = [IO.Path]::GetPathRoot($global:BaseDir)
         $config.Dirs = @(@('tmp', 'devl', 'data') | ForEach-Object { Join-Path $drive $_ })
         return $config
     }
     foreach ($op in @(Read-EnvironmentFile -FilePath $path)) {
-        if ($op.Type -ne 'Set' -or $op.Name -ne 'DIR') { continue }
+        if ($op.Type -ne 'Set') { continue }
+        if ($op.Name -eq 'PROFILE') { $config.Profile = "$($op.Value)".Trim(); continue }
+        if ($op.Name -ne 'DIR') { continue }
         $value = "$($op.Value)".Trim()
         # Absolute, no spaces: Scoop and several installers fail on paths with spaces
         if ($value -match '^[A-Za-z]:\\[^\s]*$') { $config.Dirs += $value.TrimEnd('\') } else { $config.Invalid += $value }
@@ -418,7 +431,7 @@ function Get-EnvValue {
     if ($global:EnvDryRunState -and $global:EnvDryRunState.ContainsKey($Scope) -and $global:EnvDryRunState[$Scope].ContainsKey($Name)) {
         return $global:EnvDryRunState[$Scope][$Name]
     }
-    return [Environment]::GetEnvironmentVariable($Name, $Scope)
+    return (Get-RegistryEnvironmentVariable -Name $Name -Scope $Scope)
 }
 
 function Set-EnvValue {
@@ -434,10 +447,7 @@ function Set-EnvValue {
         }
         return
     }
-    # A PowerShell $null reaches .NET as an empty string on pwsh 7.6, which leaves the
-    # variable in place (empty) instead of removing it; NullString is a real null
-    $raw = if ($null -eq $Value) { [NullString]::Value } else { [string]$Value }
-    [Environment]::SetEnvironmentVariable($Name, $raw, $Scope)
+    Set-RegistryEnvironmentVariable -Name $Name -Value $Value -Scope $Scope
 }
 
 function Get-EnvDryRunDiff {
@@ -453,7 +463,7 @@ function Get-EnvDryRunDiff {
     if (-not $global:EnvDryRunState -or -not $global:EnvDryRunState.ContainsKey($Scope)) { return $result }
     foreach ($name in ($global:EnvDryRunState[$Scope].Keys | Sort-Object)) {
         $new = $global:EnvDryRunState[$Scope][$name]
-        $old = [Environment]::GetEnvironmentVariable($name, $Scope)
+        $old = Get-RegistryEnvironmentVariable -Name $name -Scope $Scope
         $item = [pscustomobject]@{ Name = $name; Kind = 'unchanged'; Old = $old; New = $new; Added = @(); Removed = @(); OrderChanged = $false }
         if ($null -eq $old -and $null -eq $new) { continue }
         elseif ($null -eq $old) { $item.Kind = 'new' }
@@ -564,9 +574,9 @@ function Expand-EnvironmentVariables {
             }
             else {
                 # Try environment variable
-                $envValue = [Environment]::GetEnvironmentVariable($varName, "Machine")
+                $envValue = Get-RegistryEnvironmentVariable -Name $varName -Scope 'Machine'
                 if ([string]::IsNullOrEmpty($envValue)) {
-                    $envValue = [Environment]::GetEnvironmentVariable($varName, "User")
+                    $envValue = Get-RegistryEnvironmentVariable -Name $varName -Scope 'User'
                 }
                 if ([string]::IsNullOrEmpty($envValue)) {
                     $envValue = [Environment]::GetEnvironmentVariable($varName, "Process")
@@ -606,7 +616,8 @@ function Show-Help {
     Write-Host "  scoop-boot.ps1 <command> [options]"
     Write-Host ""
     Write-Host "SETUP (Administrator shell unless noted; run in this order):" -ForegroundColor Yellow
-    Write-Host "  --admin-init         1: directories, --update, environment files from the templates, opens the system file"
+    Write-Host "  --admin-init         1: directories, --update, package list and environment files from the profiles, opens the system file"
+    Write-Host "      --profile=NAMES    profiles for this machine (default: PROFILE in etc\scoop-boot.conf, else devel)"
     Write-Host "  --admin-setenv       2: apply the environment files at Machine scope (Phase 1)"
     Write-Host "      --dry-run          show the net effect without applying anything (no Administrator needed)"
     Write-Host "  --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)"
@@ -624,14 +635,15 @@ function Show-Help {
     Write-Host "      --dry-run          apt-get resolves every package in simulation mode, nothing is installed"
     Write-Host ""
     Write-Host "MAINTENANCE:" -ForegroundColor Yellow
-    Write-Host "  --update             Install the current signed release: scripts, scoop wrapper, etc\packages\default.txt"
+    Write-Host "  --update             Install the current signed release: scripts, scoop wrapper, package lists, profiles, etc\wsl (etc\release.files)"
     Write-Host "      --branch=NAME      download from this branch and remember it; --branch=main switches back"
     Write-Host "  --clean-user-scope   Remove Scoop's User-scope overrides, apply the user.* files (no admin)"
     Write-Host "      --quiet            print only a summary when something changed"
     Write-Host "  --list-packages      Package list in use, status of each package and its post-install steps; installs nothing"
-    Write-Host "  --package-template=NAME  Use a list template on this machine, e.g. devops (infrastructure tools instead of the developer set)"
-    Write-Host "      --dry-run          show what would be copied, write nothing"
-    Write-Host "      --force            replace existing host lists (kept as .bak)"
+    Write-Host "  --profile=NAMES      Compose etc\packages\HOSTNAME.txt and the environment files from profiles: devel, devops, or java,c++,python"
+    Write-Host "      --dry-run          show the files, write nothing"
+    Write-Host "      --force            replace existing host files (the old ones are kept as .bak)"
+    Write-Host "  --list-profiles      The profiles etc\profiles delivers, single and virtual, with their packages"
     Write-Host "  --platform-report    Defender/ASR rules and blocks, profile container, TMP: what the platform does to the setup; exit 1 on findings"
     Write-Host "  --export[=NAME]      Write the installed packages and buckets to etc\exports\NAME.txt (default: hostname)"
     Write-Host "  --import=NAME|FILE   Add the packages of an export that this machine's list lacks to etc\packages\HOSTNAME.txt"
@@ -653,10 +665,10 @@ function Show-Help {
     Write-Host "  system.HOSTNAME.USERNAME.env    Machine scope, this host and user (source of truth)"
     Write-Host "  user.default.env                User scope, all hosts"
     Write-Host "  user.HOSTNAME.USERNAME.env      User scope, this host and user"
-    Write-Host "  etc\packages\default.txt        Package list (delivered); etc\packages\HOSTNAME.txt replaces it"
-    Write-Host "  etc\packages\debian.txt         apt packages for --wsl-setup; etc\packages\HOSTNAME.debian.txt replaces it"
-    Write-Host "  etc\packages\devops.txt         Template (with devops.debian.txt) for --package-template=devops"
-    Write-Host "  etc\scoop-boot.conf             DIR=<path> lines: directories --admin-init creates (tmp, devl, data)"
+    Write-Host "  etc\packages\default.txt        Package list of the devel profile (delivered); etc\packages\HOSTNAME.txt replaces it"
+    Write-Host "  etc\packages\debian.txt         apt packages of the devel profile for --wsl-setup; HOSTNAME.debian.txt replaces it"
+    Write-Host "  etc\profiles\                   profiles.conf and one directory per profile (packages.txt, system.env, user.env, debian.txt)"
+    Write-Host "  etc\scoop-boot.conf             DIR=<path> lines: directories --admin-init creates (tmp, devl, data); PROFILE=NAMES"
     Write-Host "  etc\exports\NAME.txt            Package export of a machine (--export), input for --import=NAME"
     Write-Host ""
     Write-Host "LIST OPERATIONS (work for ALL variables):" -ForegroundColor Yellow
@@ -685,6 +697,285 @@ function Show-Version {
     } else {
         Write-Host "no release manifest yet: run --update to install the signed release" -ForegroundColor Yellow
     }
+}
+
+# ============================================================================
+# FAKE MODE (SCOOPBOOT_FAKE=1)
+# No Scoop, no registry, no processes: the setup commands run end to end against
+# a simulated Scoop in the same directory layout (apps\<name>\current with the
+# JSON files Scoop writes, shims\, buckets\) and a registry kept in
+# etc\fake\registry.json. tools/test.ps1 and the CI run --admin-init,
+# --admin-setenv, --user-install, --export, --import, --clean-user-scope and
+# --admin-reset this way on every platform. Nothing real is installed or written
+# outside the Scoop root. Set the variable in the shell: $env:SCOOPBOOT_FAKE = '1'.
+# ============================================================================
+
+function Test-ScoopBootFake {
+    return ($env:SCOOPBOOT_FAKE -eq '1')
+}
+
+function Get-FakeRegistryPath {
+    return (Join-Path $global:BaseDir 'etc\fake\registry.json')
+}
+
+function Read-FakeRegistry {
+    <#
+    .SYNOPSIS
+        The simulated registry: a hashtable with Machine and User hashtables (names case-insensitive, as in Windows).
+    #>
+    $store = @{ Machine = @{}; User = @{} }
+    $path = Get-FakeRegistryPath
+    if (-not (Test-Path $path)) { return $store }
+    try {
+        $json = Get-Content -Path $path -Raw | ConvertFrom-Json
+        foreach ($scope in @('Machine', 'User')) {
+            if ($json.PSObject.Properties.Name -contains $scope -and $json.$scope) {
+                foreach ($property in $json.$scope.PSObject.Properties) { $store[$scope][$property.Name] = "$($property.Value)" }
+            }
+        }
+    } catch { }
+    return $store
+}
+
+function Write-FakeRegistry {
+    param([hashtable]$Store)
+    $path = Get-FakeRegistryPath
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $ordered = [ordered]@{}
+    foreach ($scope in @('Machine', 'User')) {
+        $values = [ordered]@{}
+        foreach ($name in ($Store[$scope].Keys | Sort-Object)) { $values[$name] = $Store[$scope][$name] }
+        $ordered[$scope] = $values
+    }
+    [IO.File]::WriteAllText($path, (($ordered | ConvertTo-Json -Depth 4) + "`n"), (New-Object Text.UTF8Encoding($false)))
+}
+
+function Get-RegistryEnvironmentVariable {
+    <#
+    .SYNOPSIS
+        A Machine or User environment variable from the registry, or from the simulated registry in fake mode; Process reads this process.
+    #>
+    param([string]$Name, [string]$Scope)
+    if ($Scope -eq 'Process' -or -not (Test-ScoopBootFake)) { return [Environment]::GetEnvironmentVariable($Name, $Scope) }
+    $store = Read-FakeRegistry
+    if ($store[$Scope].ContainsKey($Name)) { return $store[$Scope][$Name] }
+    return $null
+}
+
+function Set-RegistryEnvironmentVariable {
+    <#
+    .SYNOPSIS
+        Writes a Machine or User variable ($null removes it) to the registry, or to the simulated registry in fake mode.
+    #>
+    param([string]$Name, [object]$Value, [string]$Scope)
+    if ($Scope -eq 'Process' -or -not (Test-ScoopBootFake)) {
+        # A PowerShell $null reaches .NET as an empty string on pwsh 7.6, which leaves
+        # the variable in place (empty) instead of removing it; NullString is a real null
+        $raw = if ($null -eq $Value -or "$Value" -eq '') { [NullString]::Value } else { [string]$Value }
+        [Environment]::SetEnvironmentVariable($Name, $raw, $Scope)
+        return
+    }
+    $store = Read-FakeRegistry
+    if ($null -eq $Value -or "$Value" -eq '') { $store[$Scope].Remove($Name) } else { $store[$Scope][$Name] = [string]$Value }
+    Write-FakeRegistry -Store $store
+}
+
+function Get-RegistryEnvironmentVariables {
+    <#
+    .SYNOPSIS
+        All variables of a scope as a hashtable (a copy; the registry or the simulated one).
+    #>
+    param([string]$Scope)
+    $result = @{}
+    if ($Scope -eq 'Process' -or -not (Test-ScoopBootFake)) {
+        $all = [Environment]::GetEnvironmentVariables($Scope)
+        foreach ($key in $all.Keys) { $result["$key"] = "$($all[$key])" }
+        return $result
+    }
+    $store = Read-FakeRegistry
+    foreach ($key in $store[$Scope].Keys) { $result[$key] = $store[$Scope][$key] }
+    return $result
+}
+
+function Add-FakeUserPathEntry {
+    # What Scoop does on install, reset and shim add: the directory lands in front of the User PATH
+    param([string]$Entry)
+    $current = Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User'
+    $parts = @(if ($current) { $current -split ';' | Where-Object { $_ } } else { @() })
+    if ($parts -notcontains $Entry) { $parts = @($Entry) + $parts }
+    Set-RegistryEnvironmentVariable -Name 'Path' -Value ($parts -join ';') -Scope 'User'
+}
+
+function Remove-FakeUserPathEntry {
+    param([string]$Entry)
+    $current = Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User'
+    if (-not $current) { return }
+    $parts = @($current -split ';' | Where-Object { $_ -and $_ -ne $Entry })
+    Set-RegistryEnvironmentVariable -Name 'Path' -Value $(if ($parts.Count -gt 0) { $parts -join ';' } else { $null }) -Scope 'User'
+}
+
+function New-FakeScoopCore {
+    <#
+    .SYNOPSIS
+        What the Scoop installer leaves behind, simulated: apps\scoop\current\bin\scoop.ps1 and shims\scoop.ps1 (+ scoop for a POSIX shell), both forwarding to Invoke-FakeScoop.
+    #>
+    $root = $global:BaseDir
+    $core = Join-Path $root 'apps\scoop\current\bin'
+    $shims = Join-Path $root 'shims'
+    foreach ($dir in @($core, $shims)) { if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null } }
+    $module = Join-Path $global:ScriptRoot 'scoop-boot.psm1'
+    $shim = @(
+        '# scoop-boot fake Scoop (SCOOPBOOT_FAKE=1): forwards to Invoke-FakeScoop of the module',
+        "Import-Module '$module' -DisableNameChecking -Force",
+        'exit (Invoke-FakeScoop @args)'
+    ) -join "`n"
+    foreach ($file in @((Join-Path $core 'scoop.ps1'), (Join-Path $shims 'scoop.ps1'))) { [IO.File]::WriteAllText($file, $shim + "`n", (New-Object Text.UTF8Encoding($false))) }
+    [IO.File]::WriteAllText((Join-Path $shims 'scoop'), "#!/bin/sh`nexec pwsh -NoProfile -File `"`$(dirname `"`$0`")/scoop.ps1`" `"`$@`"`n", (New-Object Text.UTF8Encoding($false)))
+    Write-Host "[FAKE] Scoop core simulated: $core\scoop.ps1" -ForegroundColor DarkCyan
+}
+
+function Invoke-FakeScoop {
+    <#
+    .SYNOPSIS
+        A Scoop that installs nothing: the commands scoop-boot and its tests use, with
+        Scoop's side effects on disk and in the (simulated) User scope. Returns the exit code.
+    .DESCRIPTION
+        install: apps\<name>\current with scoop-install.json and scoop-manifest.json,
+        shims\<name>.exe, the directory and shims\ in front of the User PATH, and
+        the User variables Scoop's manifests set (JAVA_HOME for a JDK, GRADLE_USER_HOME,
+        KOTLIN_HOME, ANT_HOME). uninstall, reset, list, bucket add/list/rm, shim add,
+        hold, unhold, update, cleanup, cache, config, status, prefix, which, export
+        print what Scoop prints and keep the state consistent.
+    #>
+    $root = $global:BaseDir
+    $arguments = @($args | ForEach-Object { "$_" })
+    $command = if ($arguments.Count -gt 0) { $arguments[0].ToLower() } else { '' }
+    $rest = @($arguments | Select-Object -Skip 1)
+    $appsDir = Join-Path $root 'apps'
+    $shimsDir = Join-Path $root 'shims'
+    $bucketsDir = Join-Path $root 'buckets'
+    $envSet = @{ 'temurin25-jdk' = @{ JAVA_HOME = 'apps\temurin25-jdk\current' }; 'temurin21-jdk' = @{ JAVA_HOME = 'apps\temurin21-jdk\current' }
+                 'temurin17-jdk' = @{ JAVA_HOME = 'apps\temurin17-jdk\current' }; 'temurin11-jdk' = @{ JAVA_HOME = 'apps\temurin11-jdk\current' }
+                 'gradle' = @{ GRADLE_USER_HOME = 'apps\gradle\current\.gradle' }; 'kotlin' = @{ KOTLIN_HOME = 'apps\kotlin\current' }; 'ant' = @{ ANT_HOME = 'apps\ant\current' } }
+    $markers = @{ 'git' = @('cmd\git.exe'); '7zip' = @('7z.exe'); 'temurin25-jdk' = @('bin\java.exe'); 'msys2' = @('msys2_shell.cmd'); 'nmap' = @('ncat.exe'); 'sysinternals' = @('handle64.exe') }
+    switch ($command) {
+        'install' {
+            foreach ($package in $rest) {
+                if ($package -like '-*') { continue }
+                $name = Get-ManifestAppName -Package $package
+                $bucket = if ($package -match '^([^/]+)/') { $Matches[1] } else { 'main' }
+                $current = Join-Path (Join-Path $appsDir $name) 'current'
+                if (Test-Path $current) { Write-Host "WARN  '$name' ($((Get-Content (Join-Path $current 'scoop-manifest.json') -Raw | ConvertFrom-Json).version)) is already installed."; continue }
+                if (-not (Test-Path $bucketsDir)) { New-Item -ItemType Directory -Path $bucketsDir -Force | Out-Null }
+                New-Item -ItemType Directory -Path $current -Force | Out-Null
+                [IO.File]::WriteAllText((Join-Path $current 'scoop-install.json'), "{`n    `"bucket`":  `"$bucket`",`n    `"architecture`":  `"64bit`"`n}`n")
+                [IO.File]::WriteAllText((Join-Path $current 'scoop-manifest.json'), "{`n    `"version`":  `"1.0.0`",`n    `"description`":  `"fake $name`"`n}`n")
+                foreach ($marker in @($markers[$name])) {
+                    if (-not $marker) { continue }
+                    $file = Join-Path $current $marker
+                    $dir = Split-Path -Parent $file
+                    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                    [IO.File]::WriteAllText($file, '')
+                }
+                if (-not (Test-Path $shimsDir)) { New-Item -ItemType Directory -Path $shimsDir -Force | Out-Null }
+                [IO.File]::WriteAllText((Join-Path $shimsDir "$name.exe"), '')
+                Write-Host "Installing '$name' (1.0.0) [64bit] from the '$bucket' bucket"
+                Write-Host "Linking $current => $(Join-Path (Join-Path $appsDir $name) '1.0.0')"
+                Write-Host "Creating shim for '$name'."
+                # Registry values as Scoop writes them on Windows: backslashes under the root
+                if (-not ((Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User') -split ';' -contains "$root\shims")) { Write-Host "Adding $root\shims to your path."; Add-FakeUserPathEntry -Entry "$root\shims" }
+                Add-FakeUserPathEntry -Entry "$root\apps\$name\current"
+                if ($envSet.ContainsKey($name)) {
+                    foreach ($variable in $envSet[$name].Keys) {
+                        Set-RegistryEnvironmentVariable -Name $variable -Value "$root\$($envSet[$name][$variable])" -Scope 'User'
+                        Write-Host "Environment variable '$variable' set to '$root\$($envSet[$name][$variable])'"
+                    }
+                }
+                Write-Host "'$name' (1.0.0) was installed successfully!"
+            }
+            return 0
+        }
+        'uninstall' {
+            foreach ($package in $rest) {
+                if ($package -like '-*') { continue }
+                $name = Get-ManifestAppName -Package $package
+                $appDir = Join-Path $appsDir $name
+                if (-not (Test-Path $appDir)) { Write-Host "ERROR '$name' isn't installed."; continue }
+                Write-Host "Uninstalling '$name' (1.0.0)."
+                Remove-Item -Path $appDir -Recurse -Force
+                Remove-Item -Path (Join-Path $shimsDir "$name.exe") -Force -ErrorAction SilentlyContinue
+                Remove-FakeUserPathEntry -Entry "$root\apps\$name\current"
+                if ($envSet.ContainsKey($name)) { foreach ($variable in $envSet[$name].Keys) { Set-RegistryEnvironmentVariable -Name $variable -Value $null -Scope 'User' } }
+                Write-Host "'$name' was uninstalled."
+            }
+            return 0
+        }
+        'reset' {
+            foreach ($package in $rest) {
+                $name = Get-ManifestAppName -Package $package
+                $current = Join-Path (Join-Path $appsDir $name) 'current'
+                if (-not (Test-Path $current)) { Write-Host "ERROR '$name' isn't installed."; continue }
+                Write-Host "Resetting $name (1.0.0)."
+                Add-FakeUserPathEntry -Entry "$root\apps\$name\current"
+                if ($envSet.ContainsKey($name)) { foreach ($variable in $envSet[$name].Keys) { Set-RegistryEnvironmentVariable -Name $variable -Value "$root\$($envSet[$name][$variable])" -Scope 'User' } }
+            }
+            return 0
+        }
+        'list' {
+            Write-Host "Installed apps:"
+            Write-Host ""
+            Write-Host "Name   Version Source Updated"
+            Write-Host "----   ------- ------ -------"
+            foreach ($app in @(Get-InstalledScoopPackages)) { Write-Host ("{0,-22} {1,-8} {2}" -f $app.Name, $app.Version, $app.Bucket) }
+            return 0
+        }
+        'bucket' {
+            $sub = if ($rest.Count -gt 0) { $rest[0].ToLower() } else { 'list' }
+            if ($sub -eq 'add') {
+                $name = $rest[1]
+                $url = if ($rest.Count -gt 2) { $rest[2] } else { "https://github.com/ScoopInstaller/$name" }
+                $dir = Join-Path $bucketsDir $name
+                if (Test-Path $dir) { Write-Host "WARN  The '$name' bucket already exists. To add this bucket again, first remove it by running 'scoop bucket rm $name'."; return 0 }
+                New-Item -ItemType Directory -Path (Join-Path $dir 'bucket') -Force | Out-Null
+                New-Item -ItemType Directory -Path (Join-Path $dir '.git') -Force | Out-Null
+                [IO.File]::WriteAllText((Join-Path (Join-Path $dir '.git') 'config'), "[remote `"origin`"]`n`turl = $url`n")
+                Write-Host "Checking repo... OK."
+                Write-Host "The $name bucket was added successfully."
+                return 0
+            }
+            if ($sub -eq 'rm') { Remove-Item -Path (Join-Path $bucketsDir $rest[1]) -Recurse -Force -ErrorAction SilentlyContinue; return 0 }
+            foreach ($bucket in @(Get-ScoopBuckets)) { Write-Host ("{0,-10} {1}" -f $bucket.Name, $bucket.Url) }
+            return 0
+        }
+        'shim' {
+            if ($rest.Count -ge 3 -and $rest[0] -eq 'add') {
+                if (-not (Test-Path $shimsDir)) { New-Item -ItemType Directory -Path $shimsDir -Force | Out-Null }
+                [IO.File]::WriteAllText((Join-Path $shimsDir "$($rest[1]).exe"), '')
+                Add-FakeUserPathEntry -Entry "$root\shims"
+                Write-Host "Adding local shim $($rest[1])..."
+            }
+            return 0
+        }
+        'prefix' { Write-Host (Join-Path (Join-Path $appsDir (Get-ManifestAppName -Package $rest[0])) 'current'); return 0 }
+        'which' { Write-Host (Join-Path $shimsDir "$($rest[0]).exe"); return 0 }
+        'hold' { foreach ($p in $rest) { Write-Host "$p is now held and can not be updated anymore." }; return 0 }
+        'unhold' { foreach ($p in $rest) { Write-Host "$p is no longer held and can be updated again." }; return 0 }
+        'update' { Write-Host "Updating Scoop..."; Write-Host "Scoop was updated successfully!"; return 0 }
+        'cleanup' { Write-Host "Everything is shiny now!"; return 0 }
+        'cache' { Write-Host "Deleted: 0 files, 0 bytes"; return 0 }
+        'config' { Write-Host "'$($rest[0])' has been set to '$($rest[1])'"; return 0 }
+        'status' { Write-Host "Scoop is up to date."; Write-Host "Everything is ok!"; return 0 }
+        'export' { foreach ($app in @(Get-InstalledScoopPackages)) { Write-Host "$($app.Name) $($app.Version) [$($app.Bucket)]" }; return 0 }
+        '--version' { Write-Host "Current Scoop version:"; Write-Host "fake (scoop-boot SCOOPBOOT_FAKE=1)"; return 0 }
+        default { Write-Host "[FAKE] scoop $($arguments -join ' '): not simulated, nothing done" -ForegroundColor DarkCyan; return 0 }
+    }
+}
+
+# In fake mode every "scoop ..." call inside the module resolves to this function
+# instead of the shim on the PATH; outside fake mode the function does not exist
+if (Test-ScoopBootFake) {
+    function scoop { $null = Invoke-FakeScoop @args }
 }
 
 # ============================================================================
@@ -747,8 +1038,8 @@ function Invoke-Bootstrap {
     } else {
         # Set environment variables
         Write-Info "Setting environment variables..."
-        [Environment]::SetEnvironmentVariable('SCOOP', $global:BaseDir, 'User')
-        [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$global:BaseDir\global", 'User')
+        Set-RegistryEnvironmentVariable -Name 'SCOOP' -Value $global:BaseDir -Scope 'User'
+        Set-RegistryEnvironmentVariable -Name 'SCOOP_GLOBAL' -Value "$global:BaseDir\global" -Scope 'User'
         $env:SCOOP = $global:BaseDir
         $env:SCOOP_GLOBAL = "$global:BaseDir\global"
         Write-Success "Environment variables set"
@@ -761,7 +1052,8 @@ function Invoke-Bootstrap {
         Set-ScoopBootTitle -Text "scoop-boot bootstrap scoop"
         $installerOutput = @()
         $savedPath = $env:Path
-        try {
+        if (Test-ScoopBootFake) { New-FakeScoopCore }
+        else { try {
             $hidden = @((Join-Path $global:BaseDir 'bin'), $scoopShims) | ForEach-Object { $_.TrimEnd('\').ToLower() }
             $env:Path = (@($env:Path -split ';') | Where-Object { $_ -and ($hidden -notcontains $_.TrimEnd('\').ToLower()) }) -join ';'
             $scoopInstaller = Get-ScoopInstaller -OutFile "$env:TEMP\scoop-install.ps1"
@@ -778,7 +1070,7 @@ function Invoke-Bootstrap {
         }
         finally {
             $env:Path = $savedPath
-        }
+        } }
 
         # Verify installation on the file system, then on the PATH
         if (-not (Test-Path $scoopCore) -or -not (Test-Path $scoopShims)) {
@@ -817,8 +1109,10 @@ function Invoke-Bootstrap {
         }
         $exe = Join-Path $global:BaseDir $tool.Exe
         try {
+            if (Test-ScoopBootFake) { Write-Success "$($tool.Name) installed (fake, not started)" } else {
             & $exe @($tool.Args) 2>&1 | Out-Null
             Write-Success "$($tool.Name) installed and runs"
+            }
         } catch {
             Write-Host "[FATAL] $($tool.Name) is installed but Windows refuses to start $exe" -ForegroundColor Red
             Write-Host "        $($_.Exception.Message)" -ForegroundColor Gray
@@ -880,8 +1174,8 @@ function Invoke-Bootstrap {
     Write-Host "IMPORTANT: Restart your shell for PATH changes to take effect!" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  Administrator shell: scoop-boot.ps1 --admin-init, then --admin-setenv" -ForegroundColor White
-    Write-Host "  Normal shell:        scoop-boot.ps1 --user-install" -ForegroundColor White
+    Write-Host "  Administrator shell: $global:ScoopBootScript --admin-init, then --admin-setenv" -ForegroundColor White
+    Write-Host "  Normal shell:        $global:ScoopBootScript --user-install" -ForegroundColor White
     Write-Host ""
 
     return $true
@@ -1096,9 +1390,12 @@ function Test-ScoopOwnedPath {
     #>
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    # Compared with backslashes on both sides: a registry value written with forward
+    # slashes (or a Join-Path on a Linux runner in fake mode) still counts
+    $normalized = $Path -replace '/', '\'
     foreach ($dir in $global:ScoopOwnedDirs) {
-        $prefix = Join-Path $global:BaseDir $dir
-        if ($Path -eq $prefix -or $Path -like "$prefix\*") { return $true }
+        $prefix = (Join-Path $global:BaseDir $dir) -replace '/', '\'
+        if ($normalized -eq $prefix -or $normalized -like "$prefix\*") { return $true }
     }
     return $false
 }
@@ -1269,17 +1566,25 @@ function Invoke-UserInstall {
     # The environment file decides what TMP is; if it defines one, it must be applied
     # (Scoop and several installers fail on long or redirected temp paths)
     $expectedTmp = Get-EnvFileMachineValue -Name 'TMP'
-    $machineTmp = [Environment]::GetEnvironmentVariable('TMP', 'Machine')
+    $machineTmp = Get-RegistryEnvironmentVariable -Name 'TMP' -Scope 'Machine'
     if ($expectedTmp -and $machineTmp -ne $expectedTmp) {
-        Write-ErrorMsg "Machine-scope TMP is '$machineTmp', the environment file defines '$expectedTmp': setup step 2 has not run. Run as Administrator: scoop-boot.ps1 --admin-setenv"
+        Write-ErrorMsg "Machine-scope TMP is '$machineTmp', the environment file defines '$expectedTmp': setup step 2 has not run. Run as Administrator: $global:ScoopBootScript --admin-setenv"
         return $false
     }
-    # Install-ScoopTools itself warns and asks when run from an elevated shell
+    # Install-ScoopTools itself warns and asks when run from an elevated shell.
+    # SCOOP_BOOT_WRAPPER=off and SCOOP_BOOT_CALLER are set for the run and must not
+    # outlive it: the script runs in the caller's shell, and with the variable still
+    # set every later "scoop install" there would skip the user-scope cleanup (found
+    # by the fake end-to-end test, 31.10.)
     $savedTitle = Get-ScoopBootTitle
+    $savedWrapper = $env:SCOOP_BOOT_WRAPPER
+    $savedCaller = $env:SCOOP_BOOT_CALLER
     try {
         return (Get-RunResult -Output @(Install-ScoopTools -Force $Force)).Ok
     } finally {
         Restore-ScoopBootTitle -Saved $savedTitle
+        if ($null -eq $savedWrapper) { Remove-Item Env:SCOOP_BOOT_WRAPPER -ErrorAction SilentlyContinue } else { $env:SCOOP_BOOT_WRAPPER = $savedWrapper }
+        if ($null -eq $savedCaller) { Remove-Item Env:SCOOP_BOOT_CALLER -ErrorAction SilentlyContinue } else { $env:SCOOP_BOOT_CALLER = $savedCaller }
     }
 }
 
@@ -1585,8 +1890,8 @@ function Invoke-PlatformReport {
     }
 
     # TMP/TEMP: process, User and Machine scope
-    $machineTmp = [Environment]::GetEnvironmentVariable('TMP', 'Machine')
-    $userTmp = [Environment]::GetEnvironmentVariable('TMP', 'User')
+    $machineTmp = Get-RegistryEnvironmentVariable -Name 'TMP' -Scope 'Machine'
+    $userTmp = Get-RegistryEnvironmentVariable -Name 'TMP' -Scope 'User'
     $lines += ""
     $lines += "--- Temporary directory ---"
     $lines += "  TMP process=$env:TMP  user=$userTmp  machine=$machineTmp"
@@ -1673,7 +1978,7 @@ function Invoke-ApplyEnv {
     if ($envFiles.Count -eq 0) {
         Write-Warning "No environment configuration files found"
         Write-Host ""
-        Write-Host "Create them first: scoop-boot.ps1 --admin-init (as Administrator)" -ForegroundColor Yellow
+        Write-Host "Create them first: $global:ScoopBootScript --admin-init (as Administrator)" -ForegroundColor Yellow
         return (New-RunResult -Command 'apply-env' -Ok $false)
     }
 
@@ -1724,7 +2029,7 @@ function Invoke-ApplyEnv {
         Write-EnvDryRunSummary
         $global:EnvDryRunState = $null
         Write-Host ""
-        Write-Host "Apply them as Administrator: scoop-boot.ps1 --admin-setenv"
+        Write-Host "Apply them as Administrator: $global:ScoopBootScript --admin-setenv"
     } else {
         Write-Info "Applied $totalChanges changes"
         Write-Host ""
@@ -2512,25 +2817,141 @@ JAVA_HOME=C:\java
     } catch {}
     $tests += $test
 
-    # Test 53: package templates: devops lists parse, plan targets the host files, default/debian are no templates
-    $test = @{Name = "Package templates (devops)"; Result = $false}
+    # Test 53: profile catalog: profiles.conf parses, base first, every directory and virtual member present
+    $test = @{Name = "Profile catalog: profiles.conf, directories, virtual members"; Result = $false}
     try {
-        $ok = $true
-        $scoopTemplate = Join-Path $global:PackagesDir 'devops.txt'
-        if (Test-Path $scoopTemplate) {
-            $names = @(Read-PackageList -Path $scoopTemplate)
-            $debNames = @(Read-DebianPackageList -Path (Join-Path $global:PackagesDir 'devops.debian.txt'))
-            $plan = @(Get-PackageTemplatePlan -Name 'devops')
-            $hostName = Get-Hostname
-            $ok = ($names.Count -gt 10) -and ($debNames.Count -gt 10) -and ($plan.Count -eq 2) -and
-                ((Split-Path -Leaf $plan[0].Target) -eq "$hostName.txt") -and
-                ((Split-Path -Leaf $plan[1].Target) -eq "$hostName.debian.txt")
-        }
-        $ok = $ok -and (@(Get-PackageTemplatePlan -Name 'default').Count -eq 0) -and
-            (@(Get-PackageTemplatePlan -Name 'debian').Count -eq 0) -and
-            (@(Get-PackageTemplatePlan -Name '..\x').Count -eq 0)
-        $test.Result = $ok
+        $catalog = Get-ProfileCatalog
+        if ($catalog.Errors.Count -gt 0) { Write-Host "       $($catalog.Errors -join '; ')" -ForegroundColor Yellow }
+        $test.Result = ($catalog.Errors.Count -eq 0) -and ($catalog.Singles.Count -ge 10) -and
+            ($catalog.Singles[0].Name -eq 'base') -and ($catalog.VirtualOrder -contains 'devel') -and ($catalog.VirtualOrder -contains 'devops')
     } catch {}
+    $tests += $test
+
+    # Test 54: Resolve-Profiles on a small catalog: virtual expansion, catalog order, implicit base, unknown name, cycle
+    $test = @{Name = "Resolve-Profiles: virtual profiles, order, base, unknown, cycle"; Result = $false}
+    $tempProfiles = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-profiles-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    try {
+        foreach ($name in @('base', 'b', 'a', 'c++')) {
+            New-Item -ItemType Directory -Path (Join-Path $tempProfiles $name) -Force | Out-Null
+            Set-Content -Path (Join-Path (Join-Path $tempProfiles $name) 'packages.txt') -Value "# $name`n$name-tool`nshared" -Encoding ASCII
+        }
+        Set-Content -Path (Join-Path (Join-Path $tempProfiles 'a') 'system.env') -Value "A_HOME=`$USR\apps\a`nPATH+=`$A_HOME\bin`n# bucket extra https://example.invalid/extra" -Encoding ASCII
+        Set-Content -Path (Join-Path (Join-Path $tempProfiles 'b') 'system.env') -Value "B_HOME=`$USR\apps\b`nPATH+=`$B_HOME\bin" -Encoding ASCII
+        Set-Content -Path (Join-Path (Join-Path $tempProfiles 'base') 'system.env') -Value "USR=C:\usr`nLANG=C" -Encoding ASCII
+        Set-Content -Path (Join-Path (Join-Path $tempProfiles 'base') 'debian.txt') -Value "curl" -Encoding ASCII
+        Set-Content -Path (Join-Path $tempProfiles 'system.footer.env') -Value "PATH+=`$USR\shims`nPATH+=`$USR\bin" -Encoding ASCII
+        Set-Content -Path (Join-Path $tempProfiles 'profiles.conf') -Value @(
+            '# test catalog', 'profile base  the base', 'profile b     second', 'profile a     first by name, later in order', 'profile c++   plus in the name',
+            'x=a', 'y = x, b', 'loop1=loop2', 'loop2=loop1', 'all=y,c++') -Encoding ASCII
+        $catalog = Get-ProfileCatalog -Dir $tempProfiles
+        $y = Resolve-Profiles -Names 'y' -Catalog $catalog
+        $ab = Resolve-Profiles -Names 'a,b' -Catalog $catalog
+        $all = Resolve-Profiles -Names ' all ' -Catalog $catalog
+        $bad = Resolve-Profiles -Names 'a,nosuch' -Catalog $catalog
+        $loop = Resolve-Profiles -Names 'loop1' -Catalog $catalog
+        $none = Resolve-Profiles -Names '' -Catalog $catalog
+        $test.Result = ($catalog.Errors.Count -eq 0) -and
+            (($y.Names -join ',') -eq 'base,b,a') -and ($y.Errors.Count -eq 0) -and
+            (($ab.Names -join ',') -eq 'base,b,a') -and
+            (($all.Names -join ',') -eq 'base,b,a,c++') -and
+            ($bad.Errors.Count -eq 1) -and ($bad.Errors[0] -like "*unknown profile 'nosuch'*") -and
+            ($loop.Errors.Count -ge 1) -and ($loop.Errors[0] -like '*circle*') -and
+            ($none.Errors.Count -eq 1)
+        if (-not $test.Result) { Write-Host "       y=$($y.Names -join ',') ab=$($ab.Names -join ',') all=$($all.Names -join ',') bad=$($bad.Errors -join ';') loop=$($loop.Errors -join ';')" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    $tests += $test
+
+    # Test 55: composition on the same catalog: duplicates left out, bucket line once, sections in order, footer last, USR replaced
+    $test = @{Name = "Profile composition: package list, bucket lines, environment, footer"; Result = $false}
+    try {
+        $catalog = Get-ProfileCatalog -Dir $tempProfiles
+        $names = (Resolve-Profiles -Names 'all' -Catalog $catalog).Names
+        $pk = New-ProfilePackageListText -Profiles $names -File 'packages.txt' -FileName 'h.txt' -Command 'test' -Dir $tempProfiles
+        $deb = New-ProfilePackageListText -Profiles $names -File 'debian.txt' -FileName 'h.debian.txt' -Command 'test' -Dir $tempProfiles
+        $sys = New-ProfileEnvironmentText -Profiles $names -Scope system -HostName 'h' -UserName 'u' -Root 'D:\scoop' -Command 'test' -Dir $tempProfiles
+        $usr = New-ProfileEnvironmentText -Profiles $names -Scope user -HostName 'h' -UserName 'u' -Root 'D:\scoop' -Command 'test' -Dir $tempProfiles
+        $pkLines = @($pk.Text -split "`n")
+        $sysOps = @($sys.Text -split "`n" | Where-Object { $_ -and -not $_.StartsWith('#') })
+        $test.Result = (($pk.Packages -join ',') -eq 'base-tool,shared,b-tool,a-tool,c++-tool') -and
+            ($pk.Duplicates.Count -eq 3) -and
+            (@($pkLines | Where-Object { $_ -match '^# bucket extra ' }).Count -eq 0) -and
+            (($deb.Packages -join ',') -eq 'curl') -and
+            (($sysOps -join ',') -eq 'USR=D:\scoop,LANG=C,B_HOME=$USR\apps\b,PATH+=$B_HOME\bin,A_HOME=$USR\apps\a,PATH+=$A_HOME\bin,PATH+=$USR\shims,PATH+=$USR\bin') -and
+            ($sys.Operations -eq 8) -and ($sys.Text -match '(?m)^# File: system\.h\.u\.env$') -and ($sys.Text -match '(?m)^# Profiles: base, b, a, c\+\+$') -and
+            ($null -eq $usr) -and
+            ($pk.Text.IndexOf('# ---- profile b ----') -lt $pk.Text.IndexOf('# ---- profile a ----'))
+        if (-not $test.Result) { Write-Host "       packages=$($pk.Packages -join ',') dup=$($pk.Duplicates.Count) ops=$($sysOps -join ',')" -ForegroundColor Yellow }
+        # bucket lines live in packages.txt, not system.env: check that one from a package fragment is kept once
+        Add-Content -Path (Join-Path (Join-Path $tempProfiles 'a') 'packages.txt') -Value '# bucket extra https://example.invalid/extra' -Encoding ASCII
+        Add-Content -Path (Join-Path (Join-Path $tempProfiles 'b') 'packages.txt') -Value '# bucket extra https://example.invalid/extra' -Encoding ASCII
+        $pk = New-ProfilePackageListText -Profiles $names -File 'packages.txt' -FileName 'h.txt' -Command 'test' -Dir $tempProfiles
+        $test.Result = $test.Result -and (@($pk.Text -split "`n" | Where-Object { $_ -match '^# bucket extra ' }).Count -eq 1) -and (@(Read-PackageListBuckets -Path (Join-Path (Join-Path $tempProfiles 'a') 'packages.txt')).Count -eq 1)
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    $tests += $test
+
+    # Test 56: Invoke-Profile in a scratch root: dry run writes nothing; files and PROFILE= written; kept without -Force; -Force keeps .bak
+    $test = @{Name = "Invoke-Profile: dry run, write, kept, --force with .bak, PROFILE in scoop-boot.conf"; Result = $false}
+    $savedRoot = @{ BaseDir = $global:BaseDir; PackagesDir = $global:PackagesDir; EnvDir = $global:EnvDir; ProfilesDir = $global:ProfilesDir }
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-profile-root-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $tempRoot 'etc') -Force | Out-Null
+        Copy-Item -Path $tempProfiles -Destination (Join-Path $tempRoot 'etc\profiles') -Recurse
+        $global:BaseDir = $tempRoot
+        $global:PackagesDir = Join-Path $tempRoot 'etc\packages'
+        $global:EnvDir = Join-Path $tempRoot 'etc\environments'
+        $global:ProfilesDir = Join-Path $tempRoot 'etc\profiles'
+        $hostName = Get-Hostname
+        $userName = Get-Username
+        $listFile = Join-Path $global:PackagesDir "$hostName.txt"
+        $sysFile = Join-Path $global:EnvDir "system.$hostName.$userName.env"
+        $dry = Invoke-Profile -Names 'y' -DryRun $true 6> $null
+        $dryClean = -not (Test-Path $listFile) -and -not (Test-Path $sysFile) -and -not (Test-Path (Join-Path $tempRoot 'etc\scoop-boot.conf'))
+        $first = Invoke-Profile -Names 'y' 6> $null
+        $config = Get-ScoopBootConfig
+        $firstOk = (Test-Path $listFile) -and (Test-Path $sysFile) -and (Test-Path (Join-Path $global:PackagesDir "$hostName.debian.txt")) -and
+            ($config.Profile -eq 'y') -and ((Get-Content $sysFile -Raw) -match '(?m)^# Profiles: base, b, a$')
+        $kept = Invoke-Profile -Names 'a' 6> $null
+        $keptOk = ((Get-Content $sysFile -Raw) -match '(?m)^# Profiles: base, b, a$') -and -not (Test-Path "$sysFile.bak")
+        $keepExisting = Invoke-Profile -Names 'a' -KeepExisting $true 6> $null
+        $forced = Invoke-Profile -Names 'a' -Force $true 6> $null
+        $forcedOk = ((Get-Content $sysFile -Raw) -match '(?m)^# Profiles: base, a$') -and (Test-Path "$sysFile.bak") -and
+            ((Get-ScoopBootConfig).Profile -eq 'a') -and (@(Get-Content (Join-Path $tempRoot 'etc\scoop-boot.conf') | Where-Object { $_ -match '^PROFILE=' }).Count -eq 1)
+        $unknown = Invoke-Profile -Names 'nosuch' 6> $null
+        $test.Result = $dry -and $dryClean -and $first -and $firstOk -and (-not $kept) -and $keptOk -and $keepExisting -and $forced -and $forcedOk -and (-not $unknown)
+        if (-not $test.Result) { Write-Host "       dry=$dry/$dryClean first=$first/$firstOk kept=$kept/$keptOk keepExisting=$keepExisting forced=$forced/$forcedOk unknown=$unknown" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    finally {
+        $global:BaseDir = $savedRoot.BaseDir; $global:PackagesDir = $savedRoot.PackagesDir; $global:EnvDir = $savedRoot.EnvDir; $global:ProfilesDir = $savedRoot.ProfilesDir
+        Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempProfiles -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $tests += $test
+
+    # Test 57: the delivered profiles: devel is default.txt and debian.txt, names valid, c++ behind perl and Git, bin last
+    $test = @{Name = "Delivered profiles: devel equals default.txt and debian.txt, PATH order"; Result = $false}
+    try {
+        $names = (Resolve-Profiles -Names 'devel').Names
+        $pk = New-ProfilePackageListText -Profiles $names -File 'packages.txt' -FileName 'default.txt' -Command 'test'
+        $deb = New-ProfilePackageListText -Profiles $names -File 'debian.txt' -FileName 'debian.txt' -Command 'test'
+        $delivered = @(Read-PackageList -Path (Join-Path $global:PackagesDir 'default.txt') -Silent)
+        $deliveredDebian = @(Read-DebianPackageList -Path (Join-Path $global:PackagesDir 'debian.txt'))
+        $sameScoop = (($pk.Packages | Sort-Object) -join ',') -eq (($delivered | Sort-Object) -join ',')
+        $sameDebian = (($deb.Packages | Sort-Object) -join ',') -eq (($deliveredDebian | Sort-Object) -join ',')
+        $badDebian = @($deb.Packages | Where-Object { $_ -notmatch '^[a-z0-9][a-z0-9+.-]+$' })
+        $sys = New-ProfileEnvironmentText -Profiles $names -Scope system -HostName 'h' -UserName 'u' -Root 'C:\usr' -Command 'test'
+        $paths = @($sys.Text -split "`n" | Where-Object { $_ -match '^PATH' })
+        $ucrt = [array]::IndexOf($paths, 'PATH+=$MSYS2_HOME\ucrt64\bin')
+        $perl = [array]::IndexOf($paths, 'PATH+=$PERL_HOME\perl\bin')
+        $git = [array]::IndexOf($paths, 'PATH+=$GIT_HOME\mingw64\bin')
+        $orderOk = ($ucrt -gt $perl) -and ($perl -gt $git) -and ($git -ge 0) -and ($paths[-1] -eq 'PATH+=$USR\bin') -and ($paths[-2] -eq 'PATH+=$USR\shims')
+        $devops = (Resolve-Profiles -Names 'devops').Names
+        $devopsOk = ($devops -contains 'base') -and ($devops -notcontains 'java') -and ($devops -contains 'python')
+        $test.Result = $sameScoop -and $sameDebian -and ($badDebian.Count -eq 0) -and ($pk.Duplicates.Count -eq 0) -and ($deb.Duplicates.Count -eq 0) -and $orderOk -and $devopsOk
+        if (-not $test.Result) {
+            Write-Host "       scoop same=$sameScoop (profile $($pk.Packages.Count), default.txt $($delivered.Count)) debian same=$sameDebian order=$orderOk ucrt=$ucrt perl=$perl git=$git dup=$($pk.Duplicates -join ',')" -ForegroundColor Yellow
+            Write-Host "       only in profiles: $(($pk.Packages | Where-Object { $delivered -notcontains $_ }) -join ' '); only in default.txt: $(($delivered | Where-Object { $pk.Packages -notcontains $_ }) -join ' ')" -ForegroundColor Yellow
+        }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
     $tests += $test
 
     # Display results
@@ -2657,7 +3078,7 @@ function Invoke-Export {
     }
     [IO.File]::WriteAllText($target, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
     Write-Success "Exported $($packages.Count - $skipped) packages and $($buckets.Count) buckets: $target"
-    Write-Info "Copy the file to etc\exports\ on the other machine, then: scoop-boot.ps1 --import=$Name"
+    Write-Info "Copy the file to etc\exports\ on the other machine, then: <root>\bin\scoop-boot.ps1 --import=$Name"
     return $true
 }
 
@@ -2732,7 +3153,7 @@ function Invoke-Import {
         $lines += $plan.Imported
         [IO.File]::WriteAllText($plan.Target, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
         Write-Success "Wrote $($plan.Target) with $($plan.Imported.Count) packages"
-        Write-Info "Next: scoop-boot.ps1 --list-packages to review, then --user-install to install them"
+        Write-Info "Next: $global:ScoopBootScript --list-packages to review, then --user-install to install them"
         return $true
     }
     Write-Info "$($plan.Imported.Count) packages in the export, $($plan.Missing.Count) not in this machine's list"
@@ -2757,7 +3178,7 @@ function Invoke-Import {
     if ($existing.EndsWith("`n`n")) { $block = @($block | Select-Object -Skip 1) }
     [IO.File]::WriteAllText($plan.Target, $existing + (($block -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
     Write-Success "Added $($plan.Missing.Count) packages to $($plan.Target)"
-    Write-Info "Next: scoop-boot.ps1 --list-packages to review, then --user-install to install them"
+    Write-Info "Next: $global:ScoopBootScript --list-packages to review, then --user-install to install them"
     return $true
 }
 
@@ -3163,9 +3584,15 @@ function Get-WslDistributions {
     #>
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return @() }
     $previousEncoding = [Console]::OutputEncoding
+    $raw = ''
     try {
         [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        # Windows PowerShell 5.1 turns the first stderr line of a native command into a
+        # terminating error when it is redirected under a Stop preference; without a
+        # distribution wsl.exe writes its message there. Caught: no names is the answer.
         $raw = (wsl.exe --list --quiet 2>&1 | Out-String) -replace "`0", ''
+    } catch {
+        $raw = "$($_.Exception.Message)"
     } finally {
         [Console]::OutputEncoding = $previousEncoding
     }
@@ -3292,81 +3719,376 @@ function Invoke-WslSetup {
     return $true
 }
 
-function Get-PackageTemplatePlan {
+# ============================================================================
+# PROFILES: composing this machine's files from etc\profiles (--profile)
+# ============================================================================
+
+$global:ProfileFragmentFiles = @('packages.txt', 'system.env', 'user.env', 'debian.txt')
+
+function Get-ProfileCatalog {
     <#
     .SYNOPSIS
-        What --package-template=NAME copies: etc\packages\NAME.txt to <host>.txt and,
-        when it exists, NAME.debian.txt to <host>.debian.txt. Each entry: Source,
-        Target, Exists (the target is there already).
+        Reads etc\profiles\profiles.conf: Singles (in catalog order: Name, Description,
+        Dir), Virtual (name -> member names), VirtualOrder, Errors.
     .DESCRIPTION
-        Returns nothing when NAME.txt does not exist. The names "default" and
-        "debian" are the delivered lists, not templates, and return nothing.
+        "profile NAME description" lines are the single profiles, in the order --profile
+        composes them; "NAME=a,b,c" lines are virtual profiles. Every single profile
+        needs a directory with at least one of packages.txt, system.env, user.env,
+        debian.txt; every member of a virtual profile must be known. Problems are
+        collected in Errors, the catalog is still returned.
     #>
-    param(
-        [string]$Name,
-        [string]$Dir = $global:PackagesDir
-    )
-    if ($Name -notmatch '^[a-z0-9][a-z0-9-]*$' -or $Name -in @('default', 'debian')) { return @() }
-    $hostName = Get-Hostname
-    $plan = @()
-    foreach ($pair in @(@("$Name.txt", "$hostName.txt"), @("$Name.debian.txt", "$hostName.debian.txt"))) {
-        $source = Join-Path $Dir $pair[0]
-        if (-not (Test-Path $source)) {
-            if ($pair[0] -eq "$Name.txt") { return @() }
+    param([string]$Dir = $global:ProfilesDir)
+    $catalog = @{ Path = (Join-Path $Dir 'profiles.conf'); Singles = @(); Virtual = @{}; VirtualOrder = @(); Errors = @() }
+    if (-not (Test-Path $catalog.Path)) {
+        $catalog.Errors += "$($catalog.Path) is missing (scoop-boot.ps1 --update delivers it)"
+        return $catalog
+    }
+    $n = 0
+    foreach ($raw in @(Get-Content -Path $catalog.Path)) {
+        $n++
+        $line = $raw.Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        if ($line -match '^profile\s+([a-z0-9][a-z0-9+_-]*)(\s+(.*))?$') {
+            $name = $Matches[1]
+            $description = if ($Matches.Count -gt 3) { $Matches[3].Trim() } else { '' }
+            if (@($catalog.Singles | Where-Object { $_.Name -eq $name }).Count -gt 0) { $catalog.Errors += "line ${n}: profile '$name' is listed twice"; continue }
+            $catalog.Singles += [pscustomobject]@{ Name = $name; Description = $description; Dir = (Join-Path $Dir $name) }
             continue
         }
-        $target = Join-Path $Dir $pair[1]
-        $plan += [pscustomobject]@{ Source = $source; Target = $target; Exists = (Test-Path $target) }
+        if ($line -match '^([a-z0-9][a-z0-9+_-]*)\s*=\s*(.+)$') {
+            $name = $Matches[1]
+            $members = @($Matches[2] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($catalog.Virtual.ContainsKey($name)) { $catalog.Errors += "line ${n}: virtual profile '$name' is defined twice"; continue }
+            $catalog.Virtual[$name] = $members
+            $catalog.VirtualOrder += $name
+            continue
+        }
+        $catalog.Errors += "line ${n}: not a profile line: '$raw'"
     }
-    return $plan
+    if ($catalog.Singles.Count -eq 0 -or $catalog.Singles[0].Name -ne 'base') { $catalog.Errors += "the first profile line must be 'base'; it is always composed first" }
+    foreach ($single in $catalog.Singles) {
+        if ($catalog.Virtual.ContainsKey($single.Name)) { $catalog.Errors += "'$($single.Name)' is both a single and a virtual profile" }
+        if (-not (Test-Path $single.Dir)) { $catalog.Errors += "profile '$($single.Name)': directory $($single.Dir) is missing"; continue }
+        $present = @($global:ProfileFragmentFiles | Where-Object { Test-Path (Join-Path $single.Dir $_) })
+        if ($present.Count -eq 0) { $catalog.Errors += "profile '$($single.Name)': none of $($global:ProfileFragmentFiles -join ', ') in $($single.Dir)" }
+    }
+    foreach ($virtual in $catalog.VirtualOrder) {
+        foreach ($member in $catalog.Virtual[$virtual]) {
+            if (-not $catalog.Virtual.ContainsKey($member) -and @($catalog.Singles | Where-Object { $_.Name -eq $member }).Count -eq 0) {
+                $catalog.Errors += "virtual profile '$virtual' names an unknown profile '$member'"
+            }
+        }
+    }
+    return $catalog
 }
 
-function Invoke-PackageTemplate {
+function Resolve-Profiles {
     <#
     .SYNOPSIS
-        Uses a package list template on this machine (--package-template=NAME), e.g.
-        devops: tools for infrastructure work instead of the developer set.
-    .DESCRIPTION
-        Copies etc\packages\NAME.txt to etc\packages\<host>.txt (replaces default.txt
-        for --user-install and --list-packages) and NAME.debian.txt to
-        <host>.debian.txt (replaces debian.txt for --wsl-setup). An existing host
-        list is kept unless --force; with --force it is saved as .bak first.
-        --dry-run shows the plan and writes nothing. Installs nothing: run
-        --user-install and --wsl-setup afterwards.
+        Expands "NAME,NAME,..." (single or virtual profiles, any order) to the single
+        profiles in catalog order, base always first. Returns Names and Errors.
     #>
     param(
-        [string]$Name,
-        [bool]$DryRun = $false,
-        [bool]$Force = $false
+        [string]$Names,
+        [hashtable]$Catalog = $null
     )
-    Write-Section "Package template: $Name"
-    $plan = @(Get-PackageTemplatePlan -Name $Name)
-    if ($plan.Count -eq 0) {
-        $available = @(Get-ChildItem -Path $global:PackagesDir -Filter '*.txt' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch '\.debian\.txt$' -and $_.BaseName -notin @('default', (Get-Hostname)) } |
-            ForEach-Object { $_.BaseName })
-        Write-ErrorMsg "No template '$Name' in $global:PackagesDir$(if ($available.Count -gt 0) { " (available: $($available -join ', '))" })"
+    if ($null -eq $Catalog) { $Catalog = Get-ProfileCatalog }
+    $result = @{ Names = @(); Errors = @($Catalog.Errors) }
+    $requested = @("$Names" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($requested.Count -eq 0) { $result.Errors += "no profile named (--profile=NAME,NAME,...; scoop-boot.ps1 --list-profiles shows them)"; return $result }
+    $selected = @{}
+    function Select-ProfileMember {
+        param([string]$Name, [string[]]$Trail)
+        if ($Trail -contains $Name) { $result.Errors += "virtual profiles refer to each other in a circle: $(($Trail + $Name) -join ' -> ')"; return }
+        if ($Catalog.Virtual.ContainsKey($Name)) {
+            foreach ($member in $Catalog.Virtual[$Name]) { Select-ProfileMember -Name $member -Trail ($Trail + $Name) }
+            return
+        }
+        if (@($Catalog.Singles | Where-Object { $_.Name -eq $Name }).Count -gt 0) { $selected[$Name] = $true; return }
+        $result.Errors += "unknown profile '$Name' (scoop-boot.ps1 --list-profiles shows the names)"
+    }
+    foreach ($name in $requested) { Select-ProfileMember -Name $name -Trail @() }
+    $selected['base'] = $true
+    $result.Names = @($Catalog.Singles | Where-Object { $selected.ContainsKey($_.Name) } | ForEach-Object { $_.Name })
+    return $result
+}
+
+function Get-ProfileFragmentText {
+    <#
+    .SYNOPSIS
+        Content of one fragment file of a profile (packages.txt, system.env, user.env,
+        debian.txt), LF line endings, no BOM; $null when the profile has no such file.
+    #>
+    param([string]$Name, [string]$File, [string]$Dir = $global:ProfilesDir)
+    $path = Join-Path (Join-Path $Dir $Name) $File
+    if (-not (Test-Path $path)) { return $null }
+    $text = [IO.File]::ReadAllText($path, (New-Object Text.UTF8Encoding($false)))
+    return ($text -replace "`r`n", "`n").TrimStart([char]0xFEFF).TrimEnd("`n")
+}
+
+function New-ProfilePackageListText {
+    <#
+    .SYNOPSIS
+        The package list (packages.txt) or apt list (debian.txt) composed from the
+        profiles: header, "# bucket" lines, then one section per profile. A package
+        that an earlier profile already lists is left out (Duplicates names them).
+    .OUTPUTS
+        $null when no profile has the file; otherwise Text, Packages (in order), Duplicates.
+    #>
+    param(
+        [string[]]$Profiles,
+        [string]$File = 'packages.txt',
+        [string]$FileName,
+        [string]$Command,
+        [string]$Dir = $global:ProfilesDir
+    )
+    $sections = @()
+    foreach ($profile in $Profiles) {
+        $text = Get-ProfileFragmentText -Name $profile -File $File -Dir $Dir
+        if ($null -ne $text) { $sections += [pscustomobject]@{ Name = $profile; Text = $text } }
+    }
+    if ($sections.Count -eq 0) { return $null }
+    $what = if ($File -eq 'debian.txt') { 'apt package list for --wsl-setup (replaces debian.txt)' } else { 'package list (replaces default.txt)' }
+    $lines = @(
+        "# ${FileName}: $what of this host, composed by $Command on $(Get-Date -Format 'yyyy-MM-dd HH:mm').",
+        "# Profiles: $($Profiles -join ', ')",
+        "# Edit freely, --update never touches this file. To compose it again from other profiles:",
+        "# scoop-boot.ps1 --profile=NAMES --force (the old file is kept as .bak).",
+        ''
+    )
+    $seen = @{}
+    $packages = @()
+    $duplicates = @()
+    $buckets = @()
+    foreach ($section in $sections) {
+        foreach ($line in ($section.Text -split "`n")) {
+            if ($line -match '^\s*#\s*bucket\s+([A-Za-z0-9._-]+)\s+(\S+)\s*$') {
+                if ($buckets -notcontains $Matches[1]) { $buckets += $Matches[1]; $lines += $line.Trim() }
+            }
+        }
+    }
+    if ($buckets.Count -gt 0) { $lines += '' }
+    foreach ($section in $sections) {
+        $lines += "# ---- profile $($section.Name) ----"
+        foreach ($line in ($section.Text -split "`n")) {
+            if ($line -match '^\s*#\s*bucket\s+') { continue }
+            $name = ($line -replace '#.*$', '').Trim()
+            if ($name) {
+                $key = $name.ToLower()
+                if ($seen.ContainsKey($key)) { $duplicates += "$name (already in $($seen[$key]))"; continue }
+                $seen[$key] = $section.Name
+                $packages += $name
+            }
+            $lines += $line
+        }
+        $lines += ''
+    }
+    return [pscustomobject]@{ Text = (($lines -join "`n").TrimEnd("`n") + "`n"); Packages = $packages; Duplicates = $duplicates }
+}
+
+function New-ProfileEnvironmentText {
+    <#
+    .SYNOPSIS
+        The system.<host>.<user>.env or user.<host>.<user>.env composed from the
+        profiles: header, one section per profile that has the fragment, and for the
+        Machine scope etc\profiles\system.footer.env (CUSTOM, CORE PATHS, caches).
+        USR is set to the Scoop root of this machine.
+    .OUTPUTS
+        $null when no profile has the fragment; otherwise Text and Operations (count of
+        non-comment lines).
+    #>
+    param(
+        [string[]]$Profiles,
+        [ValidateSet('system', 'user')][string]$Scope,
+        [string]$HostName,
+        [string]$UserName,
+        [string]$Root,
+        [string]$Command,
+        [string]$Dir = $global:ProfilesDir
+    )
+    $sections = @()
+    foreach ($profile in $Profiles) {
+        $text = Get-ProfileFragmentText -Name $profile -File "$Scope.env" -Dir $Dir
+        if ($null -ne $text) { $sections += [pscustomobject]@{ Name = $profile; Text = $text } }
+    }
+    if ($sections.Count -eq 0) { return $null }
+    $fileName = "$Scope.$HostName.$UserName.env"
+    $title = if ($Scope -eq 'system') { 'System Environment Configuration' } else { 'User Environment Configuration' }
+    $scopeLine = if ($Scope -eq 'system') { 'Scope: Machine (requires admin); applied by scoop-boot.ps1 --admin-setenv' } else { 'Scope: User (no admin needed); applied by --clean-user-scope, --admin-setenv, --user-install and the scoop wrapper' }
+    $lines = @(
+        '# ============================================================================',
+        "# $title",
+        "# File: $fileName",
+        "# Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm') by $Command",
+        "# Profiles: $($Profiles -join ', ')",
+        '# ============================================================================',
+        "# $scopeLine",
+        "# SCOOP: $Root",
+        "# Hostname: $HostName",
+        "# Username: $UserName",
+        '#',
+        '# Composed from etc\profiles. Edit freely, --update never touches this file.',
+        '# To compose it again from other profiles: scoop-boot.ps1 --profile=NAMES --force',
+        "# (the old file is kept as .bak), then$(if ($Scope -eq 'system') { ' --admin-setenv' } else { ' --clean-user-scope' }).",
+        '# ============================================================================'
+    )
+    foreach ($section in $sections) {
+        $lines += ''
+        $lines += "# ---------------------------------------------------------------------------- profile $($section.Name)"
+        $lines += ($section.Text -split "`n")
+    }
+    if ($Scope -eq 'system') {
+        $footer = Join-Path $Dir 'system.footer.env'
+        if (Test-Path $footer) {
+            $lines += ''
+            $lines += (([IO.File]::ReadAllText($footer, (New-Object Text.UTF8Encoding($false))) -replace "`r`n", "`n").TrimStart([char]0xFEFF).TrimEnd("`n") -split "`n")
+        }
+    }
+    $text = ($lines -join "`n") + "`n"
+    if ($Scope -eq 'system') { $text = $text -replace '(?m)^USR=.*$', "USR=$Root" }
+    $operations = @($text -split "`n" | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') }).Count
+    return [pscustomobject]@{ Text = $text; Operations = $operations }
+}
+
+function Set-ScoopBootConfigProfile {
+    <#
+    .SYNOPSIS
+        Writes PROFILE=NAMES into etc\scoop-boot.conf (replacing an earlier PROFILE line);
+        the file is created with its defaults when missing.
+    #>
+    param([string]$Names)
+    $config = Get-ScoopBootConfig
+    $text = if ($config.Exists) { [IO.File]::ReadAllText($config.Path) } else { Get-ScoopBootConfigDefaultText }
+    $text = $text -replace "`r`n", "`n"
+    if ($text -match '(?m)^PROFILE=.*$') {
+        $text = $text -replace '(?m)^PROFILE=.*$', "PROFILE=$Names"
+    } else {
+        if ($text -and -not $text.EndsWith("`n")) { $text += "`n" }
+        $text += "PROFILE=$Names`n"
+    }
+    [IO.File]::WriteAllText($config.Path, $text, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Show-Profiles {
+    <#
+    .SYNOPSIS
+        Lists the profiles of etc\profiles with their packages (--list-profiles).
+    #>
+    $catalog = Get-ProfileCatalog
+    Write-Section "Profiles in $global:ProfilesDir"
+    foreach ($e in $catalog.Errors) { Write-ErrorMsg $e }
+    $config = Get-ScoopBootConfig
+    if ($config.Profile) { Write-Host "This machine (etc\scoop-boot.conf): PROFILE=$($config.Profile)" -ForegroundColor Cyan; Write-Host '' }
+    foreach ($single in $catalog.Singles) {
+        $files = @($global:ProfileFragmentFiles | Where-Object { Test-Path (Join-Path $single.Dir $_) })
+        Write-Host ("  {0,-12} {1}" -f $single.Name, $single.Description) -ForegroundColor White
+        $packages = @()
+        $packagesFile = Join-Path $single.Dir 'packages.txt'
+        if (Test-Path $packagesFile) { $packages = @(Read-PackageList -Path $packagesFile -Silent) }
+        $debian = @()
+        $debianFile = Join-Path $single.Dir 'debian.txt'
+        if (Test-Path $debianFile) { $debian = @(Read-DebianPackageList -Path $debianFile) }
+        $parts = @()
+        if ($packages.Count -gt 0) { $parts += "scoop: $($packages -join ' ')" }
+        if ($debian.Count -gt 0) { $parts += "debian: $($debian -join ' ')" }
+        if ($files -contains 'system.env') { $parts += 'environment: system' }
+        if ($files -contains 'user.env') { $parts += 'environment: user' }
+        foreach ($part in $parts) { Write-Host "               $part" -ForegroundColor Gray }
+    }
+    Write-Host ''
+    foreach ($virtual in $catalog.VirtualOrder) {
+        $resolved = Resolve-Profiles -Names $virtual -Catalog $catalog
+        Write-Host ("  {0,-12} = {1}" -f $virtual, ($catalog.Virtual[$virtual] -join ',')) -ForegroundColor White
+        Write-Host "               composes: $($resolved.Names -join ', ')" -ForegroundColor Gray
+    }
+    Write-Host ''
+    Write-Host "Use: scoop-boot.ps1 --profile=NAME,NAME,... (--dry-run shows the files); base is always included" -ForegroundColor Gray
+    return ($catalog.Errors.Count -eq 0)
+}
+
+function Invoke-Profile {
+    <#
+    .SYNOPSIS
+        Composes this machine's files from profiles (--profile=NAMES): etc\packages\<host>.txt,
+        etc\packages\<host>.debian.txt (when a profile has apt packages),
+        etc\environments\system.<host>.<user>.env and user.<host>.<user>.env.
+    .DESCRIPTION
+        An existing file is kept unless -Force (the old one is saved as .bak); with
+        -KeepExisting (used by --admin-init) a kept file is not a failure. -DryRun shows
+        the files, their packages and environment operations and writes nothing. The
+        profile names are recorded as PROFILE= in etc\scoop-boot.conf. Nothing is
+        installed or applied: --admin-setenv, --user-install and --wsl-setup follow.
+    #>
+    param(
+        [string]$Names,
+        [bool]$DryRun = $false,
+        [bool]$Force = $false,
+        [bool]$KeepExisting = $false,
+        [string]$Command = 'scoop-boot.ps1 --profile'
+    )
+    Write-Section "Profile: $Names$(if ($DryRun) { ' (DRY RUN)' })"
+    $resolved = Resolve-Profiles -Names $Names
+    if ($resolved.Errors.Count -gt 0) {
+        foreach ($e in $resolved.Errors) { Write-ErrorMsg $e }
         return $false
     }
-    $blocked = @($plan | Where-Object { $_.Exists -and -not $Force })
-    foreach ($p in $plan) {
-        $what = "$(Split-Path -Leaf $p.Source) -> $(Split-Path -Leaf $p.Target)"
-        if ($p.Exists -and -not $Force) {
-            Write-Warning "$what skipped: $(Split-Path -Leaf $p.Target) exists (--force replaces it, a .bak copy is kept)"
+    $profiles = @($resolved.Names)
+    Write-Info "Composed from: $($profiles -join ', ')"
+    $hostName = Get-Hostname
+    $userName = Get-Username
+    $commandText = "$Command=$Names"
+    $plan = @()
+    $packages = New-ProfilePackageListText -Profiles $profiles -File 'packages.txt' -FileName "$hostName.txt" -Command $commandText
+    if ($null -eq $packages) { Write-ErrorMsg "none of the profiles has a packages.txt"; return $false }
+    $plan += [pscustomobject]@{ Target = (Join-Path $global:PackagesDir "$hostName.txt"); Text = $packages.Text; What = "$($packages.Packages.Count) packages"; Show = @($packages.Packages -join ' '); Duplicates = $packages.Duplicates }
+    $debian = New-ProfilePackageListText -Profiles $profiles -File 'debian.txt' -FileName "$hostName.debian.txt" -Command $commandText
+    if ($null -ne $debian) {
+        $plan += [pscustomobject]@{ Target = (Join-Path $global:PackagesDir "$hostName.debian.txt"); Text = $debian.Text; What = "$($debian.Packages.Count) apt packages"; Show = @($debian.Packages -join ' '); Duplicates = $debian.Duplicates }
+    }
+    foreach ($scope in @('system', 'user')) {
+        $env = New-ProfileEnvironmentText -Profiles $profiles -Scope $scope -HostName $hostName -UserName $userName -Root $global:BaseDir -Command $commandText
+        if ($null -eq $env) { continue }
+        $show = @($env.Text -split "`n" | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })
+        $plan += [pscustomobject]@{ Target = (Join-Path $global:EnvDir "$scope.$hostName.$userName.env"); Text = $env.Text; What = "$($env.Operations) environment lines"; Show = $show; Duplicates = @() }
+    }
+    $written = 0
+    $kept = 0
+    foreach ($item in $plan) {
+        $exists = Test-Path $item.Target
+        foreach ($d in $item.Duplicates) { Write-Host "  (left out: $d)" -ForegroundColor Gray }
+        if ($exists -and -not $Force) {
+            if ($KeepExisting) {
+                Write-Host "[OK] Exists, kept: $($item.Target)" -ForegroundColor Gray
+            } else {
+                Write-Warning "$($item.Target) exists, kept ($($item.What) not written; --force replaces it and keeps the old file as .bak)"
+            }
+            $kept++
             continue
         }
         if ($DryRun) {
-            Write-DryRun "copy $what$(if ($p.Exists) { ' (existing file saved as .bak)' })"
+            Write-DryRun "Write $($item.Target) ($($item.What))$(if ($exists) { ', the existing file saved as .bak' })"
+            foreach ($line in $item.Show) { Write-Host "        $line" -ForegroundColor Gray }
             continue
         }
-        if ($p.Exists) { Copy-Item -Path $p.Target -Destination "$($p.Target).bak" -Force }
-        Copy-Item -Path $p.Source -Destination $p.Target -Force
-        Write-Success $what
+        $dir = Split-Path -Parent $item.Target
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        if ($exists) { Copy-Item $item.Target "$($item.Target).bak" -Force }
+        [IO.File]::WriteAllText($item.Target, $item.Text, (New-Object Text.UTF8Encoding($false)))
+        Write-Success "Written: $($item.Target) ($($item.What))$(if ($exists) { ', previous file kept as .bak' })"
+        $written++
     }
-    if (-not $DryRun -and $blocked.Count -lt $plan.Count) {
-        Write-Info "Next: scoop-boot.ps1 --list-packages, then --user-install (and --wsl-setup for Debian)"
+    if ($DryRun) {
+        Write-Info "DRY RUN: nothing written"
+        return $true
     }
-    return ($blocked.Count -eq 0)
+    Set-ScoopBootConfigProfile -Names $Names
+    Write-Host "[OK] PROFILE=$Names recorded in etc\scoop-boot.conf" -ForegroundColor Gray
+    if ($written -gt 0 -and -not $KeepExisting) {
+        $script = Join-Path $global:ScriptRoot 'scoop-boot.ps1'
+        Write-Info "Next: $script --admin-setenv (Administrator), then --user-install$(if ($null -ne $debian) { ' and --wsl-setup' })"
+    }
+    if ($KeepExisting) { return $true }
+    return ($kept -eq 0)
 }
 
 function Set-DevelopmentEnvironment {
@@ -3382,8 +4104,8 @@ function Set-DevelopmentEnvironment {
     Write-Host "=== Phase 1: Environment Setup (Administrator) ===" -ForegroundColor Cyan
     Write-Host ""
 
-    # Check admin rights
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    # Check admin rights (Test-AdminRights: platform-safe, true in fake mode)
+    $isAdmin = Test-AdminRights
 
     if (-not $isAdmin) {
         Write-Host "[ERROR] This phase requires administrator privileges!" -ForegroundColor Red
@@ -3544,8 +4266,9 @@ Rules:
     # The temporary directory the files set at Machine scope must exist and be
     # writable for everyone; the session takes the new value right away
     foreach ($name in @('TMP', 'TEMP')) {
-        $value = [Environment]::GetEnvironmentVariable($name, 'Machine')
+        $value = Get-RegistryEnvironmentVariable -Name $name -Scope 'Machine'
         if (-not $value) { continue }
+        if (Test-ScoopBootFake) { Write-Host "[FAKE] $name=$value not created, session not changed" -ForegroundColor DarkCyan; continue }
         if ($value -match '^[A-Za-z]:\\' -and -not (Test-Path $value)) {
             New-Item -ItemType Directory -Path $value -Force | Out-Null
             icacls $value /grant "Everyone:(OI)(CI)F" /T /Q 2>&1 | Out-Null
@@ -3597,7 +4320,8 @@ function Install-ScoopTools {
     # told (-RunAsAdmin, see Invoke-Bootstrap). The question protects the usual case
     # of an admin account that is not the developer account; --force skips it for a
     # developer who is a local administrator and has elevated shells only.
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    # Test-AdminRights is platform-safe; in fake mode the shell counts as a normal one.
+    $isAdmin = (-not (Test-ScoopBootFake)) -and (Test-AdminRights)
 
     if ($isAdmin -and $Force) {
         Write-Host "[WARN] Running as Administrator (--force): installing for this account from an elevated shell" -ForegroundColor Yellow
@@ -3624,7 +4348,7 @@ function Install-ScoopTools {
     Write-Host ">>> Checking WSL2 (optional for Docker/Linux development)..." -ForegroundColor White
     Write-Host ""
 
-    $wsl2Installed = Test-WSL2Installed
+    $wsl2Installed = if (Test-ScoopBootFake) { Write-Host "[FAKE] WSL check skipped" -ForegroundColor DarkCyan; $false } else { Test-WSL2Installed }
 
     if (-not $wsl2Installed) {
         Write-Host ""
@@ -3695,8 +4419,8 @@ function Install-ScoopTools {
         # Set environment variables
         $env:SCOOP = $ScoopDir
         $env:SCOOP_GLOBAL = "$ScoopDir\global"
-        [Environment]::SetEnvironmentVariable('SCOOP', $ScoopDir, 'User')
-        [Environment]::SetEnvironmentVariable('SCOOP_GLOBAL', "$ScoopDir\global", 'User')
+        Set-RegistryEnvironmentVariable -Name 'SCOOP' -Value $ScoopDir -Scope 'User'
+        Set-RegistryEnvironmentVariable -Name 'SCOOP_GLOBAL' -Value "$ScoopDir\global" -Scope 'User'
 
         # Fix TEMP path (common cause of .cs compilation errors)
         $userTemp = "$env:USERPROFILE\Temp"
@@ -3939,6 +4663,11 @@ function Install-ScoopTools {
         $handlerIndex++
         Set-ScoopBootTitle -Text "scoop-boot [$($apps.Count + $handlerIndex)/$titleTotal] $($entry.Name)"
         $arguments = if ($entry.ContainsKey('Arguments')) { $entry.Arguments } else { @{} }
+        if (Test-ScoopBootFake) {
+            # The handlers run real programs (pacman, reg.exe, scoop reset, tray apps)
+            Write-Host "[FAKE] $($entry.Name): $($entry.Description) skipped" -ForegroundColor DarkCyan
+            continue
+        }
         try {
             # Only typed failures count; other pipeline output of the handler (stdout of
             # pacman, scoop) is dropped, as it was when the handlers were inline code
@@ -4014,6 +4743,8 @@ function Show-PackageList {
     $apps = @(Read-PackageList -Path $packageFile)
     Write-Host ""
     Write-Host "Package list: $packageFile" -ForegroundColor Cyan
+    $profileNames = (Get-ScoopBootConfig).Profile
+    if ($profileNames) { Write-Host "Profiles: $profileNames (PROFILE in etc\scoop-boot.conf)" -ForegroundColor Gray }
     Write-Host "Bootstrap (always, Step 1): 7zip git aria2 sudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
     Write-Host "Buckets added in Step 2: java versions$(@(Read-PackageListBuckets -Path $packageFile | ForEach-Object { ' ' + $_.Name }) -join '')" -ForegroundColor Gray
     Write-Host ""
@@ -4034,7 +4765,11 @@ function Show-PackageList {
             Write-Host "[WARN] $($entry.Name) has a post-install step but is not in the list" -ForegroundColor Yellow
         }
     }
-    Write-Host "$($apps.Count) packages. To change the list on this machine, create $global:PackagesDir\$(Get-Hostname).txt (it replaces default.txt)." -ForegroundColor Gray
+    if ((Split-Path -Leaf $packageFile) -eq 'default.txt') {
+        Write-Host "$($apps.Count) packages. This machine uses the delivered list; $global:ScoopBootScript --profile=NAMES composes $global:PackagesDir\$(Get-Hostname).txt, which replaces it." -ForegroundColor Gray
+    } else {
+        Write-Host "$($apps.Count) packages. This list is this machine's own: edit it, or compose it again with $global:ScoopBootScript --profile=NAMES --force." -ForegroundColor Gray
+    }
     return (New-RunResult -Command 'list-packages' -Ok $true -Data @{ Packages = $apps.Count })
 }
 
@@ -4232,7 +4967,9 @@ function Invoke-ScoopReset {
             $needsPermissionFix = $true
         }
 
-        if ($needsPermissionFix) {
+        if ($needsPermissionFix -and (Test-ScoopBootFake)) {
+            Write-Host "  -> [FAKE] takeown and icacls skipped" -ForegroundColor DarkCyan
+        } elseif ($needsPermissionFix) {
             Write-Host "  -> Taking ownership (this may take a while)..." -ForegroundColor Gray
             try {
                 $null = & takeown /f "$Path" /r /d y 2>&1
@@ -4276,9 +5013,12 @@ function Invoke-ScoopReset {
 
         $deleted = $false
 
-        # Method 1: PowerShell Remove-Item with UNC path
+        # Method 1: PowerShell Remove-Item with the long-path prefix (Windows only: on a
+        # Linux runner in fake mode the prefix names nothing, and nothing is deleted)
         try {
-            Remove-Item -Path "\\?\$Path" -Recurse -Force -ErrorAction Stop
+            $longPath = if ((-not (Test-Path variable:IsWindows)) -or $IsWindows) { "\\?\$Path" } else { $Path }
+            Remove-Item -Path $longPath -Recurse -Force -ErrorAction Stop
+            if (Test-Path $Path) { throw "still there" }
             $deleted = $true
             Write-Host "  -> Deleted with Remove-Item" -ForegroundColor Green
         } catch {
@@ -4373,6 +5113,10 @@ function Invoke-ScoopReset {
     # ============================================================================
     Write-Host ">>> Checking for running Scoop applications..." -ForegroundColor Cyan
     Write-Host ""
+    # Fake mode: nothing runs from the simulated installation; the whole process
+    # section (handle64, image paths, agents) is Windows-only and skipped
+    $nonScoopHolders = @()
+    if (Test-ScoopBootFake) { Write-Host "[FAKE] Process check skipped" -ForegroundColor DarkCyan } else {
 
     # Method 1: Kill known system tray apps first (they always block)
     Write-Host "[INFO] Stopping known system tray applications..." -ForegroundColor Gray
@@ -4600,6 +5344,7 @@ function Invoke-ScoopReset {
 
     Write-Host ""
     Write-Host "[OK] Process cleanup complete" -ForegroundColor Green
+    }
 
     # 2. Backup environment variables
     Write-Host ""
@@ -4619,16 +5364,10 @@ function Invoke-ScoopReset {
         Write-Host "[OK] Removed old backup: $($old.Name)" -ForegroundColor Gray
     }
 
-    $envVars = @{}
-    [System.Environment]::GetEnvironmentVariables("User").Keys | ForEach-Object {
-        $envVars[$_] = [System.Environment]::GetEnvironmentVariable($_, "User")
-    }
+    $envVars = Get-RegistryEnvironmentVariables -Scope 'User'
     $envVars | ConvertTo-Json | Out-File "$BackupDir\user_env_backup.json"
 
-    $machineEnvVars = @{}
-    [System.Environment]::GetEnvironmentVariables("Machine").Keys | ForEach-Object {
-        $machineEnvVars[$_] = [System.Environment]::GetEnvironmentVariable($_, "Machine")
-    }
+    $machineEnvVars = Get-RegistryEnvironmentVariables -Scope 'Machine'
     $machineEnvVars | ConvertTo-Json | Out-File "$BackupDir\machine_env_backup.json"
 
     Write-Host "[OK] Backup created: $BackupDir" -ForegroundColor Green
@@ -4655,14 +5394,14 @@ function Invoke-ScoopReset {
         Write-Host ">>> Cleaning $Scope environment variables..." -ForegroundColor Cyan
         $removed = 0
         $removedNames = @()
-        $all = [System.Environment]::GetEnvironmentVariables($Scope)
+        $all = Get-RegistryEnvironmentVariables -Scope $Scope
         foreach ($name in @($all.Keys)) {
             if ($varsToKeep -contains $name) { continue }
             $value = [string]$all[$name]
             $byName  = $varsToRemove -contains $name
             $byValue = @($value -split ';' | Where-Object { Test-ScoopOwnedPath $_ }).Count -gt 0
             if ($byName -or $byValue) {
-                [System.Environment]::SetEnvironmentVariable($name, [NullString]::Value, $Scope)
+                Set-RegistryEnvironmentVariable -Name $name -Value $null -Scope $Scope
                 Write-Host "[OK] Removed $Scope variable: $name" -ForegroundColor Green
                 $removed++
                 $removedNames += $name
@@ -4682,22 +5421,22 @@ function Invoke-ScoopReset {
     Write-Host ""
     Set-ScoopBootTitle -Text "scoop-boot reset environment"
     Write-Host ">>> Cleaning User PATH..." -ForegroundColor Cyan
-    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $userPath = Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User'
     if ($userPath) {
         $pathArray = $userPath -split ';' | Where-Object { $_ -ne '' -and -not (Test-ScoopOwnedPath $_) }
         $newPath = $pathArray -join ';'
-        [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Set-RegistryEnvironmentVariable -Name 'Path' -Value $newPath -Scope 'User'
         Write-Host "[OK] User PATH cleaned" -ForegroundColor Green
     }
 
     # 6. Clean Machine PATH
     Write-Host ""
     Write-Host ">>> Cleaning Machine PATH..." -ForegroundColor Cyan
-    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $machinePath = Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'Machine'
     if ($machinePath) {
         $pathArray = $machinePath -split ';' | Where-Object { $_ -ne '' -and -not (Test-ScoopOwnedPath $_) }
         $newPath = $pathArray -join ';'
-        [System.Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+        Set-RegistryEnvironmentVariable -Name 'Path' -Value $newPath -Scope 'Machine'
         Write-Host "[OK] Machine PATH cleaned" -ForegroundColor Green
     }
 
@@ -4718,7 +5457,7 @@ function Invoke-ScoopReset {
             $processAligned++
         }
     }
-    $env:Path = (@([System.Environment]::GetEnvironmentVariable("Path", "Machine"), [System.Environment]::GetEnvironmentVariable("Path", "User")) | Where-Object { $_ }) -join ';'
+    $env:Path = (@((Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'Machine'), (Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User')) | Where-Object { $_ }) -join ';'
     Write-Host "[OK] Process environment of this shell aligned ($processAligned variable(s), PATH)" -ForegroundColor Gray
 
     # 7. Remove directories with aggressive deletion
@@ -4750,7 +5489,7 @@ function Invoke-ScoopReset {
     # not help: Windows restarts it at once with the block of the logon.
     Write-Host ""
     Write-Host ">>> Telling Explorer to reload the environment from the registry..." -ForegroundColor Cyan
-    if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
+    if (-not (Test-ScoopBootFake) -and -not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
         try {
             Start-ExplorerWithRegistryEnvironment
             Write-Host "[OK] explorer.exe started (environment from the registry)" -ForegroundColor Green
@@ -4760,8 +5499,8 @@ function Invoke-ScoopReset {
         }
         Start-Sleep -Seconds 2
     }
-    [System.Environment]::SetEnvironmentVariable('SCOOP_BOOT_ENV_REFRESH', '1', 'User')
-    [System.Environment]::SetEnvironmentVariable('SCOOP_BOOT_ENV_REFRESH', [NullString]::Value, 'User')
+    Set-RegistryEnvironmentVariable -Name 'SCOOP_BOOT_ENV_REFRESH' -Value '1' -Scope 'User'
+    Set-RegistryEnvironmentVariable -Name 'SCOOP_BOOT_ENV_REFRESH' -Value $null -Scope 'User'
     Write-Host "[OK] Environment change broadcast (WM_SETTINGCHANGE); shells opened from the Start menu see the cleaned values" -ForegroundColor Green
 
     # 8. Clean registry
@@ -4842,7 +5581,7 @@ function Invoke-ScoopReset {
         # Processes that started from the remaining directories after the scan (a
         # terminal respawned by an IDE, a shell-extension helper): named here so that
         # the next run has a target
-        $stillRunning = @(Get-Process | Where-Object { $p = $_.Path; $p -and $_.Id -ne $PID -and @($remainingDirs | Where-Object { $p -like "$ScoopDir\$_\*" }).Count -gt 0 })
+        $stillRunning = @(if (-not (Test-ScoopBootFake)) { Get-Process | Where-Object { $p = $_.Path; $p -and $_.Id -ne $PID -and @($remainingDirs | Where-Object { $p -like "$ScoopDir\$_\*" }).Count -gt 0 } })
         if ($stillRunning.Count -gt 0) {
             Write-Host ""
             Write-Host "Running from the remaining directories now (started after the scan; close them or run the reset again):" -ForegroundColor Yellow
@@ -4856,8 +5595,8 @@ function Invoke-ScoopReset {
     Write-Host "Next steps:" -ForegroundColor Cyan
     Write-Host "  1. Check in a new shell (must print nothing; $ScoopDir\bin in PATH is scoop-boot's and stays):" -ForegroundColor White
     Write-Host "     gci env: | ? { `$_.Value -match '$([regex]::Escape($ScoopDir))\\($($global:ScoopOwnedDirs -join '|'))' }" -ForegroundColor Gray
-    Write-Host "  2. Set up again (Administrator): scoop-boot.ps1 --admin-init, then --admin-setenv" -ForegroundColor White
-    Write-Host "  3. Normal shell: scoop-boot.ps1 --user-install" -ForegroundColor White
+    Write-Host "  2. Set up again (Administrator): $global:ScoopBootScript --admin-init, then --admin-setenv" -ForegroundColor White
+    Write-Host "  3. Normal shell: $global:ScoopBootScript --user-install" -ForegroundColor White
     Write-Host ""
     Write-Host "Backup location: $BackupDir" -ForegroundColor Gray
     return (New-RunResult -Command 'admin-reset' -Ok ($remainingDirs.Count -eq 0) -Data @{ Remaining = $remainingDirs; Backup = $BackupDir })

@@ -7,7 +7,8 @@
 #
 #   --packages FILE  apt package list, one package per line, "#" starts a comment
 #   --dry-run        shows what would be installed; apt-get runs in simulation mode
-#                    (resolves every package, installs nothing, needs no root)
+#                    (resolves every package, installs nothing; root only for the
+#                    apt-get update a fresh distribution needs first)
 #   --no-claude      leaves out Claude Code
 #   --yes            no question before the installation (for CI)
 #
@@ -100,6 +101,13 @@ if [ "${#missing[@]}" -gt 0 ]; then
         # Simulation: resolves the packages against the local package index; a name
         # that does not exist fails here, without root and without installing.
         # "Inst" lines are installs (list and dependencies), "Remv" lines removals.
+        # A fresh distribution has no index yet (nothing under /var/lib/apt/lists
+        # until the first apt-get update); it is fetched here, which needs root
+        # like the installation itself, so that the dry run can answer at all.
+        if ! ls /var/lib/apt/lists/*Packages > /dev/null 2>&1; then
+            info "apt package index missing (first run): $SUDO apt-get update"
+            $SUDO apt-get update -qq
+        fi
         if ! simulation=$(apt-get -s --no-install-recommends install "${missing[@]}" 2>&1); then
             echo "$simulation" | grep -E '^E:' >&2 || true
             fail "apt-get simulation failed: a package name is wrong or the index is old (sudo apt-get update)"

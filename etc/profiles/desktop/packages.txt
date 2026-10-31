@@ -1,0 +1,26 @@
+# Browsers
+firefox
+googlechrome
+
+# Editors
+vscode
+neovim
+notepadplusplus
+hxd
+
+# Terminal
+windows-terminal
+
+# GUI applications
+winmerge
+freecommander
+greenshot
+everything
+postman
+keepass
+draw.io
+
+# System tools
+sysinternals
+mousejiggler
+systeminformer

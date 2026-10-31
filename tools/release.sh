@@ -42,7 +42,8 @@ trap 'abort $LINENO "$BASH_COMMAND"' ERR
 TAG="${1:-}"
 NO_PUSH="${2:-}"
 KEY="${KEY:-$HOME/.ssh/id_ed25519}"
-DELIVERED="bin/scoop-boot.ps1 bin/scoop-boot.psm1 bin/scoop.ps1 bin/scoop.cmd bin/scoop etc/packages/default.txt etc/packages/debian.txt etc/packages/devops.txt etc/packages/devops.debian.txt etc/wsl/debian-setup.sh"
+# The delivered files come from etc/release.files, which --update --branch reads too
+DELIVERED=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' etc/release.files | tr '\n' ' ')
 
 fail() { echo "[ERROR] $*" >&2; exit 1; }
 ok()   { echo "[OK] $*"; }

@@ -81,25 +81,39 @@ write such a value out, or use `$NAME`.
 
 ### PATH order
 
-Later `PATH+=` lines win, because each one prepends. The template therefore lists
-low-priority entries first and ends with `$SCOOP\shims` and `$SCOOP\bin`, so that the
+Later `PATH+=` lines win, because each one prepends. The composed file therefore lists
+low-priority entries first and ends with `$USR\shims` and `$USR\bin`, so that the
 scoop wrapper in `bin` is found before Scoop's own shim. `ucrt64\bin` of MSYS2 must come
 after Git and Perl in the file (and therefore before them in the PATH): both ship older
 `libstdc++-6.dll`, `libgcc_s_seh-1.dll` and `libwinpthread-1.dll`, and if those are found
-first, `cc1.exe` fails with exit code -1073741511 (`STATUS_ENTRYPOINT_NOT_FOUND`).
+first, `cc1.exe` fails with exit code -1073741511 (`STATUS_ENTRYPOINT_NOT_FOUND`). The
+`c++` profile is listed behind `perl` in `profiles.conf` for exactly this reason, and
+`msys2\usr\bin` is appended (`PATH=+`) so that it stays behind Git's `usr\bin` and
+`System32`.
 
-### Templates
+### Profiles
 
-`etc/environments/system.hostname.username.env` is the Machine template the Quick Setup
-downloads; the comment at its end lists the optional cache relocation (Gradle, Maven,
-npm, pip, NuGet, JetBrains, WSL) for machines with roaming or container profiles.
-`etc/environments/user.hostname.username.env` is the User template. `--admin-init` copies
-both to `system.<host>.<user>.env` and `user.<host>.<user>.env` and fills in the header.
-For a `system.default.env` or `user.default.env` (all hosts), copy the template by hand
-and delete the host and user lines in its header.
+The host files are composed from `etc\profiles` by `--admin-init` (and by `--profile`
+at any later time): `system.<host>.<user>.env` is the header, then the `system.env`
+fragment of every selected profile in the order of `profiles.conf` (`base` first), then
+`etc\profiles\system.footer.env` with the CUSTOM section, the core PATH lines and the
+commented cache relocation (Gradle, Maven, npm, pip, NuGet, JetBrains, WSL) for machines
+with roaming or container profiles; `user.<host>.<user>.env` is composed the same way
+from the `user.env` fragments (only `base` has one). `USR` is set to the Scoop root of
+the machine; `TMP`, `DEVL_ROOT` and `DATA` keep the values of the `base` fragment and are
+reviewed in Notepad. The profile names stand in the header (`# Profiles:`) and in
+`etc\scoop-boot.conf` (`PROFILE=`).
 
-Identity values (name, mail addresses) do not belong in these templates; they belong in
-your own `user.<host>.<user>.env`, where scripts can read them.
+A fragment is an ordinary environment file without header. `$USR` and every other name
+resolves across the whole composed file, so a fragment may refer to names another one
+defines. A new tool goes into the fragment of its profile, or into a new profile
+directory plus a `profile` line in `profiles.conf`; `tools/test.ps1` checks that
+`default.txt` still equals the `devel` profile.
+
+For a `system.default.env` or `user.default.env` (all hosts), copy a composed host file
+by hand and delete the host and user lines in its header. Identity values (name, mail
+addresses) do not belong in the profiles; they belong in your own
+`user.<host>.<user>.env`, where scripts can read them.
 
 ## What is where under C:\usr
 
@@ -113,10 +127,14 @@ C:\usr\
   shims\                     one small exe per command, pointing at apps\<app>\current
   global\                    global installs (scoop-boot does not use them)
   bin\                       scoop-boot.ps1, scoop-boot.psm1 and the scoop wrapper (scoop.ps1, scoop.cmd, scoop)
-  etc\environments\          the environment files and their backups
-  etc\packages\              default.txt (delivered by --update) and <host>.txt (yours, replaces default.txt)
+  etc\environments\          the environment files (composed from the profiles) and their backups
+  etc\packages\              default.txt and debian.txt (delivered: the devel profile), <host>.txt and
+                             <host>.debian.txt (yours, composed by --admin-init or --profile, replace them)
+  etc\profiles\              profiles.conf, system.footer.env, one directory per profile (delivered)
+  etc\wsl\                   debian-setup.sh for --wsl-setup (delivered)
   etc\exports\               package exports (--export), input for --import
-  etc\scoop-boot.conf        DIR= lines: the directories --admin-init creates
+  etc\release.files          the files --update delivers (read by --update --branch and tools/release.sh)
+  etc\scoop-boot.conf        DIR= lines: the directories --admin-init creates; PROFILE= of this machine
   etc\allowed_signers        the release signing key (first --update, trust on first use)
   etc\release.manifest(.sig) hashes and signature of the installed release
   logs\scoopboot\            daily logs, platform reports
@@ -125,7 +143,8 @@ C:\usr\
 
 `apps`, `buckets`, `cache`, `persist`, `shims` and `global` belong to Scoop and are
 removed by the reset. The rest belongs to scoop-boot or to you; `--update` replaces
-only `bin\*` and `etc\packages\default.txt`. Anything else placed under `C:\usr` (a
+only the files of `etc\release.files` (`bin\*`, `etc\packages\default.txt` and
+`debian.txt`, `etc\profiles\*`, `etc\wsl\*`). Anything else placed under `C:\usr` (a
 database server, a GIS distribution, a workspace) is left alone by every command; its
 PATH entries and variables are yours to maintain.
 

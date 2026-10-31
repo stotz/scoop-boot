@@ -29,7 +29,9 @@ step 3 a normal one.
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 New-Item -ItemType Directory -Path C:\usr\bin -Force
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1 -OutFile C:\usr\bin\scoop-boot.ps1
-C:\usr\bin\scoop-boot.ps1 --admin-init
+C:\usr\bin\scoop-boot.ps1 --admin-init                    # the developer workplace (profile devel)
+C:\usr\bin\scoop-boot.ps1 --admin-init --profile=devops   # or: infrastructure work
+C:\usr\bin\scoop-boot.ps1 --admin-init --profile=java,c++  # or: pick the parts (see "Profiles")
 ```
 
 `--admin-init` does four things and keeps whatever already exists when run again:
@@ -38,9 +40,11 @@ C:\usr\bin\scoop-boot.ps1 --admin-init
   `C:\usr\etc\scoop-boot.conf` (`DIR=` lines; written with the defaults `C:\tmp`,
   `C:\devl` for repositories and `C:\data` for data and tool caches when the file is
   missing, on the drive of the Scoop root);
-- downloads the current signed release: the library module, the scoop wrapper and the
-  package list (see "Releases and `--update`");
-- writes `system.<host>.<user>.env` and `user.<host>.<user>.env` from the templates;
+- downloads the current signed release: the library module, the scoop wrapper, the
+  profiles and package lists (see "Releases and `--update`");
+- composes `etc\packages\<host>.txt`, `system.<host>.<user>.env` and
+  `user.<host>.<user>.env` from the profiles (`--profile=NAMES`; without it `devel`, or
+  what `PROFILE=` in `etc\scoop-boot.conf` says from an earlier run);
 - opens the system file in Notepad: review paths and tool versions, save, close.
 
 `system.*` is applied at Machine scope and is the source of truth for `JAVA_HOME`, the
@@ -138,24 +142,38 @@ anything. Ubuntu and other Debian derivatives work too (`--distro=Ubuntu-24.04`)
 when Debian is missing, `--wsl-setup` names the installed distributions. `etc\packages\<host>.debian.txt` replaces the delivered list on
 one machine, as `<host>.txt` does for Scoop.
 
-### DevOps and infrastructure instead of the developer set (optional)
+### Profiles
 
-`etc\packages\devops.txt` and `etc\packages\devops.debian.txt` are templates with the
-tools for infrastructure work: Azure CLI, AzCopy, Service Bus Explorer, Storage Explorer,
-Terraform with tflint, terraform-docs and trivy, network diagnostics (nmap, Wireshark,
-tcping, trippy, doggo, dig, sslscan, iperf3), remote access, database clients and
-Postman instead of compilers, build tools and IDEs; for Debian ansible and the usual
-network tools. Use them before step 3:
+A profile is one part of a workplace: its Scoop packages, its environment variables
+and, when it has one, its apt packages for WSL. `--admin-init` and `--profile` compose
+the selected profiles into this machine's files; the names can be combined freely, in
+any order, and `base` (Git, OpenSSH, the directory conventions, locale) is always part
+of it.
 
 ```powershell
-C:\usr\bin\scoop-boot.ps1 --package-template=devops --dry-run   # what would be copied
-C:\usr\bin\scoop-boot.ps1 --package-template=devops             # devops.txt -> <host>.txt, devops.debian.txt -> <host>.debian.txt
-C:\usr\bin\scoop-boot.ps1 --list-packages                       # check the list, then --user-install
+C:\usr\bin\scoop-boot.ps1 --list-profiles                        # what etc\profiles delivers, with the packages
+C:\usr\bin\scoop-boot.ps1 --profile=java,c++,python --dry-run     # the files that would be composed
+C:\usr\bin\scoop-boot.ps1 --profile=devops --force                # replace the host files (the old ones stay as .bak)
 ```
 
-The host lists replace `default.txt` and `debian.txt` on this machine and are never
-touched by `--update`; edit them freely. Existing host lists are kept unless `--force`
-(the old file is saved as `.bak`).
+Single profiles: `base`, `desktop` (browsers, editors, Windows Terminal, file and
+screenshot tools), `ide` (JetBrains Toolbox), `cli`, `svn`, `java` (Temurin JDK 25,
+Maven, Gradle, Ant, Kotlin), `node`, `perl`, `python`, `c++` (MSYS2/GCC, make, cmake,
+ninja, vcpkg), `docs`, `network`, `netdiag`, `db`, `dbclients`, `server`, `azure`,
+`azure-tools`, `iac` (Terraform), `pwsh`, `automation`, `media`. Two virtual profiles
+bundle them: `devel`, the developer workplace this project was written for (and the
+content of `default.txt`), and `devops` for infrastructure work (Azure CLI, AzCopy,
+Service Bus and Storage Explorer, Terraform with tflint, terraform-docs and trivy,
+network diagnostics, remote access, database clients; for Debian ansible and the usual
+network tools) instead of compilers and IDEs.
+
+The composed files (`etc\packages\<host>.txt`, `<host>.debian.txt`,
+`etc\environments\system.<host>.<user>.env`, `user.<host>.<user>.env`) are yours: edit
+them freely, `--update` never touches them. Existing files are kept unless `--force`.
+The profile names are recorded as `PROFILE=` in `etc\scoop-boot.conf`. The profiles
+themselves live in `etc\profiles` (one directory per profile with `packages.txt`,
+`system.env`, `user.env`, `debian.txt`; `profiles.conf` names them and defines the
+virtual ones) and are delivered by `--update`; a new profile is a pull request.
 
 ### Moving from an existing Scoop machine
 
@@ -265,11 +283,12 @@ the rule and exclusion lists; `--asr-report` still works as an alias.
 
 ## Package list
 
-`--user-install` installs what `C:\usr\etc\packages\default.txt` lists, one manifest per
-line in install order, `#` for comments, `bucket/name` allowed. `--update` delivers that
-file; do not edit it. To change the list on one machine, copy it to
-`C:\usr\etc\packages\<hostname>.txt` (lower case): that file replaces `default.txt`
-completely and is never touched by `--update` (`--import` creates it for you). The
+`--user-install` installs what `C:\usr\etc\packages\<hostname>.txt` lists (composed by
+`--admin-init` from the profiles), or `default.txt` (the `devel` profile, delivered by
+`--update`) when no host file exists: one manifest per line in install order, `#` for
+comments, `bucket/name` allowed. The host file replaces `default.txt` completely and is
+never touched by `--update`; `--profile` and `--import` write it, editing it by hand
+works the same way. The
 bootstrap packages (7-Zip, Git, aria2 and the extractors) are installed before the list
 and are not part of it. A line `# bucket NAME URL` in the list adds a bucket in Step 2,
 which is how a private bucket comes in (see [docs/private-bucket.md](docs/private-bucket.md)).
@@ -282,7 +301,7 @@ their package is in the list; `--list-packages` marks them.
 
 Gradle, Maven, npm, pip, NuGet, JetBrains indexes and WSL disks all default to
 `%USERPROFILE%`. On a roaming or container profile (FSLogix, size quotas) that is the
-wrong place. The `system.*` template ends with a commented block that moves them to
+wrong place. The composed `system.*` file ends with a commented block that moves them to
 `C:\data\caches\<tool>`: uncomment what you need, run `--admin-setenv` again
 (Administrator), open a new shell. The block also lists the one-time commands for the
 things that are not environment variables (JetBrains properties files,
@@ -363,18 +382,20 @@ Environment file syntax, load order and version pinning: [docs/environment-files
 
 ```
 Setup (Administrator shell unless noted)
---admin-init         1: directories, --update, environment files from the templates, opens the system file
+--admin-init         1: directories, --update, package list and environment files from the profiles, opens the system file
+--profile=NAMES      With --admin-init: the profiles for this machine (default: PROFILE in etc\scoop-boot.conf, else devel)
 --admin-setenv       2: apply the environment files at Machine scope (Phase 1); --dry-run: net effect, no Administrator needed
 --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2); --force: no question in an elevated shell
 --admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
 
 Maintenance
---update             Install the current signed release (scripts, scoop wrapper, etc\packages\default.txt, debian.txt, etc\wsl\debian-setup.sh)
+--update             Install the current signed release: scripts, scoop wrapper, package lists, profiles, etc\wsl (the files of etc\release.files)
 --branch=NAME        With --update: download from a branch and remember it (etc\scoop-boot.branch); --branch=main switches back
 --clean-user-scope   Remove Scoop's User-scope overrides, apply user.* files (no Administrator)
 --quiet              With --clean-user-scope: one summary line, and only when something changed
 --list-packages      Package list in use, status of each package and its post-install steps; installs nothing
---package-template=NAME  Use a list template on this machine (devops); --dry-run shows it, --force replaces host lists (.bak)
+--profile=NAMES      Compose etc\packages\HOSTNAME.txt and the environment files from profiles (devel, devops, java,c++,...); --dry-run, --force
+--list-profiles      The profiles etc\profiles delivers, single and virtual, with their packages
 --platform-report    Defender/ASR, profile container, TMP: what the platform does to the setup; exit 1 on findings
 --export[=NAME]      Installed packages and buckets to etc\exports\NAME.txt (default: hostname)
 --import=NAME|FILE   Append what this machine's list lacks to etc\packages\HOSTNAME.txt; --dry-run shows it; --replace clones the list
@@ -385,11 +406,11 @@ WSL (optional, after the setup)
 
 Environment files
 --env-status         Environment files found and their load order
-                     (--admin-init creates the host files; copy a template by hand for *.default.env)
+                     (--admin-init and --profile compose the host files; a *.default.env for all hosts is written by hand)
 
 Other
 --bootstrap          Install Scoop and the bootstrap packages only (part of --user-install)
---self-test          Self-tests (parser, expansion, package list, import, export, dry run, help, static check)
+--self-test          Self-tests (parser, expansion, package list, import, export, dry run, profiles, help, static check)
 --version, --help
 ```
 
@@ -405,12 +426,23 @@ report, an unknown option).
 Work happens on a branch; `main` carries tested states only.
 
 ```powershell
-tools\test.ps1               # parse check, --self-test, dry run against the templates, command line
+tools\test.ps1               # parse check, --self-test, profiles and dry run, the setup in fake mode, command line
 ```
 
-`tools\test.ps1` runs on Windows PowerShell 5.1 and on pwsh, Linux included (the
-dry run uses a scratch copy of `bin\` and the templates, the registry is replaced by
-the dry-run store). The same script runs in GitHub Actions (`.github/workflows/ci.yml`)
+`tools\test.ps1` runs on Windows PowerShell 5.1 and on pwsh, Linux included. It
+composes the `devel` profile in a scratch copy of `bin\` and `etc\` and runs the
+environment dry run against it (the registry is replaced by the dry-run store), checks
+`etc\release.files` against the tree, and then runs the whole setup in fake mode:
+with `SCOOPBOOT_FAKE=1` the commands work against a simulated Scoop (the same directory
+layout, `apps\<name>\current` with the JSON files Scoop writes, the User-scope writes
+Scoop makes) and a registry kept in `etc\fake\registry.json`, with no processes and
+nothing installed, so `--admin-init --profile=java,python`, `--admin-setenv`,
+`--user-install` (twice), the scoop wrapper, `--export`, `--import --dry-run`,
+`--list-packages` and `--admin-reset --force` run through on any platform with the
+expected state after each step. The fake mode is also there for trying a change by
+hand: `$env:SCOOPBOOT_FAKE = '1'` in a shell, a scratch root with `bin\` and `etc\`,
+and every command behaves as on a machine without Scoop. The same script runs in
+GitHub Actions (`.github/workflows/ci.yml`)
 on `ubuntu-latest` and `windows-latest` for every push and pull request, together with
 PSScriptAnalyzer (errors), ShellCheck for the shell scripts and `etc/wsl/debian-setup.sh`
 in `debian:stable` and `ubuntu:24.04` containers, each fresh and as an existing

@@ -1,0 +1,15 @@
+# Base system and certificates
+ca-certificates
+curl
+wget
+gnupg
+unzip
+zip
+xz-utils
+locales
+sudo
+
+# Version control
+git
+git-lfs
+openssh-client

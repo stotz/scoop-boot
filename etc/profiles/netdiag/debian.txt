@@ -1,0 +1,11 @@
+# Network diagnostics
+iproute2
+net-tools
+nmap
+tcpdump
+traceroute
+mtr-tiny
+socat
+iperf3
+whois
+telnet

@@ -1,0 +1,6 @@
+# Infrastructure as code. Kubernetes is left out: Container Apps are managed with
+# azure-cli. For AKS add kubectl, kubelogin and helm to the host copy.
+terraform
+tflint
+terraform-docs
+trivy

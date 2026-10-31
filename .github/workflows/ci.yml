@@ -1,5 +1,5 @@
 # scoop-boot checks: tools/test.ps1 (parse check, self-tests, dry run against the
-# templates, command line) on Linux and Windows, and for every release tag the
+# profiles, the setup in fake mode, command line) on Linux and Windows, and for every release tag the
 # manifest signature and hashes; PSScriptAnalyzer and ShellCheck; the WSL setup
 # script in a debian:stable container (dry run, install, second run, tools start).
 # Nothing here installs Scoop or writes to a registry.
@@ -81,8 +81,10 @@ jobs:
         run: |
           bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --dry-run --no-claude | tee dry-run.txt
           grep -q ', 0 removed' dry-run.txt
-      - name: dry run of the devops template list (apt-get simulation)
-        run: bash etc/wsl/debian-setup.sh --packages etc/packages/devops.debian.txt --dry-run --no-claude
+      - name: dry run of every profile's apt list at once (apt-get simulation)
+        run: |
+          cat etc/profiles/*/debian.txt > all-profiles.debian.txt
+          bash etc/wsl/debian-setup.sh --packages all-profiles.debian.txt --dry-run --no-claude
       - name: install the package list
         run: bash etc/wsl/debian-setup.sh --packages etc/packages/debian.txt --yes --no-claude
       - name: nothing that was installed before is gone, own files untouched

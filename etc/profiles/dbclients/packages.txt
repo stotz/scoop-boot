@@ -1,0 +1,4 @@
+# Database clients (postgresql is the full package from the main bucket; psql comes with it)
+go-sqlcmd
+postgresql
+dbeaver

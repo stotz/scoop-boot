@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.23.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.24.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -12,12 +12,17 @@
       scope is cleaned after every Scoop command (scoop wrapper in bin\)
     - List operations (+=, =+, -=) for ALL environment variables, order-independent
       variable expansion
+    - Profiles (etc\profiles): packages, environment and apt list per part of a
+      workplace, composed per machine by --admin-init --profile=NAMES or --profile;
+      virtual profiles devel and devops
     - Package list per host (etc\packages), post-install handlers as a table,
       --export and --import to carry the packages of one machine to another
     - --platform-report: what Defender/ASR and a profile container do to the setup
     - --update installs signed releases: manifest with SHA-256 of every file,
       SSH signature, trust on first use; rescue path; daily log
-    - --self-test on the machine, a Pester suite in tests\ for development and CI
+    - --self-test on the machine; tools\test.ps1 for development and CI, with the
+      whole setup in fake mode (SCOOPBOOT_FAKE=1: no Scoop, registry or processes)
+    - --wsl-install and --wsl-setup: a Debian in WSL 2 with the apt list of the profiles
     - ASCII-only output for console compatibility
 
 .PARAMETER (Dynamic)
@@ -25,9 +30,47 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.23.0
+    Version: 1.24.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.24.0:
+    - Profiles: etc\profiles holds one directory per part of a workplace (base,
+      desktop, ide, cli, svn, java, node, perl, python, c++, docs, network, netdiag,
+      db, dbclients, server, azure, azure-tools, iac, pwsh, automation, media), each
+      with its Scoop packages, its environment lines and, where it has one, its apt
+      list; profiles.conf names them in composition order and defines the virtual
+      profiles devel (the developer workplace, the content of default.txt) and
+      devops. --profile=NAMES composes etc\packages\<host>.txt, <host>.debian.txt,
+      system.<host>.<user>.env and user.<host>.<user>.env from any combination
+      (--dry-run shows them, --force replaces existing files and keeps .bak);
+      --admin-init --profile=NAMES does it during the setup, without --profile it
+      takes PROFILE= from etc\scoop-boot.conf or devel; --list-profiles lists them.
+      The environment templates and --package-template of 1.23.0 are replaced
+    - etc\release.files names the delivered files; tools/release.sh signs that
+      list and --update --branch downloads it (the list was hard-coded before)
+    - Fake mode: with SCOOPBOOT_FAKE=1 the setup runs end to end without Scoop,
+      registry or processes (a simulated Scoop in the same layout, a registry in
+      etc\fake\registry.json); tools/test.ps1 and the CI run --admin-init,
+      --admin-setenv, --user-install, the scoop wrapper, --export, --import,
+      --list-packages and --admin-reset this way on Linux and Windows
+    - --user-install and --bootstrap no longer leave SCOOP_BOOT_WRAPPER=off in the
+      shell: every later "scoop install" in that shell skipped the user-scope
+      cleanup (found by the fake end-to-end test)
+    - --wsl-setup --dry-run fetches the apt index first on a fresh distribution
+      (the simulation failed with "package name is wrong or the index is old");
+      --wsl-setup without the distribution reports it instead of failing on
+      wsl.exe's stderr in Windows PowerShell 5.1
+    - --admin-init works on a machine that has only this script, as the Quick
+      Setup promises: when bin\scoop-boot.psm1 is missing (or does not load), the
+      release is downloaded first and the command goes on with the module just
+      installed. Before, the rescue mode refused everything but --update, and the
+      first command of the Quick Setup ended with "module not loaded" (new AVD,
+      30.10.)
+    - The "run this next" hints name the script with its full path
+      (C:\usr\bin\scoop-boot.ps1 --admin-setenv): bin\ is on the PATH only after
+      --admin-setenv and a new shell, and not at all after a reset
+    - Package list: hxd back in (desktop); fzf (cli) and draw.io (desktop) new
 
     Changes in v1.23.0:
     - --wsl-install (Administrator): WSL and the Debian distribution (--distro=NAME
@@ -467,7 +510,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.23.0"
+$global:ScriptVersion = "1.24.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -535,13 +578,15 @@ function Invoke-AdminInit {
         Creates bin\, etc\environments and etc\packages under the Scoop root plus the
         directories listed in etc\scoop-boot.conf (written with its defaults tmp,
         devl and data on the root's drive when missing), runs --update (scripts,
-        scoop wrapper, package list), writes system.<host>.<user>.env and
-        user.<host>.<user>.env from the templates when they do not exist yet (USR set
-        to the Scoop root), and opens the system file in Notepad. Running it again
+        scoop wrapper, package lists, profiles), composes etc\packages\<host>.txt,
+        system.<host>.<user>.env and user.<host>.<user>.env from the profiles
+        (--profile=NAMES; else PROFILE in etc\scoop-boot.conf; else devel) when they
+        do not exist yet, and opens the system file in Notepad. Running it again
         changes nothing that already exists.
     #>
     param(
-        [string]$Branch = ''
+        [string]$Branch = '',
+        [string]$Profile = ''
     )
     Write-Section "Setup 1: Initialize"
     if (-not (Test-AdminRights)) {
@@ -561,48 +606,40 @@ function Invoke-AdminInit {
     foreach ($dir in @((Join-Path $global:BaseDir 'bin'), $global:EnvDir, $global:PackagesDir) + @($config.Dirs)) {
         if (Test-Path $dir) {
             Write-Host "[OK] Directory exists: $dir" -ForegroundColor Gray
+        } elseif ((Test-ScoopBootFake) -and $config.Dirs -contains $dir) {
+            Write-Host "[FAKE] Directory not created outside the Scoop root: $dir" -ForegroundColor DarkCyan
         } else {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
             Write-Success "Directory created: $dir"
         }
     }
 
-    if (-not (Invoke-SelfUpdate -Branch $Branch)) { return $false }
+    if ($script:RescueUpdated) {
+        Write-Host "[OK] Release downloaded before the module was loaded (see above)" -ForegroundColor Gray
+    } elseif (Test-ScoopBootFake) {
+        Write-Host "[FAKE] --update skipped: the files of this checkout are used" -ForegroundColor DarkCyan
+    } elseif (-not (Invoke-SelfUpdate -Branch $Branch)) {
+        return $false
+    }
     $Branch = Get-UpdateBranch
 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $base = "https://raw.githubusercontent.com/stotz/scoop-boot/$Branch"
-    $envName = "{0}.{1}.env" -f (Get-Hostname), (Get-Username)
-    $systemFile = Join-Path $global:EnvDir "system.$envName"
-    foreach ($scope in @('system', 'user')) {
-        $target = Join-Path $global:EnvDir "$scope.$envName"
-        if (Test-Path $target) {
-            Write-Host "[OK] Environment file exists, kept: $target" -ForegroundColor Gray
-            continue
-        }
-        try {
-            $templateUri = "$base/etc/environments/$scope.hostname.username.env"
-            $template = (Invoke-WebRequest -Uri $templateUri -UseBasicParsing).Content
-            # The template header carries placeholders; the file gets this machine's values
-            $content = $template -replace '<hostname>', (Get-Hostname) -replace '<username>', (Get-Username)
-            $content = $content -replace "(?m)^# File: $scope\.hostname\.username\.env\s*$", "# File: $scope.$envName"
-            $content = $content -replace '(?m)^# Created: .*$', "# Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm') by scoop-boot.ps1 --admin-init ($Branch)"
-            # The Scoop root of this machine; TMP, DEVL_ROOT and DATA stay the template's
-            # values and are reviewed in Notepad together with everything else
-            $content = $content -replace '(?m)^USR=.*$', "USR=$($global:BaseDir)" -replace '(?m)^# SCOOP: .*$', "# SCOOP: $($global:BaseDir)"
-            # UTF-8 without BOM, line endings as in the repository (LF)
-            [IO.File]::WriteAllText($target, $content, (New-Object Text.UTF8Encoding($false)))
-            Write-Success "Environment file created from template: $target"
-        } catch {
-            Write-ErrorMsg "Download failed: $base/etc/environments/$scope.hostname.username.env ($($_.Exception.Message))"
-            return $false
-        }
+    # The profiles --update just delivered compose this machine's files; existing
+    # files are kept (a machine set up before 1.24.0 has them from the templates)
+    $names = $Profile
+    if (-not $names) { $names = (Get-ScoopBootConfig).Profile }
+    if (-not $names) { $names = 'devel' }
+    if (-not (Invoke-Profile -Names $names -KeepExisting $true -Command 'scoop-boot.ps1 --admin-init --profile')) { return $false }
+    $systemFile = Join-Path $global:EnvDir ("system.{0}.{1}.env" -f (Get-Hostname), (Get-Username))
+    if (-not (Test-Path $systemFile)) {
+        Write-ErrorMsg "$systemFile was not written; check the profiles with $PSCommandPath --list-profiles"
+        return $false
     }
 
     Write-Host ""
-    Write-Info "Review paths and tool versions in the system file, save, then run: scoop-boot.ps1 --admin-setenv"
+    Write-Info "Review paths and tool versions in the system file, save, then run: $PSCommandPath --admin-setenv"
     # Full path on purpose: once Git is installed, its usr\bin holds an extensionless
     # script named "notepad" that PowerShell would hand to ShellExecute.
+    if (Test-ScoopBootFake) { Write-Host "[FAKE] Notepad not started for $systemFile" -ForegroundColor DarkCyan; return $true }
     Start-Process -FilePath "$env:SystemRoot\System32\notepad.exe" -ArgumentList "`"$systemFile`""
     return $true
 }
@@ -741,7 +778,8 @@ function Invoke-SelfUpdate {
     $repo = 'https://raw.githubusercontent.com/stotz/scoop-boot'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $temp = Join-Path $env:TEMP "scoop-boot-update-$stamp"
+    # GetTempPath: TEMP of this session on Windows, and defined on a runner without it
+    $temp = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-update-$stamp"
     New-Item -ItemType Directory -Path $temp -Force | Out-Null
     $etcDir = Join-Path $global:BaseDir 'etc'
     if (-not (Test-Path $etcDir)) { New-Item -ItemType Directory -Path $etcDir -Force | Out-Null }
@@ -805,7 +843,21 @@ function Invoke-SelfUpdate {
         $ref = $Branch
         $base = "$repo/$ref"
         Write-Warning "Downloading from branch '$Branch' WITHOUT signature check (remembered in $global:BranchFile; back to signed releases with --update --branch=main)"
-        $files = @('bin/scoop-boot.ps1', 'bin/scoop-boot.psm1', 'bin/scoop.ps1', 'bin/scoop.cmd', 'bin/scoop', 'etc/packages/default.txt', 'etc/packages/debian.txt', 'etc/packages/devops.txt', 'etc/packages/devops.debian.txt', 'etc/wsl/debian-setup.sh')
+        # etc/release.files on the branch names the delivered files, as the manifest
+        # does for a release (tools/release.sh reads the same file)
+        try {
+            $index = (Invoke-WebRequest -Uri "$base/etc/release.files" -UseBasicParsing).Content
+        } catch {
+            Write-ErrorMsg "Download failed: $base/etc/release.files ($($_.Exception.Message)); a branch before 1.24.0 has no file index, release it or merge main into it"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        $files = @($index -split "`r?`n" | ForEach-Object { ($_ -replace '#.*$', '').Trim() } | Where-Object { $_ })
+        if ($files.Count -eq 0) {
+            Write-ErrorMsg "$base/etc/release.files is empty"
+            Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
     }
 
     # Phase 1: download everything and check it against the manifest; no file is
@@ -836,7 +888,7 @@ function Invoke-SelfUpdate {
         if (-not $manifest -and $Branch -ne 'main') {
             # Every file of a branch head came back 404: the branch was merged and
             # deleted, which is the normal end of a test branch
-            Write-ErrorMsg "Branch '$Branch' is probably deleted (merged); back to the signed release with: scoop-boot.ps1 --update --branch=main"
+            Write-ErrorMsg "Branch '$Branch' is probably deleted (merged); back to the signed release with: $PSCommandPath --update --branch=main"
         }
         Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
         return $false
@@ -915,34 +967,54 @@ function Invoke-SelfUpdate {
 
 if ($args -contains '--quiet') { $global:ScoopBootQuiet = $true }
 $rescueOnly = @($args | Where-Object { $_ -match '^--(update|version|v|help|h|branch=.+)$' -or $_ -match '^-[vh]$' }).Count -eq @($args).Count -and @($args).Count -gt 0
+# --admin-init is the Quick Setup's first command, on a machine that has only this
+# script: the module is downloaded first, then the command runs as usual
+$adminInitFirst = @($args | Where-Object { $_ -notmatch '^--(quiet|branch=.+)$' }) -join ' ' -eq '--admin-init'
+$script:RescueUpdated = $false
 
 if (-not $script:ModuleLoaded) {
     # Rescue mode: no logging, no banner from the module, only the commands that
     # can put a working module back
+    $missing = -not (Test-Path $script:ModulePath)
     Microsoft.PowerShell.Utility\Write-Host "scoop-boot.ps1 $global:ScriptVersion (sha256 $(Get-FileSha256Short -Path $PSCommandPath)) | module not loaded" -ForegroundColor DarkCyan
-    Microsoft.PowerShell.Utility\Write-Host "[ERROR] $script:ModulePath did not load: $script:ModuleError" -ForegroundColor Red
-    if (-not $rescueOnly) {
-        Microsoft.PowerShell.Utility\Write-Host "        Only --update, --version and --help work until the module is replaced. Run: scoop-boot.ps1 --update" -ForegroundColor Yellow
+    if ($missing -and $adminInitFirst) {
+        Microsoft.PowerShell.Utility\Write-Host "[INFO] $script:ModulePath is not there yet: downloading the release first" -ForegroundColor Cyan
+    } else {
+        Microsoft.PowerShell.Utility\Write-Host "[ERROR] $script:ModulePath did not load: $script:ModuleError" -ForegroundColor Red
+    }
+    if (-not $rescueOnly -and -not $adminInitFirst) {
+        Microsoft.PowerShell.Utility\Write-Host "        Only --update, --version and --help work until the module is replaced. Run: $PSCommandPath --update" -ForegroundColor Yellow
         exit 1
     }
     if ($args -contains '--version' -or $args -contains '-v') { Microsoft.PowerShell.Utility\Write-Host "scoop-boot.ps1 version $global:ScriptVersion"; exit 0 }
     if ($args -contains '--help' -or $args -contains '-h') {
-        Microsoft.PowerShell.Utility\Write-Host "Usage: scoop-boot.ps1 --update [--branch=NAME]   (replaces bin\scoop-boot.psm1 and the scripts; full help once the module loads)"
+        Microsoft.PowerShell.Utility\Write-Host "Usage: $PSCommandPath --update [--branch=NAME]   (replaces bin\scoop-boot.psm1 and the scripts; full help once the module loads)"
         exit 0
     }
     $branch = ''
     foreach ($a in $args) { if ($a -match '^--branch=(.+)$') { $branch = $Matches[1] } }
-    if (Invoke-SelfUpdate -Branch $branch) { exit 0 } else { exit 1 }
+    if (-not (Invoke-SelfUpdate -Branch $branch)) { exit 1 }
+    if (-not $adminInitFirst) { exit 0 }
+    # The module is on disk now: load it and go on with --admin-init
+    try {
+        Import-Module $script:ModulePath -Scope Local -Force -DisableNameChecking -ErrorAction Stop
+        $script:ModuleLoaded = $true
+        $script:RescueUpdated = $true
+    } catch {
+        Microsoft.PowerShell.Utility\Write-Host "[ERROR] $script:ModulePath did not load after the update: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # The command goes into the log context ("scoop-boot.ps1 --user-install (1.16.0)")
 $logMode = @($args | Where-Object { $_ -match '^--' -and $_ -notmatch '^--(quiet|dry-run|force|keep-persist|branch=|distro=|no-claude)' } | Select-Object -First 1)
+if ($args -contains '--admin-init') { $logMode = @('--admin-init') }
 Initialize-ScoopBootLog -ScriptName 'scoop-boot.ps1' -Version $global:ScriptVersion -Mode "$logMode" -ScriptPath $PSCommandPath -Arguments $args
 
 # Parse arguments; an unknown option stops here (a typo, or a command removed in 1.18.0)
 Parse-Arguments -Arguments $args
 if (@($global:ParsedArgs.Unknown).Count -gt 0) {
-    Write-ErrorMsg "Unknown option(s): $($global:ParsedArgs.Unknown -join ' ')  (scoop-boot.ps1 --help lists the commands)"
+    Write-ErrorMsg "Unknown option(s): $($global:ParsedArgs.Unknown -join ' ')  ($PSCommandPath --help lists the commands)"
     exit 1
 }
 
@@ -960,10 +1032,13 @@ if ($global:ParsedArgs.Version) {
 
 if ($global:ParsedArgs.Bootstrap) {
     $savedTitle = Get-ScoopBootTitle
+    # The bootstrap bypasses the scoop wrapper for its run only (see Invoke-UserInstall)
+    $savedWrapper = $env:SCOOP_BOOT_WRAPPER
     try {
         $success = Invoke-Bootstrap
     } finally {
         Restore-ScoopBootTitle -Saved $savedTitle
+        if ($null -eq $savedWrapper) { Remove-Item Env:SCOOP_BOOT_WRAPPER -ErrorAction SilentlyContinue } else { $env:SCOOP_BOOT_WRAPPER = $savedWrapper }
     }
     exit $(if ($success) { 0 } else { 1 })
 }
@@ -1003,7 +1078,7 @@ if ($global:ParsedArgs.Update) {
 }
 
 if ($global:ParsedArgs.AdminInit) {
-    if (Invoke-AdminInit -Branch $global:ParsedArgs.Branch) { exit 0 } else { exit 1 }
+    if (Invoke-AdminInit -Branch $global:ParsedArgs.Branch -Profile $global:ParsedArgs.Profile) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.AdminSetEnv) {
@@ -1018,8 +1093,13 @@ if ($global:ParsedArgs.ListPackages) {
     if (Invoke-ListPackages) { exit 0 } else { exit 1 }
 }
 
-if ($global:ParsedArgs.PackageTemplate) {
-    if (Invoke-PackageTemplate -Name $global:ParsedArgs.PackageTemplate -DryRun $global:ParsedArgs.DryRun -Force $global:ParsedArgs.Force) { exit 0 } else { exit 1 }
+if ($global:ParsedArgs.ListProfiles) {
+    if (Show-Profiles) { exit 0 } else { exit 1 }
+}
+
+# --profile with --admin-init is handled by --admin-init below
+if ($global:ParsedArgs.Profile -and -not $global:ParsedArgs.AdminInit) {
+    if (Invoke-Profile -Names $global:ParsedArgs.Profile -DryRun $global:ParsedArgs.DryRun -Force $global:ParsedArgs.Force) { exit 0 } else { exit 1 }
 }
 
 if ($global:ParsedArgs.WslInstall) {

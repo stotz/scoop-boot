@@ -1,0 +1,7 @@
+# System libraries (first: VC++ runtime, post_install asks for elevation once)
+vcredist2022
+
+# Git tools (Git itself is a bootstrap package) and OpenSSH
+openssh
+gh
+lazygit

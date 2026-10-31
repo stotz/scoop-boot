@@ -1,0 +1,8 @@
+# Java
+temurin25-jdk
+
+# Build tools
+maven
+gradle
+ant
+kotlin

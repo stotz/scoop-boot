@@ -1,0 +1,10 @@
+# Security tools
+gnupg
+openssl
+
+# Network tools (nmap: shims nc and netcat -> ncat.exe)
+nmap
+wireshark
+putty
+winscp
+filezilla

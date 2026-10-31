@@ -1,0 +1,2 @@
+# IDEs (the Toolbox installs them under persist\jetbrains-toolbox\apps)
+jetbrains-toolbox

@@ -1,0 +1,13 @@
+# Network diagnostics: TCP port check through firewalls (tcping), traceroute with
+# loss per hop (trippy), DNS queries against a chosen server (doggo, dig from
+# bind), TLS and certificate check (sslscan), bandwidth (iperf3). Sysinternals
+# (desktop) adds psping, tcpview and whois.
+tcping
+trippy
+doggo
+bind
+sslscan
+iperf3
+
+# Remote access
+mremoteng

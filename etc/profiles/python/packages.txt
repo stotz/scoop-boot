@@ -1,0 +1,2 @@
+# Python (post-install: reg import install-pep-514.reg)
+python314

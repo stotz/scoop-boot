@@ -1,0 +1,6 @@
+# Build tools
+build-essential
+make
+cmake
+ninja-build
+pkg-config

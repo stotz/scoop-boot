@@ -1,0 +1,10 @@
+# Build tools
+cmake
+make
+ninja
+
+# C++ package manager
+vcpkg
+
+# MSYS2 (post-install: pacman -Syu, GCC for UCRT64, compile-and-run smoke test)
+msys2

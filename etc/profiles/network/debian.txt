@@ -1,0 +1,5 @@
+# Network
+bind9-dnsutils
+iputils-ping
+netcat-openbsd
+openssl

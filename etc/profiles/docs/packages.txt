@@ -1,0 +1,5 @@
+# Documentation
+graphviz
+doxygen
+pandoc
+ghostscript

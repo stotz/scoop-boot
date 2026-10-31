@@ -1,12 +1,13 @@
 # scoop-boot package list for the WSL Debian distribution (delivered by
-# scoop-boot.ps1 --update; do not edit). One apt package per line; "#" starts a
-# comment. --wsl-setup installs the packages that are missing, with
-# --no-install-recommends. To change the list on one machine, copy this file to
-# etc\packages\<hostname>.debian.txt (lower case host name): it replaces this file
-# completely and is never touched by --update.
-# Claude Code is not an apt package: --wsl-setup installs it with the official
-# installer after the list (skip with --no-claude).
-
+# scoop-boot.ps1 --update; do not edit): the devel profile, used when
+# etc\packages\<hostname>.debian.txt does not exist. One apt package per line; "#"
+# starts a comment. --wsl-setup installs the packages that are missing, with
+# --no-install-recommends. --profile composes etc\packages\<hostname>.debian.txt
+# from the profiles under etc\profiles: it replaces this file completely and is
+# never touched by --update. Claude Code is not an apt package: --wsl-setup installs
+# it with the official installer after the list (skip with --no-claude).
+# Profiles: base, desktop, ide, cli, svn, java, node, perl, python, c++, docs, network, db, server, azure, media
+# ---- profile base ----
 # Base system and certificates
 ca-certificates
 curl
@@ -18,28 +19,15 @@ xz-utils
 locales
 sudo
 
-# Build tools
-build-essential
-make
-cmake
-ninja-build
-pkg-config
-
 # Version control
 git
 git-lfs
 openssh-client
 
-# Languages
-python3
-python3-venv
-python3-pip
-pipx
-default-jdk-headless
-maven
-
+# ---- profile cli ----
 # Command line tools
 jq
+yq
 ripgrep
 fd-find
 bat
@@ -49,6 +37,30 @@ htop
 tmux
 vim
 shellcheck
+
+# ---- profile java ----
+# Java
+default-jdk-headless
+maven
+
+# ---- profile python ----
+# Python
+python3
+python3-venv
+python3-pip
+pipx
+
+# ---- profile c++ ----
+# Build tools
+build-essential
+make
+cmake
+ninja-build
+pkg-config
+
+# ---- profile network ----
+# Network
 bind9-dnsutils
 iputils-ping
 netcat-openbsd
+openssl

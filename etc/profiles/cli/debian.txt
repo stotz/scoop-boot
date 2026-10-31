@@ -1,0 +1,12 @@
+# Command line tools
+jq
+yq
+ripgrep
+fd-find
+bat
+less
+tree
+htop
+tmux
+vim
+shellcheck
