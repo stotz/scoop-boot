@@ -89,6 +89,7 @@ jobs:
         # keyboard-configuration asks with a dialog unless DEBIAN_FRONTEND reaches
         # apt-get; sudo drops it from the environment. A question waits for input
         # until the timeout, so a hang fails this step.
+        shell: bash
         run: |
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo whiptail > /dev/null
           useradd -m tester && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester
