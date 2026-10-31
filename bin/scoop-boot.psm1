@@ -3794,7 +3794,9 @@ function Resolve-Profiles {
     )
     if ($null -eq $Catalog) { $Catalog = Get-ProfileCatalog }
     $result = @{ Names = @(); Errors = @($Catalog.Errors) }
-    $requested = @("$Names" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # Commas separate the names; spaces too, for a quoted "devel java17" and for the
+    # array PowerShell makes of an unquoted comma list
+    $requested = @("$Names" -split '[,\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($requested.Count -eq 0) { $result.Errors += "no profile named (--profile=NAME,NAME,...; scoop-boot.ps1 --list-profiles shows them)"; return $result }
     $selected = @{}
     function Select-ProfileMember {

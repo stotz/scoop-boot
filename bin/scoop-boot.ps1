@@ -35,6 +35,9 @@
     Requires: PowerShell 5.1 or higher
 
     Changes in v1.24.2:
+    - --profile=devel,java17 typed without quotes in PowerShell arrives as an array
+      (PowerShell splits an unquoted comma list); the script joins it back, and
+      profile names may also be separated by spaces inside quotes
     - Profile tortoisegit: TortoiseGit from the nonportable bucket (an MSI into
       Program Files: elevation prompt during --user-install, not removed by the
       reset); the bucket comes with the profile's "# bucket" line
@@ -976,6 +979,10 @@ function Invoke-SelfUpdate {
 # MAIN EXECUTION
 # ============================================================================
 
+# PowerShell turns an unquoted "--profile=devel,java17" into an array ('--profile=devel',
+# 'java17') that arrives as one element; joined back with commas it is the option as
+# typed. Every string element stays as it is.
+$args = @($args | ForEach-Object { if ($_ -is [array]) { @($_) -join ',' } else { "$_" } })
 if ($args -contains '--quiet') { $global:ScoopBootQuiet = $true }
 $rescueOnly = @($args | Where-Object { $_ -match '^--(update|version|v|help|h|branch=.+)$' -or $_ -match '^-[vh]$' }).Count -eq @($args).Count -and @($args).Count -gt 0
 # --admin-init is the Quick Setup's first command, on a machine that has only this

@@ -89,6 +89,10 @@ try {
     & $scratchScript --profile=no-such-profile *> $null
     if ($LASTEXITCODE -ne 1) { Write-Host "[FAIL] unknown profile exited with $LASTEXITCODE, expected 1"; $failed++ } else { Write-Host "[OK] unknown profile exits with 1" }
 
+    # Unquoted, PowerShell hands the comma list over as an array; the script joins it back
+    $output = & $scratchScript --profile=java,python --dry-run *>&1 | ForEach-Object { "$_" }
+    if ($LASTEXITCODE -ne 0 -or -not ($output -match 'Composed from: base, java, python')) { $output | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" }; Write-Host "[FAIL] unquoted --profile=java,python: exit $LASTEXITCODE"; $failed++ } else { Write-Host "[OK] unquoted --profile=java,python arrives as one option" }
+
     $output = & $scratchScript --profile=devel *>&1 | ForEach-Object { "$_" }
     $exit = $LASTEXITCODE
     $listFile = Join-Path $scratch "etc/packages/$hostName.txt"
