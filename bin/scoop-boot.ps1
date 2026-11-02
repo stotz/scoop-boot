@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.26.2 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.26.3 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,18 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.26.2
+    Version: 1.26.3
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.26.3:
+    - --admin-reset on Windows PowerShell 5.1, second round: the registry walk
+      returned its hits as @() around a Generic.List[object], which 5.1 rejects
+      with "Argument types do not match"; plain arrays now, also for the unit
+      and CLSID-reference lists
+    - Self-test 60 runs the registry walk read-only on the real HKCU with the
+      reset's value tests, so the CI job on Windows PowerShell 5.1 covers the
+      code path that only ever ran on the AVD
 
     Changes in v1.26.2:
     - --admin-reset on Windows PowerShell 5.1: the registry cleanup failed with
@@ -611,7 +620,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.26.2"
+$global:ScriptVersion = "1.26.3"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

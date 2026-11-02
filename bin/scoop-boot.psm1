@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.2
+    Version: 1.26.3
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.2"
+$global:ScriptVersion = "1.26.3"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3222,6 +3222,31 @@ JAVA_HOME=C:\java
     }
     $tests += $test
 
+    # Test 60: the registry walk of --admin-reset on the real HKCU (read-only), with the
+    # same value tests the reset uses. Covers Windows PowerShell 5.1 in CI: a closure
+    # there did not see the module's functions, and @() around a Generic.List threw
+    # "Argument types do not match"; both only showed on the AVD (02.11.). Not Windows:
+    # passes as skipped.
+    $test = @{Name = "Registry walk: Find-ScoopRegistryReferences with the reset's value tests on HKCU (Windows)"; Result = $false}
+    if (Test-WindowsPlatform) {
+        try {
+            $subKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer'
+            $scoopHits = @(Find-ScoopRegistryReferences -SubKey $subKey -Skip @("$subKey\Shell Folders") -Test (Get-ScoopRegistryValueTest))
+            $clsidHits = @(Find-ScoopRegistryReferences -SubKey $subKey -Test (Get-ScoopRegistryClsidTest -Clsids @('{00000000-0000-0000-0000-000000000000}')))
+            $anyHits = @(Find-ScoopRegistryReferences -SubKey $subKey -Test { param($data) $data -is [string] })
+            $missing = @(Find-ScoopRegistryReferences -SubKey 'Software\scoop-boot-self-test-does-not-exist' -Test { param($data) $true })
+            # No value under Explorer points into Scoop's directories or carries the null CLSID; the
+            # walk itself returns string values with a key path, and nothing for a missing key
+            $test.Result = ($scoopHits.Count -eq 0) -and ($clsidHits.Count -eq 0) -and ($missing.Count -eq 0) -and
+                ($anyHits.Count -gt 0) -and ($anyHits[0].KeyPath -like "$subKey*") -and ($anyHits[0].PSObject.Properties.Name -contains 'ValueName')
+            if (-not $test.Result) { Write-Host "       scoop=$($scoopHits.Count) clsid=$($clsidHits.Count) any=$($anyHits.Count) missing=$($missing.Count)" -ForegroundColor Yellow }
+        } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    } else {
+        $test.Name += " (skipped: not Windows)"
+        $test.Result = $true
+    }
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -5393,7 +5418,9 @@ function Find-ScoopRegistryReferences {
         Read through the .NET registry API: faster than the provider and able to skip.
     #>
     param([string]$SubKey, [string[]]$Skip = @(), [scriptblock]$Test)
-    $found = New-Object System.Collections.Generic.List[object]
+    # Plain arrays throughout: @() around a Generic.List[object] fails on Windows
+    # PowerShell 5.1 with "Argument types do not match" (the AVD, 02.11.)
+    $found = @()
     $hive = [Microsoft.Win32.Registry]::CurrentUser
     $stack = New-Object System.Collections.Generic.Stack[string]
     $stack.Push($SubKey)
@@ -5412,13 +5439,38 @@ function Find-ScoopRegistryReferences {
                 $data = $null
                 try { $data = $key.GetValue($valueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } catch { }
                 if ($null -ne $data -and (& $Test $data)) {
-                    $found.Add([pscustomobject]@{ KeyPath = $path; ValueName = $valueName; Data = $data })
+                    $found += [pscustomobject]@{ KeyPath = $path; ValueName = $valueName; Data = $data }
                 }
             }
             foreach ($child in @($key.GetSubKeyNames())) { $stack.Push("$path\$child") }
         } finally { $key.Close() }
     }
-    return @($found)
+    return ,$found
+}
+
+function Get-ScoopRegistryValueTest {
+    <#
+    .SYNOPSIS
+        The value test for Find-ScoopRegistryReferences: true for data that points into
+        Scoop's directories (Test-ScoopRegistryData). A plain scriptblock bound to this
+        module; KeepPersist travels through a module-scope variable, because a
+        GetNewClosure() scriptblock runs in a dynamic module of its own and does not see
+        this module's functions on Windows PowerShell 5.1.
+    #>
+    param([switch]$KeepPersist)
+    $script:RegistryKeepPersist = [bool]$KeepPersist
+    return { param($data) Test-ScoopRegistryData -Data $data -KeepPersist:$script:RegistryKeepPersist }
+}
+
+function Get-ScoopRegistryClsidTest {
+    <#
+    .SYNOPSIS
+        The value test for the second round: true for a string equal to one of the CLSIDs
+        whose registration key was removed (shellex handlers, icon overlays).
+    #>
+    param([string[]]$Clsids)
+    $script:RegistryClsids = @($Clsids)
+    return { param($data) ($data -is [string]) -and ($script:RegistryClsids -contains $data.Trim()) }
 }
 
 function Remove-ScoopRegistryReferences {
@@ -5444,13 +5496,9 @@ function Remove-ScoopRegistryReferences {
     $failed = @()
     $skipped = @()
     $hive = [Microsoft.Win32.Registry]::CurrentUser
-    # Module-scope variables instead of GetNewClosure(): a closure made inside a
-    # module runs in a dynamic module of its own and does not see this module's
-    # functions on Windows PowerShell 5.1 (Test-ScoopRegistryData "not recognized")
-    $script:RegistryKeepPersist = [bool]$KeepPersist
-    $pathTest = { param($data) Test-ScoopRegistryData -Data $data -KeepPersist:$script:RegistryKeepPersist }
+    $pathTest = Get-ScoopRegistryValueTest -KeepPersist:$KeepPersist
 
-    $units = New-Object System.Collections.Generic.List[string]
+    $units = @()
     foreach ($root in $global:ScoopRegistryRoots) {
         $skip = @(if ($root.ContainsKey('Skip')) { $root.Skip })
         foreach ($hit in @(Find-ScoopRegistryReferences -SubKey $root.Path -Skip $skip -Test $pathTest)) {
@@ -5459,7 +5507,7 @@ function Remove-ScoopRegistryReferences {
                 $skipped += "HKCU\$($hit.KeyPath) [$($hit.ValueName)] = $($hit.Data) (no registration key below the root; left in place)"
                 continue
             }
-            if (-not $units.Contains($unit)) { $units.Add($unit) }
+            if ($units -notcontains $unit) { $units += $unit }
         }
     }
 
@@ -5495,13 +5543,12 @@ function Remove-ScoopRegistryReferences {
     }
 
     if ($clsids.Count -gt 0) {
-        $script:RegistryClsids = @($clsids)
-        $clsidTest = { param($data) ($data -is [string]) -and ($script:RegistryClsids -contains $data.Trim()) }
-        $references = New-Object System.Collections.Generic.List[string]
+        $clsidTest = Get-ScoopRegistryClsidTest -Clsids $clsids
+        $references = @()
         foreach ($root in $global:ScoopRegistryClsidReferenceRoots) {
             $skip = @('Software\Classes\Local Settings', 'Software\Classes\CLSID')
             foreach ($hit in @(Find-ScoopRegistryReferences -SubKey $root -Skip $skip -Test $clsidTest)) {
-                if (-not $references.Contains($hit.KeyPath)) { $references.Add($hit.KeyPath) }
+                if ($references -notcontains $hit.KeyPath) { $references += $hit.KeyPath }
             }
         }
         foreach ($reference in $references) {
