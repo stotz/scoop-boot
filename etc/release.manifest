@@ -1,8 +1,8 @@
 # scoop-boot release manifest: written by tools/release.sh, verified by scoop-boot.ps1 --update
-tag v0041
+tag v0042
 date 2026-11-02
-sha256 d83ff6adcc8002cae84ec8640a33a4386f4f27c83390caf6e7eb0513ace08e47 bin/scoop-boot.ps1
-sha256 c87937e843dd34a3d54eb1b3c7b3b5452274e24aa4da4b09a4f3701c38ef9938 bin/scoop-boot.psm1
+sha256 eece13a8aca91f2dd625859d17d9c94d3a46ef85a9c6e7130ba0ed358c5cd8b5 bin/scoop-boot.ps1
+sha256 81192a02df39faf25c9ca939281fe31cf4fb02bba1d4d103692833c34423afcf bin/scoop-boot.psm1
 sha256 51485aecea2a4c99e0ea0e7ac2cb7a7421551a14a56c177f186ef74d954d013c bin/scoop.ps1
 sha256 a10bc1c9e7fa82b50b6433ab9ec3112687c11d5f61bf0b5418da03ebb47e1431 bin/scoop.cmd
 sha256 5f7f5dc90056d60d73319cb524cd8157dc2920371faa38dca2249b676a48af89 bin/scoop
