@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.26.1 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.26.2 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,20 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.26.1
+    Version: 1.26.2
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.26.2:
+    - --admin-reset on Windows PowerShell 5.1: the registry cleanup failed with
+      "Test-ScoopRegistryData is not recognized" because the value test was a
+      GetNewClosure() scriptblock, which runs in a dynamic module of its own and
+      does not see the module's functions there; module-scope variables instead
+    - --admin-reset stops a tray application only when it runs from Scoop's
+      directories; the AVD image's Greenshot in Program Files was stopped too
+      and is now skipped with its path
+    - --update on a machine that has only the script says that the module is
+      not there yet instead of reporting a load error first
 
     Changes in v1.26.1:
     - The 7-Zip handler skips install-context.reg when 7-Zip is installed in
@@ -600,7 +611,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.26.1"
+$global:ScriptVersion = "1.26.2"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -1079,6 +1090,8 @@ if (-not $script:ModuleLoaded) {
     Microsoft.PowerShell.Utility\Write-Host "scoop-boot.ps1 $global:ScriptVersion (sha256 $(Get-FileSha256Short -Path $PSCommandPath)) | module not loaded" -ForegroundColor DarkCyan
     if ($missing -and $adminInitFirst) {
         Microsoft.PowerShell.Utility\Write-Host "[INFO] $script:ModulePath is not there yet: downloading the release first" -ForegroundColor Cyan
+    } elseif ($missing -and $args -contains '--update') {
+        Microsoft.PowerShell.Utility\Write-Host "[INFO] $script:ModulePath is not there yet: --update downloads the release" -ForegroundColor Cyan
     } else {
         Microsoft.PowerShell.Utility\Write-Host "[ERROR] $script:ModulePath did not load: $script:ModuleError" -ForegroundColor Red
     }

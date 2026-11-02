@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.1
+    Version: 1.26.2
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.1"
+$global:ScriptVersion = "1.26.2"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -5444,8 +5444,11 @@ function Remove-ScoopRegistryReferences {
     $failed = @()
     $skipped = @()
     $hive = [Microsoft.Win32.Registry]::CurrentUser
-    $keepPersistValue = [bool]$KeepPersist
-    $pathTest = { param($data) Test-ScoopRegistryData -Data $data -KeepPersist:$keepPersistValue }.GetNewClosure()
+    # Module-scope variables instead of GetNewClosure(): a closure made inside a
+    # module runs in a dynamic module of its own and does not see this module's
+    # functions on Windows PowerShell 5.1 (Test-ScoopRegistryData "not recognized")
+    $script:RegistryKeepPersist = [bool]$KeepPersist
+    $pathTest = { param($data) Test-ScoopRegistryData -Data $data -KeepPersist:$script:RegistryKeepPersist }
 
     $units = New-Object System.Collections.Generic.List[string]
     foreach ($root in $global:ScoopRegistryRoots) {
@@ -5492,7 +5495,8 @@ function Remove-ScoopRegistryReferences {
     }
 
     if ($clsids.Count -gt 0) {
-        $clsidTest = { param($data) ($data -is [string]) -and ($clsids -contains $data.Trim()) }.GetNewClosure()
+        $script:RegistryClsids = @($clsids)
+        $clsidTest = { param($data) ($data -is [string]) -and ($script:RegistryClsids -contains $data.Trim()) }
         $references = New-Object System.Collections.Generic.List[string]
         foreach ($root in $global:ScoopRegistryClsidReferenceRoots) {
             $skip = @('Software\Classes\Local Settings', 'Software\Classes\CLSID')
@@ -5943,10 +5947,16 @@ function Invoke-ScoopReset {
     $global:ScoopBootExplorerStopped = $false
     $killedCount = 0
     foreach ($appName in $systemTrayApps) {
-        $proc = Get-Process -Name $appName -ErrorAction SilentlyContinue
-        if ($proc) {
+        foreach ($proc in @(Get-Process -Name $appName -ErrorAction SilentlyContinue)) {
+            # Only Scoop's copy: the AVD image ships Greenshot in Program Files, and
+            # that one stays running
+            $exe = try { $proc.Path } catch { $null }
+            if ($exe -and -not (Test-ScoopOwnedPath $exe)) {
+                Write-Host "  [SKIP] $appName ($exe, not from Scoop)" -ForegroundColor DarkGray
+                continue
+            }
             try {
-                Stop-Process -Name $appName -Force -ErrorAction Stop
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
                 Write-Host "  [OK] Stopped: $appName" -ForegroundColor Green
                 $killedCount++
             } catch {
