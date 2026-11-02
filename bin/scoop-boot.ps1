@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.26.5 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.26.6 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,14 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.26.5
+    Version: 1.26.6
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.26.6:
+    - --admin-init and --profile end with the same "Next:" line (--admin-setenv,
+      --user-install in a normal shell, --wsl-install, --wsl-setup); --admin-init
+      says that the system file opens in Notepad, --profile opens nothing
 
     Changes in v1.26.5:
     - --admin-reset deleted HKCU\Software\Classes\AppUserModelId as a whole for
@@ -635,7 +640,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.26.5"
+$global:ScriptVersion = "1.26.6"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -761,7 +766,8 @@ function Invoke-AdminInit {
     }
 
     Write-Host ""
-    Write-Info "Review paths and tool versions in the system file, save, then run: $PSCommandPath --admin-setenv"
+    Write-Info "Next: $PSCommandPath --admin-setenv (Administrator), then --user-install (normal shell), --wsl-install and --wsl-setup"
+    Write-Info "The system file opens in Notepad: review paths and tool versions, save, close"
     # Full path on purpose: once Git is installed, its usr\bin holds an extensionless
     # script named "notepad" that PowerShell would hand to ShellExecute.
     if (Test-ScoopBootFake) { Write-Host "[FAKE] Notepad not started for $systemFile" -ForegroundColor DarkCyan; return $true }

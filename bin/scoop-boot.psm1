@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.5
+    Version: 1.26.6
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.5"
+$global:ScriptVersion = "1.26.6"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -4460,7 +4460,7 @@ function Invoke-Profile {
     Write-Host "[OK] PROFILE=$Names recorded in etc\scoop-boot.conf" -ForegroundColor Gray
     if ($written -gt 0 -and -not $KeepExisting) {
         $script = Join-Path $global:ScriptRoot 'scoop-boot.ps1'
-        Write-Info "Next: $script --admin-setenv (Administrator), then --user-install$(if ($null -ne $debian) { ' and --wsl-setup' })"
+        Write-Info "Next: $script --admin-setenv (Administrator), then --user-install (normal shell)$(if ($null -ne $debian) { ', --wsl-install and --wsl-setup' })"
     }
     if ($KeepExisting) { return $true }
     return ($kept -eq 0)
