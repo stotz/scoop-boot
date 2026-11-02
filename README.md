@@ -316,7 +316,8 @@ setup, the `nc`/`netcat` shims, the context menus of 7-Zip, Notepad++, VS Code, 
 TortoiseSVN, Windows Terminal and Everything, Python's PEP 514 registration, Git
 Credential Manager as `credential.helper`, the tray apps, and an Npcap check for
 Wireshark and nmap). Those steps run only when their package is in the list;
-`--list-packages` marks them. Npcap itself is in no bucket: its installer comes from
+`--list-packages` marks them. The 7-Zip context menu is left alone when 7-Zip is
+installed in `Program Files` (the image's copy already owns it). Npcap itself is in no bucket: its installer comes from
 `https://npcap.com` and needs an Administrator; without it nmap scans and Wireshark
 capture do not work, everything else does.
 

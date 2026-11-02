@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.0
+    Version: 1.26.1
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.0"
+$global:ScriptVersion = "1.26.1"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3472,7 +3472,7 @@ $global:PackageHandlers = @(
     @{ Name = 'vcredist2022';      Handler = 'Invoke-VcRuntimeHandler';   Description = 'skipped when the VC++ runtime is present; runtime verified' }
     @{ Name = 'msys2';             Handler = 'Invoke-GccHandler';         Description = 'pacman -Syu, GCC (UCRT64), compile-and-run smoke test' }
     @{ Name = 'nmap';              Handler = 'Invoke-NcatShimHandler';    Description = 'shims nc and netcat -> ncat.exe' }
-    @{ Name = '7zip';              Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = '7zip';              Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg (skipped when 7-Zip is installed in Program Files)'; Arguments = @{ File = 'install-context.reg'; SkipIfExists = 'C:\Program Files\7-Zip\7zFM.exe' } }
     @{ Name = 'notepadplusplus';   Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'vscode';            Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'git';               Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
@@ -3719,6 +3719,13 @@ function Invoke-NpcapCheckHandler {
 function Invoke-RegImportHandler {
     param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
     $regPath = "$ScoopDir\apps\$Package\current\$($Arguments.File)"
+    # SkipIfExists: a system-wide installation of the same tool already owns the
+    # context menu (the AVD image ships 7-Zip); a second shell extension from
+    # Scoop's copy would show every entry twice.
+    if ($Arguments.ContainsKey('SkipIfExists') -and (Test-Path -LiteralPath $Arguments.SkipIfExists)) {
+        Write-Host "[SKIP] $Package : $($Arguments.SkipIfExists) present, $($Arguments.File) not imported (context menu already registered)" -ForegroundColor DarkGray
+        return @()
+    }
     if (Test-Path $regPath) {
         Start-Process reg -ArgumentList "import `"$regPath`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
         Write-Host "[OK] Imported: $Package ($($Arguments.File))" -ForegroundColor Green
