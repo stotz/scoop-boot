@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.6
+    Version: 1.26.7
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.6"
+$global:ScriptVersion = "1.26.7"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -4663,6 +4663,10 @@ Rules:
     Write-Host "  Close this Administrator PowerShell" -ForegroundColor White
     Write-Host "  Open a NORMAL PowerShell (not Administrator)" -ForegroundColor White
     Write-Host "  Run: $ScoopDir\bin\scoop-boot.ps1 --user-install" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Then, for Debian in WSL (optional):" -ForegroundColor Yellow
+    Write-Host "  Administrator: $ScoopDir\bin\scoop-boot.ps1 --wsl-install" -ForegroundColor White
+    Write-Host "  Normal shell:  wsl -d Debian (first start: user and password), then $ScoopDir\bin\scoop-boot.ps1 --wsl-setup" -ForegroundColor White
     Write-Host ""
     return (New-RunResult -Command 'admin-setenv' -Ok $true)
 }
