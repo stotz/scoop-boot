@@ -8,7 +8,7 @@
 # listed here. A line "# bucket NAME URL" adds a bucket in Step 2 before the packages
 # (--import writes such lines). Packages with a post-install step (Step 4):
 # vcredist2022 temurin25-jdk msys2 nmap 7zip notepadplusplus vscode python314 git
-# jetbrains-toolbox greenshot (see scoop-boot.ps1 --list-packages).
+# tortoisesvn everything jetbrains-toolbox (see scoop-boot.ps1 --list-packages).
 # Profiles: base, desktop, ide, cli, svn, java, node, perl, python, c++, docs, network, db, server, azure, media
 # ---- profile base ----
 # System libraries (first: VC++ runtime, post_install asks for elevation once)
@@ -30,16 +30,12 @@ neovim
 notepadplusplus
 hxd
 
-# Terminal
-windows-terminal
-
-# GUI applications
+# GUI applications (Windows Terminal, Greenshot and KeePass are in desktop-extra:
+# the ENTB AVD image ships them)
 winmerge
 freecommander
-greenshot
 everything
 postman
-keepass
 draw.io
 
 # System tools

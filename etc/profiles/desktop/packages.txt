@@ -8,16 +8,12 @@ neovim
 notepadplusplus
 hxd
 
-# Terminal
-windows-terminal
-
-# GUI applications
+# GUI applications (Windows Terminal, Greenshot and KeePass are in desktop-extra:
+# the ENTB AVD image ships them)
 winmerge
 freecommander
-greenshot
 everything
 postman
-keepass
 draw.io
 
 # System tools

@@ -27,6 +27,7 @@ etc/profiles/db/packages.txt
 etc/profiles/dbclients/debian.txt
 etc/profiles/dbclients/packages.txt
 etc/profiles/desktop/packages.txt
+etc/profiles/desktop-extra/packages.txt
 etc/profiles/docs/packages.txt
 etc/profiles/iac/packages.txt
 etc/profiles/ide/packages.txt

@@ -152,8 +152,9 @@ Write-Host ""
 # 5. The whole setup in fake mode (SCOOPBOOT_FAKE=1): a scratch root with bin\ and
 #    etc\ from the checkout, no Scoop, no registry, no processes. --admin-init with a
 #    profile, --admin-setenv, --user-install, the scoop wrapper, --export, --import on
-#    the same root, --clean-user-scope and --admin-reset --force must run through with
-#    the expected state after each step; nothing outside the scratch root is touched.
+#    the same root, --clean-user-scope, --admin-reset --force and a second reset with
+#    --purge must run through with the expected state after each step; nothing outside
+#    the scratch root is touched.
 Write-Host ">>> Setup end to end in fake mode (scratch root)"
 $fakeRoot = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-fake-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 $savedFake = $env:SCOOPBOOT_FAKE
@@ -167,6 +168,10 @@ try {
     $hostName = [System.Net.Dns]::GetHostName().ToLower()
     $userName = [Environment]::UserName.ToLower()
     $registry = Join-Path $fakeRoot 'etc/fake/registry.json'
+    # A Machine PATH as Windows has it before the setup: --purge must leave these entries
+    # and never empty the PATH
+    New-Item -ItemType Directory -Path (Split-Path -Parent $registry) -Force | Out-Null
+    [IO.File]::WriteAllText($registry, "{`n  `"Machine`": { `"Path`": `"C:\\Windows\\system32;C:\\Windows`" },`n  `"User`": {}`n}`n", (New-Object Text.UTF8Encoding($false)))
     function Read-FakeStore { if (Test-Path $registry) { Get-Content $registry -Raw | ConvertFrom-Json } else { $null } }
     function Invoke-FakeStep {
         param([string]$Name, [string[]]$Arguments, [scriptblock]$Check, [int]$ExpectedExit = 0)
@@ -260,6 +265,17 @@ try {
         if ($store.Machine.PSObject.Properties.Name -contains 'JAVA_HOME') { return 'Machine JAVA_HOME survived the reset' }
         if ("$($store.Machine.Path)" -match 'apps|shims') { return "Machine PATH still has Scoop entries: $($store.Machine.Path)" }
         if ($store.Machine.TMP -ne 'C:\tmp') { return 'TMP (not Scoop''s) was removed' }
+        if (-not ("$($store.Machine.Path)" -match 'bin')) { return 'bin left the Machine PATH without --purge' }
+    }
+    Invoke-FakeStep -Name '--admin-reset --force --purge' -Arguments @('--admin-reset', '--force', '--purge') -Check {
+        param($o)
+        $store = Read-FakeStore
+        if ($store.Machine.TMP -ne '%SystemRoot%\TEMP') { return "TMP not back to the Windows default: $($store.Machine.TMP)" }
+        if ("$($store.Machine.Path)" -match [regex]::Escape($fakeRoot)) { return "Machine PATH still has an entry of the files: $($store.Machine.Path)" }
+        if ($store.Machine.PSObject.Properties.Name -contains 'DATA') { return 'Machine DATA (set by the files) survived --purge' }
+        if ($store.Machine.Path -ne 'C:\Windows\system32;C:\Windows') { return "Machine PATH not back to the Windows entries: $($store.Machine.Path)" }
+        if (-not ($o -match 'Taking back the environment')) { return 'purge step not reported' }
+        foreach ($dir in @('bin', 'etc')) { if (-not (Test-Path (Join-Path $fakeRoot $dir))) { return "$dir\ deleted" } }
     }
 } finally {
     if ($null -eq $savedFake) { Remove-Item Env:SCOOPBOOT_FAKE -ErrorAction SilentlyContinue } else { $env:SCOOPBOOT_FAKE = $savedFake }

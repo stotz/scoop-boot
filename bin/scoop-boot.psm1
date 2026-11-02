@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.25.0
+    Version: 1.26.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.25.0"
+$global:ScriptVersion = "1.26.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -219,6 +219,7 @@ $global:ParsedArgs = @{
     ListPackages = $false
     Force = $false
     KeepPersist = $false
+    Purge = $false
     Replace = $false
     DryRun = $false
     WslInstall = $false
@@ -258,6 +259,7 @@ function Parse-Arguments {
             '^--list-packages$' { $global:ParsedArgs.ListPackages = $true }
             '^--force$' { $global:ParsedArgs.Force = $true }
             '^--keep-persist$' { $global:ParsedArgs.KeepPersist = $true }
+            '^--purge$' { $global:ParsedArgs.Purge = $true }
             '^--replace$' { $global:ParsedArgs.Replace = $true }
             '^--dry-run$' { $global:ParsedArgs.DryRun = $true }
             '^--wsl-install$' { $global:ParsedArgs.WslInstall = $true }
@@ -622,9 +624,10 @@ function Show-Help {
     Write-Host "      --dry-run          show the net effect without applying anything (no Administrator needed)"
     Write-Host "  --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2)"
     Write-Host "      --force            no question when the shell is elevated (account with elevated shells only)"
-    Write-Host "  --admin-reset        Remove Scoop again: apps, variables, PATH entries, registry; bin, etc and logs stay"
+    Write-Host "  --admin-reset        Remove Scoop again: apps, MSI packages of the nonportable bucket, variables, PATH entries, HKCU registrations; bin, etc and logs stay"
     Write-Host "      --force            no confirmation prompt"
     Write-Host "      --keep-persist     keep $global:BaseDir\persist (app data, settings)"
+    Write-Host "      --purge            also take back the environment of this host's files (TMP/TEMP to the Windows defaults, bin off the PATH) and $global:BaseDir\global"
     Write-Host ""
     Write-Host "WSL (optional, after the setup):" -ForegroundColor Yellow
     Write-Host "  --wsl-install        Administrator: WSL and the Debian distribution, not started; a restart may follow"
@@ -681,6 +684,7 @@ function Show-Help {
     Write-Host "  scoop-boot.ps1 --admin-setenv --dry-run   # check an edited system file before applying it"
     Write-Host "  scoop-boot.ps1 --update                # after a scoop-boot release"
     Write-Host "  scoop-boot.ps1 --admin-reset --force   # start over, then --admin-init again"
+    Write-Host "  scoop-boot.ps1 --admin-reset --force --purge   # as before the first --admin-setenv: test the whole setup on a used machine"
     Write-Host ""
 }
 
@@ -768,11 +772,19 @@ function Set-RegistryEnvironmentVariable {
     .SYNOPSIS
         Writes a Machine or User variable ($null removes it) to the registry, or to the simulated registry in fake mode.
     #>
-    param([string]$Name, [object]$Value, [string]$Scope)
+    param([string]$Name, [object]$Value, [string]$Scope, [string]$Kind = '')
     if ($Scope -eq 'Process' -or -not (Test-ScoopBootFake)) {
         # A PowerShell $null reaches .NET as an empty string on pwsh 7.6, which leaves
         # the variable in place (empty) instead of removing it; NullString is a real null
         $raw = if ($null -eq $Value -or "$Value" -eq '') { [NullString]::Value } else { [string]$Value }
+        if ($Kind -eq 'ExpandString' -and $Scope -ne 'Process' -and $null -ne $raw) {
+            # .NET writes REG_SZ, which Windows does not expand: a TEMP of %SystemRoot%\TEMP
+            # must be REG_EXPAND_SZ to work. No WM_SETTINGCHANGE from this path; the reset
+            # broadcasts at its end
+            $keyPath = if ($Scope -eq 'Machine') { 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' } else { 'HKEY_CURRENT_USER\Environment' }
+            [Microsoft.Win32.Registry]::SetValue($keyPath, $Name, $raw, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            return
+        }
         [Environment]::SetEnvironmentVariable($Name, $raw, $Scope)
         return
     }
@@ -1607,7 +1619,8 @@ function Invoke-AdminReset {
     #>
     param(
         [bool]$Force = $false,
-        [bool]$KeepPersist = $false
+        [bool]$KeepPersist = $false,
+        [bool]$Purge = $false
     )
     if (-not (Test-AdminRights)) {
         Write-ErrorMsg "--admin-reset needs an elevated shell (Run as Administrator)"
@@ -1615,7 +1628,7 @@ function Invoke-AdminReset {
     }
     $savedTitle = Get-ScoopBootTitle
     try {
-        return (Get-RunResult -Output @(Invoke-ScoopReset -Force:$Force -KeepPersist:$KeepPersist)).Ok
+        return (Get-RunResult -Output @(Invoke-ScoopReset -Force:$Force -KeepPersist:$KeepPersist -Purge:$Purge)).Ok
     } finally {
         Restore-ScoopBootTitle -Saved $savedTitle
     }
@@ -3116,6 +3129,99 @@ JAVA_HOME=C:\java
     } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
     $tests += $test
 
+    # Test 58: reset registry cleanup: the registration key per unit rule (a verb under
+    # shell, a ProgID, a protocol, Applications\<exe>, CLSID\{guid}, an extension's verb,
+    # a perceived type's verb; structure alone gives nothing), and which values count as
+    # a Scoop reference (quoted command lines, persist with and without --keep-persist,
+    # multi-strings; bin\ and non-strings do not)
+    $test = @{Name = "Reset registry: registration key per rule, Scoop reference by value"; Result = $false}
+    try {
+        $classes = 'Software\Classes'
+        $unitCases = @(
+            @("$classes\Directory\shell\git_gui\command", "$classes\Directory\shell\git_gui"),
+            @("$classes\Directory\Background\shell\git_shell\command", "$classes\Directory\Background\shell\git_shell"),
+            @("$classes\*\shell\Open with &Code\command", "$classes\*\shell\Open with &Code"),
+            @("$classes\LibraryFolder\background\shell\git_gui\command", "$classes\LibraryFolder\background\shell\git_gui"),
+            @("$classes\FirefoxHTML-45A7E342\shell\open\command", "$classes\FirefoxHTML-45A7E342"),
+            @("$classes\http\shell\open\command", "$classes\http"),
+            @("$classes\Applications\firefox.exe\shell\open\command", "$classes\Applications\firefox.exe"),
+            @("$classes\CLSID\{23170F69-40C1-278A-1000-000100020000}\InprocServer32", "$classes\CLSID\{23170F69-40C1-278A-1000-000100020000}"),
+            @("$classes\Toolbox.Rider.52bccd60\shell\open\command", "$classes\Toolbox.Rider.52bccd60"),
+            @("$classes\.py\shell\edit\command", "$classes\.py\shell\edit"),
+            @("$classes\SystemFileAssociations\text\shell\npp\command", "$classes\SystemFileAssociations\text\shell\npp"),
+            @("$classes\Directory\shell", $null),
+            @("Software\Other\x", $null)
+        )
+        $unitsOk = $true
+        foreach ($case in $unitCases) {
+            $got = Get-RegistryUnitKey -Root $classes -Key $case[0] -Unit 'classes'
+            if ($got -ne $case[1]) { $unitsOk = $false; Write-Host "       $($case[0]) -> [$got], expected [$($case[1])]" -ForegroundColor Yellow }
+        }
+        $uninstall = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+        $childOk = ((Get-RegistryUnitKey -Root $uninstall -Key "$uninstall\{8707B9CA-B2A7}\x" -Unit 'child') -eq "$uninstall\{8707B9CA-B2A7}") -and
+            ((Get-RegistryUnitKey -Root 'Software\Python' -Key 'Software\Python\PythonCore\3.14\InstallPath' -Unit 'grandchild') -eq 'Software\Python\PythonCore\3.14') -and
+            ($null -eq (Get-RegistryUnitKey -Root 'Software\Python' -Key 'Software\Python\PythonCore' -Unit 'grandchild'))
+        $root = $global:BaseDir -replace '/', '\'
+        $dataOk = (Test-ScoopRegistryData -Data "`"$root\apps\git\current\cmd\git-gui.exe`" `"--working-dir`" `"%1`"") -and
+            (Test-ScoopRegistryData -Data "$root\apps\vscode\current\Code.exe %1") -and
+            (Test-ScoopRegistryData -Data "$root\persist\jetbrains-toolbox\apps\Rider\bin\rider64.exe") -and
+            -not (Test-ScoopRegistryData -Data "$root\persist\jetbrains-toolbox\apps\Rider\bin\rider64.exe" -KeepPersist) -and
+            (Test-ScoopRegistryData -Data ([string[]]@('x', "$root\shims\7z.exe"))) -and
+            -not (Test-ScoopRegistryData -Data "$root\bin\scoop.cmd") -and
+            -not (Test-ScoopRegistryData -Data 5) -and -not (Test-ScoopRegistryData -Data $null)
+        $test.Result = $unitsOk -and $childOk -and $dataOk
+        if (-not $test.Result) { Write-Host "       units=$unitsOk child=$childOk data=$dataOk" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    $tests += $test
+
+    # Test 59: --purge against the simulated registry (fake mode in a scratch root): the
+    # plan from the host's files names what they set (not Path), the list entries they
+    # add (expanded) and the Windows defaults for TMP/TEMP; applying it removes exactly
+    # that, a variable and a PATH entry of other origin stay
+    $test = @{Name = "Purge: environment of the host's files taken back, foreign values kept (fake registry)"; Result = $false}
+    $savedRoot = @{ BaseDir = $global:BaseDir; PackagesDir = $global:PackagesDir; EnvDir = $global:EnvDir; ProfilesDir = $global:ProfilesDir; Fake = $env:SCOOPBOOT_FAKE }
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-purge-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $tempRoot 'etc\environments') -Force | Out-Null
+        $global:BaseDir = $tempRoot; $global:PackagesDir = Join-Path $tempRoot 'etc\packages'; $global:EnvDir = Join-Path $tempRoot 'etc\environments'; $global:ProfilesDir = Join-Path $tempRoot 'etc\profiles'
+        $env:SCOOPBOOT_FAKE = '1'
+        $root = $tempRoot -replace '/', '\'
+        $hostName = Get-Hostname; $userName = Get-Username
+        Set-Content -Path (Join-Path $global:EnvDir "system.$hostName.$userName.env") -Value "USR=$root`nDATA=C:\data`nTMP=C:\tmp`nTEMP=C:\tmp`nGIT_HOME=`$USR\apps\git\current`nPATH+=`$GIT_HOME\cmd`nPATH+=`$USR\bin`nPSModulePath=+C:\mods" -Encoding ASCII
+        Set-Content -Path (Join-Path $global:EnvDir "user.$hostName.$userName.env") -Value "GH_TOKEN=x`nTMP=C:\tmp" -Encoding ASCII
+        Set-RegistryEnvironmentVariable -Name 'Path' -Value "C:\Windows;$root\bin;$root\apps\git\current\cmd;C:\other" -Scope 'Machine'
+        Set-RegistryEnvironmentVariable -Name 'USR' -Value $root -Scope 'Machine'
+        Set-RegistryEnvironmentVariable -Name 'DATA' -Value 'C:\data' -Scope 'Machine'
+        Set-RegistryEnvironmentVariable -Name 'TMP' -Value 'C:\tmp' -Scope 'Machine'
+        Set-RegistryEnvironmentVariable -Name 'MY_OWN_VAR' -Value 'keep' -Scope 'Machine'
+        Set-RegistryEnvironmentVariable -Name 'PSModulePath' -Value 'C:\mods;C:\x' -Scope 'Machine'
+        Set-RegistryEnvironmentVariable -Name 'GH_TOKEN' -Value 'x' -Scope 'User'
+        $plan = Get-EnvFileRevertPlan -Scope 'Machine'
+        $planOk = (($plan.Remove | Sort-Object) -join ',') -eq 'DATA,GIT_HOME,USR' -and
+            ($plan.ListEntries['PATH'] -contains "$root\bin") -and ($plan.ListEntries['PATH'] -contains "$root\apps\git\current\cmd") -and
+            ($plan.ListEntries['PSModulePath'] -contains 'C:\mods') -and
+            ($plan.Defaults['TMP'] -eq '%SystemRoot%\TEMP') -and ($plan.Defaults['TEMP'] -eq '%SystemRoot%\TEMP') -and ($plan.Files.Count -eq 1)
+        $machineChanges = [int](@(Invoke-EnvFileRevert -Plan $plan 6> $null) | Where-Object { $_ -is [int] } | Select-Object -Last 1)
+        $userChanges = [int](@(Invoke-EnvFileRevert -Plan (Get-EnvFileRevertPlan -Scope 'User') 6> $null) | Where-Object { $_ -is [int] } | Select-Object -Last 1)
+        $applyOk = ($machineChanges -eq 7) -and ($userChanges -eq 2) -and
+            ((Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'Machine') -eq 'C:\Windows;C:\other') -and
+            ($null -eq (Get-RegistryEnvironmentVariable -Name 'USR' -Scope 'Machine')) -and
+            ($null -eq (Get-RegistryEnvironmentVariable -Name 'DATA' -Scope 'Machine')) -and
+            ((Get-RegistryEnvironmentVariable -Name 'MY_OWN_VAR' -Scope 'Machine') -eq 'keep') -and
+            ((Get-RegistryEnvironmentVariable -Name 'TMP' -Scope 'Machine') -eq '%SystemRoot%\TEMP') -and
+            ((Get-RegistryEnvironmentVariable -Name 'PSModulePath' -Scope 'Machine') -eq 'C:\x') -and
+            ($null -eq (Get-RegistryEnvironmentVariable -Name 'GH_TOKEN' -Scope 'User')) -and
+            ((Get-RegistryEnvironmentVariable -Name 'TMP' -Scope 'User') -eq '%USERPROFILE%\AppData\Local\Temp')
+        $test.Result = $planOk -and $applyOk
+        if (-not $test.Result) { Write-Host "       plan=$planOk apply=$applyOk machine=$machineChanges user=$userChanges path=$(Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'Machine')" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    finally {
+        $global:BaseDir = $savedRoot.BaseDir; $global:PackagesDir = $savedRoot.PackagesDir; $global:EnvDir = $savedRoot.EnvDir; $global:ProfilesDir = $savedRoot.ProfilesDir
+        if ($null -eq $savedRoot.Fake) { Remove-Item Env:SCOOPBOOT_FAKE -ErrorAction SilentlyContinue } else { $env:SCOOPBOOT_FAKE = $savedRoot.Fake }
+        Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $tests += $test
+
     # Display results
     Write-Host ""
     foreach ($test in $tests) {
@@ -3372,12 +3478,12 @@ $global:PackageHandlers = @(
     @{ Name = 'git';               Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'git';               Handler = 'Invoke-GitCredentialHandler'; Description = 'git config --global credential.helper manager' }
     @{ Name = 'tortoisesvn';       Handler = 'Invoke-RegImportHandler';   Description = 'reg import tortoisesvn-install.reg (context menu, overlays)'; Arguments = @{ File = 'tortoisesvn-install.reg' } }
-    @{ Name = 'windows-terminal';  Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'windows-terminal';  Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' }; Optional = $true }
     @{ Name = 'everything';        Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'wireshark';         Handler = 'Invoke-NpcapCheckHandler';  Description = 'Npcap driver check (capture needs it; installer from npcap.com, Administrator)' }
     @{ Name = 'python314';         Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-pep-514.reg';  Arguments = @{ File = 'install-pep-514.reg' } }
     @{ Name = 'jetbrains-toolbox'; Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'jetbrains-toolbox.exe'; Process = 'jetbrains-toolbox'; Title = 'JetBrains Toolbox' } }
-    @{ Name = 'greenshot';         Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'Greenshot.exe'; Process = 'Greenshot'; Title = 'Greenshot' } }
+    @{ Name = 'greenshot';         Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'Greenshot.exe'; Process = 'Greenshot'; Title = 'Greenshot' }; Optional = $true }
 )
 $global:VcRuntimeKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
 
@@ -4215,7 +4321,7 @@ function Show-Profiles {
     if ($config.Profile) { Write-Host "This machine (etc\scoop-boot.conf): PROFILE=$($config.Profile)" -ForegroundColor Cyan; Write-Host '' }
     foreach ($single in $catalog.Singles) {
         $files = @($global:ProfileFragmentFiles | Where-Object { Test-Path (Join-Path $single.Dir $_) })
-        Write-Host ("  {0,-12} {1}" -f $single.Name, $single.Description) -ForegroundColor White
+        Write-Host ("  {0,-13} {1}" -f $single.Name, $single.Description) -ForegroundColor White
         $packages = @()
         $packagesFile = Join-Path $single.Dir 'packages.txt'
         if (Test-Path $packagesFile) { $packages = @(Read-PackageList -Path $packagesFile -Silent) }
@@ -4232,8 +4338,8 @@ function Show-Profiles {
     Write-Host ''
     foreach ($virtual in $catalog.VirtualOrder) {
         $resolved = Resolve-Profiles -Names $virtual -Catalog $catalog
-        Write-Host ("  {0,-12} = {1}" -f $virtual, ($catalog.Virtual[$virtual] -join ',')) -ForegroundColor White
-        Write-Host "               composes: $($resolved.Names -join ', ')" -ForegroundColor Gray
+        Write-Host ("  {0,-13} = {1}" -f $virtual, ($catalog.Virtual[$virtual] -join ',')) -ForegroundColor White
+        Write-Host "                composes: $($resolved.Names -join ', ')" -ForegroundColor Gray
     }
     Write-Host ''
     Write-Host "Use: scoop-boot.ps1 --profile=NAME,NAME,... (--dry-run shows the files); base is always included" -ForegroundColor Gray
@@ -5080,6 +5186,476 @@ function Get-ScoopHostedAncestor {
     return $null
 }
 
+function Test-WindowsPlatform {
+    <#
+    .SYNOPSIS
+        True on Windows PowerShell and on pwsh under Windows; false on a Linux or macOS runner.
+    #>
+    return ((-not (Test-Path variable:IsWindows)) -or $IsWindows)
+}
+
+# ----------------------------------------------------------------------------
+# What Scoop packages leave outside Scoop's directories. Deleting apps\ does not
+# touch any of it: the Windows Installer products of the nonportable bucket live in
+# Program Files and in the Installer database; the post-install files (install-context.reg,
+# tortoisesvn-install.reg, install-pep-514.reg) and the applications themselves
+# (Firefox's ProgIDs and protocol handlers, the Toolbox's IDE entries) write HKCU keys
+# with paths into apps\ and persist\; the Toolbox keeps its state and the IDE launcher
+# scripts under %LOCALAPPDATA% and puts that directory on the User PATH. After a reset
+# that leaves them, the context menu shows dead entries with blank icons, every link
+# from Outlook or Teams fails on a browser that is gone, Settings > Apps lists IDEs
+# that cannot be uninstalled, and the next --user-install installs TortoiseGit a
+# second time (the AVD, 02.11.).
+# ----------------------------------------------------------------------------
+
+function Get-ScoopMsiInstalls {
+    <#
+    .SYNOPSIS
+        Windows Installer products whose source was a Scoop app directory: the MSI
+        packages of the nonportable bucket (tortoisegit-np).
+    .DESCRIPTION
+        Reads the Uninstall keys of HKLM (64- and 32-bit view) and HKCU. A product
+        qualifies when its InstallSource lies in a Scoop directory and its
+        UninstallString is MsiExec with a product code. An Inno or NSIS uninstaller has
+        no InstallSource and is not found; such a package is the user's to uninstall.
+        Returns DisplayName, ProductCode, Source, Key per product; nothing off Windows
+        and in fake mode.
+    #>
+    $result = @()
+    if (-not (Test-WindowsPlatform) -or (Test-ScoopBootFake)) { return $result }
+    $roots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+    foreach ($root in $roots) {
+        foreach ($key in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+            $source = [string](Get-RegistryValue -Path $key.PSPath -Name 'InstallSource')
+            if (-not (Test-ScoopOwnedPath $source)) { continue }
+            $uninstall = [string](Get-RegistryValue -Path $key.PSPath -Name 'UninstallString')
+            if ($uninstall -notmatch '(?i)msiexec(\.exe)?"?\s+/[IX]\s*(\{[0-9A-F-]+\})') { continue }
+            $result += [pscustomobject]@{
+                DisplayName = [string](Get-RegistryValue -Path $key.PSPath -Name 'DisplayName')
+                ProductCode = $Matches[2]
+                Source      = $source
+                Key         = $key.Name
+            }
+        }
+    }
+    return $result
+}
+
+function Uninstall-ScoopMsiInstalls {
+    <#
+    .SYNOPSIS
+        Runs msiexec /x for every product of Get-ScoopMsiInstalls, quietly and without a
+        restart. Returns the failures as strings (nothing when all went well).
+    .DESCRIPTION
+        Exit 3010 means the uninstall is complete but a file was in use (a shell
+        extension DLL in Explorer): Windows finishes at the next restart. 1605 means the
+        product was already gone. Anything else is a failure with the command to retry.
+    #>
+    param([array]$Products)
+    $failures = @()
+    foreach ($product in $Products) {
+        $label = if ($product.DisplayName) { $product.DisplayName } else { $product.ProductCode }
+        Write-Host "[WORK] Uninstalling $label ($($product.ProductCode)), installed from $($product.Source)..." -ForegroundColor Yellow
+        $exitCode = $null
+        try {
+            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $($product.ProductCode) /qn /norestart" -Wait -PassThru -ErrorAction Stop
+            $exitCode = $process.ExitCode
+        } catch {
+            Write-Host "[FAIL] msiexec could not start for $label`: $($_.Exception.Message)" -ForegroundColor Red
+            $failures += "$label (msiexec could not start; try: msiexec /x $($product.ProductCode))"
+            continue
+        }
+        switch ($exitCode) {
+            0    { Write-Host "[OK] Uninstalled: $label" -ForegroundColor Green }
+            3010 { Write-Host "[OK] Uninstalled: $label (a file was in use; the next restart finishes it)" -ForegroundColor Green }
+            1605 { Write-Host "[OK] Already gone: $label" -ForegroundColor Gray }
+            default {
+                Write-Host "[FAIL] msiexec exited with $exitCode for $label" -ForegroundColor Red
+                $failures += "$label (msiexec exit $exitCode; try: msiexec /x $($product.ProductCode))"
+            }
+        }
+    }
+    return $failures
+}
+
+# HKCU roots the reset searches for values with a path into a Scoop directory, and how
+# the key to delete (the registration unit) is found below each root: 'child' is the
+# direct child of the root (an Uninstall entry, an App Paths exe), 'grandchild' the
+# child's child (Software\Python\<Company>\<Tag>, PEP 514), 'classes' the first key on
+# the way down whose name is not structure (see $global:RegistryStructuralNames): a
+# verb under shell, a ProgID, Applications\<exe>, CLSID\{guid}, a protocol key.
+# Local Settings holds MuiCache with the path of every program ever started; it is a
+# cache, not a registration, and is skipped.
+$global:ScoopRegistryRoots = @(
+    @{ Path = 'Software\Classes';                                  Unit = 'classes'; Skip = @('Software\Classes\Local Settings') }
+    @{ Path = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'; Unit = 'child' }
+    @{ Path = 'Software\Microsoft\Windows\CurrentVersion\App Paths'; Unit = 'child' }
+    @{ Path = 'Software\Python';                                   Unit = 'grandchild' }
+)
+# Key names under Software\Classes that are structure, not a registration of their own.
+# Extensions (.txt) and the perceived types under SystemFileAssociations count as
+# structure too (Test-RegistryStructuralName).
+$global:RegistryStructuralNames = @(
+    '*', 'Directory', 'Background', 'Drive', 'Folder', 'LibraryFolder', 'AllFilesystemObjects',
+    'SystemFileAssociations', 'Applications', 'CLSID', 'Interface', 'TypeLib', 'AppID',
+    'shell', 'shellex', 'ContextMenuHandlers', 'DragDropHandlers', 'PropertySheetHandlers',
+    'CopyHookHandlers', 'ColumnHandlers', 'IconHandler', 'DataHandler', 'DropHandler',
+    'OpenWithProgids', 'OpenWithList', 'DefaultIcon', 'Wow6432Node'
+)
+# Autostart values (the Toolbox registers itself here) are removed one value at a time
+$global:ScoopRegistryRunKey = 'Software\Microsoft\Windows\CurrentVersion\Run'
+# Where a deleted CLSID is referenced by its GUID: shell extension handlers
+# (shellex\ContextMenuHandlers\7-Zip) and the icon overlays of TortoiseSVN
+$global:ScoopRegistryClsidReferenceRoots = @(
+    'Software\Classes',
+    'Software\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers'
+)
+
+function Test-RegistryStructuralName {
+    param([string]$Name, [string]$ParentName)
+    if ($Name.StartsWith('.')) { return $true }
+    if ($ParentName -ieq 'SystemFileAssociations') { return $true }
+    return ($global:RegistryStructuralNames -contains $Name)
+}
+
+function Get-RegistryUnitKey {
+    <#
+    .SYNOPSIS
+        The key the reset deletes for a value found at $Key below $Root (both relative to
+        HKCU, backslashes), by the unit rule of the root: 'child', 'grandchild' or
+        'classes'. $null when the key is not below the root or only structure lies
+        between them.
+    .EXAMPLE
+        Get-RegistryUnitKey -Root 'Software\Classes' -Key 'Software\Classes\Directory\shell\git_gui\command' -Unit classes
+        Software\Classes\Directory\shell\git_gui
+    #>
+    param([string]$Root, [string]$Key, [string]$Unit)
+    $rootPath = $Root.TrimEnd('\')
+    if ($Key.Length -le $rootPath.Length + 1 -or -not $Key.StartsWith("$rootPath\", [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $segments = @($Key.Substring($rootPath.Length + 1) -split '\\' | Where-Object { $_ -ne '' })
+    if ($segments.Count -eq 0) { return $null }
+    switch ($Unit) {
+        'child'      { return "$rootPath\$($segments[0])" }
+        'grandchild' { if ($segments.Count -lt 2) { return $null }; return "$rootPath\$($segments[0])\$($segments[1])" }
+        'classes' {
+            $path = $rootPath
+            $parent = ''
+            foreach ($segment in $segments) {
+                $path = "$path\$segment"
+                if (-not (Test-RegistryStructuralName -Name $segment -ParentName $parent)) { return $path }
+                $parent = $segment
+            }
+            return $null
+        }
+    }
+    return $null
+}
+
+function Test-ScoopRegistryData {
+    <#
+    .SYNOPSIS
+        True when a registry value (a string or a multi-string) starts with a path into
+        a Scoop directory, quotes ignored: a command line ("C:\usr\apps\git\current\cmd\git-gui.exe" "%1"),
+        a DLL path, an install location. With -KeepPersist a path into persist\ does not count.
+    #>
+    param([object]$Data, [switch]$KeepPersist)
+    $strings = @()
+    if ($Data -is [string]) { $strings = @($Data) }
+    elseif ($Data -is [string[]]) { $strings = @($Data) }
+    else { return $false }
+    # Same shape as Test-ScoopOwnedPath builds (works with a Linux root in the self-tests)
+    $persistPrefix = (($global:BaseDir -replace '/', '\').TrimEnd('\')) + '\persist'
+    foreach ($text in $strings) {
+        $candidate = (($text -replace '"', '').TrimStart()) -replace '/', '\'
+        if (-not (Test-ScoopOwnedPath $candidate)) { continue }
+        if ($KeepPersist -and ($candidate -eq $persistPrefix -or $candidate -like "$persistPrefix\*")) { continue }
+        return $true
+    }
+    return $false
+}
+
+function Find-ScoopRegistryReferences {
+    <#
+    .SYNOPSIS
+        Every value below HKCU\$SubKey (recursively; the $Skip subtrees left out) for
+        which $Test returns true, as KeyPath (relative to HKCU), ValueName and Data.
+        Read through the .NET registry API: faster than the provider and able to skip.
+    #>
+    param([string]$SubKey, [string[]]$Skip = @(), [scriptblock]$Test)
+    $found = New-Object System.Collections.Generic.List[object]
+    $hive = [Microsoft.Win32.Registry]::CurrentUser
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($SubKey)
+    while ($stack.Count -gt 0) {
+        $path = $stack.Pop()
+        $skipped = $false
+        foreach ($prefix in $Skip) {
+            if ($path -ieq $prefix -or $path.StartsWith("$prefix\", [StringComparison]::OrdinalIgnoreCase)) { $skipped = $true; break }
+        }
+        if ($skipped) { continue }
+        $key = $null
+        try { $key = $hive.OpenSubKey($path, $false) } catch { }
+        if (-not $key) { continue }
+        try {
+            foreach ($valueName in @($key.GetValueNames())) {
+                $data = $null
+                try { $data = $key.GetValue($valueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } catch { }
+                if ($null -ne $data -and (& $Test $data)) {
+                    $found.Add([pscustomobject]@{ KeyPath = $path; ValueName = $valueName; Data = $data })
+                }
+            }
+            foreach ($child in @($key.GetSubKeyNames())) { $stack.Push("$path\$child") }
+        } finally { $key.Close() }
+    }
+    return @($found)
+}
+
+function Remove-ScoopRegistryReferences {
+    <#
+    .SYNOPSIS
+        Deletes the HKCU registrations that point into Scoop's directories, then the
+        references to the CLSIDs that went with them. Returns Removed (key and value
+        paths), Failed (a delete that failed) and Skipped (a value with no registration
+        key below its root, left in place), all as strings.
+    .DESCRIPTION
+        Round one: every value below the roots in $global:ScoopRegistryRoots that
+        Test-ScoopRegistryData accepts marks its registration unit (Get-RegistryUnitKey);
+        the units are deleted as trees, and the Run values that point into Scoop's
+        directories are removed. Round two: a shell extension or icon overlay refers to
+        its DLL only through the CLSID; every key below $global:ScoopRegistryClsidReferenceRoots
+        whose value is one of the deleted CLSIDs is deleted too, so that Explorer does
+        not look for a handler that no longer exists. Nothing else is touched: no
+        default-app choice (UserChoice), no RegisteredApplications; which browser is the
+        default is the user's decision.
+    #>
+    param([switch]$KeepPersist)
+    $removed = @()
+    $failed = @()
+    $skipped = @()
+    $hive = [Microsoft.Win32.Registry]::CurrentUser
+    $keepPersistValue = [bool]$KeepPersist
+    $pathTest = { param($data) Test-ScoopRegistryData -Data $data -KeepPersist:$keepPersistValue }.GetNewClosure()
+
+    $units = New-Object System.Collections.Generic.List[string]
+    foreach ($root in $global:ScoopRegistryRoots) {
+        $skip = @(if ($root.ContainsKey('Skip')) { $root.Skip })
+        foreach ($hit in @(Find-ScoopRegistryReferences -SubKey $root.Path -Skip $skip -Test $pathTest)) {
+            $unit = Get-RegistryUnitKey -Root $root.Path -Key $hit.KeyPath -Unit $root.Unit
+            if (-not $unit) {
+                $skipped += "HKCU\$($hit.KeyPath) [$($hit.ValueName)] = $($hit.Data) (no registration key below the root; left in place)"
+                continue
+            }
+            if (-not $units.Contains($unit)) { $units.Add($unit) }
+        }
+    }
+
+    $clsids = @()
+    foreach ($unit in $units) {
+        if ($unit -match '(?i)^Software\\Classes\\CLSID\\(\{[0-9A-F-]+\})$') { $clsids += $Matches[1] }
+    }
+    foreach ($unit in $units) {
+        try {
+            $hive.DeleteSubKeyTree($unit, $false)
+            $removed += "HKCU\$unit"
+        } catch {
+            $failed += "HKCU\$unit ($($_.Exception.Message))"
+        }
+    }
+
+    $runKey = $null
+    try { $runKey = $hive.OpenSubKey($global:ScoopRegistryRunKey, $true) } catch { }
+    if ($runKey) {
+        try {
+            foreach ($valueName in @($runKey.GetValueNames())) {
+                $data = $null
+                try { $data = $runKey.GetValue($valueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } catch { }
+                if ($null -eq $data -or -not (& $pathTest $data)) { continue }
+                try {
+                    $runKey.DeleteValue($valueName)
+                    $removed += "HKCU\$($global:ScoopRegistryRunKey) [$valueName]"
+                } catch {
+                    $failed += "HKCU\$($global:ScoopRegistryRunKey) [$valueName] ($($_.Exception.Message))"
+                }
+            }
+        } finally { $runKey.Close() }
+    }
+
+    if ($clsids.Count -gt 0) {
+        $clsidTest = { param($data) ($data -is [string]) -and ($clsids -contains $data.Trim()) }.GetNewClosure()
+        $references = New-Object System.Collections.Generic.List[string]
+        foreach ($root in $global:ScoopRegistryClsidReferenceRoots) {
+            $skip = @('Software\Classes\Local Settings', 'Software\Classes\CLSID')
+            foreach ($hit in @(Find-ScoopRegistryReferences -SubKey $root -Skip $skip -Test $clsidTest)) {
+                if (-not $references.Contains($hit.KeyPath)) { $references.Add($hit.KeyPath) }
+            }
+        }
+        foreach ($reference in $references) {
+            try {
+                $hive.DeleteSubKeyTree($reference, $false)
+                $removed += "HKCU\$reference"
+            } catch {
+                $failed += "HKCU\$reference ($($_.Exception.Message))"
+            }
+        }
+    }
+    return @{ Removed = $removed; Failed = $failed; Skipped = $skipped }
+}
+
+# Residues of Scoop applications outside Scoop's directories and the registry: the
+# directory each one keeps elsewhere and the User PATH entries it adds. A residue
+# is removed when the package's directory existed when the reset started; with
+# --keep-persist a package under persist\ keeps its residue too (its IDEs keep running).
+$global:ScoopAppResidues = @(
+    @{ Package = 'jetbrains-toolbox'; Directories = @('apps\jetbrains-toolbox', 'persist\jetbrains-toolbox'); Residue = '%LOCALAPPDATA%\JetBrains\Toolbox'; PathEntries = @('%LOCALAPPDATA%\JetBrains\Toolbox\scripts') }
+)
+
+function Get-ScoopAppResidues {
+    <#
+    .SYNOPSIS
+        The residues of $global:ScoopAppResidues whose package is installed under $ScoopDir
+        (checked before the directories are deleted), with the environment references expanded.
+    #>
+    param([string]$ScoopDir, [switch]$KeepPersist)
+    $result = @()
+    foreach ($entry in $global:ScoopAppResidues) {
+        $present = @($entry.Directories | Where-Object {
+            (-not ($KeepPersist -and $_ -like 'persist\*')) -and (Test-Path (Join-Path $ScoopDir $_))
+        })
+        if ($present.Count -eq 0) { continue }
+        $result += [pscustomobject]@{
+            Package     = $entry.Package
+            Residue     = [Environment]::ExpandEnvironmentVariables($entry.Residue)
+            PathEntries = @($entry.PathEntries | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) })
+        }
+    }
+    return $result
+}
+
+function Remove-ScoopAppResidues {
+    <#
+    .SYNOPSIS
+        Removes the User PATH entries and the directory of each residue. Returns the number of changes.
+    #>
+    param([array]$Residues)
+    $changes = 0
+    if ($Residues.Count -eq 0) { return $changes }
+    $userPath = [string](Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User')
+    $entries = @($userPath -split ';' | Where-Object { $_ -ne '' })
+    foreach ($residue in $Residues) {
+        $before = $entries.Count
+        $entries = @($entries | Where-Object { $entry = $_.TrimEnd('\'); @($residue.PathEntries | Where-Object { $entry -ieq $_.TrimEnd('\') }).Count -eq 0 })
+        if ($entries.Count -lt $before) {
+            Write-Host "[OK] Removed from the User PATH: $($residue.PathEntries -join ', ') ($($residue.Package))" -ForegroundColor Green
+            $changes += $before - $entries.Count
+        }
+        if (Test-Path $residue.Residue) {
+            try {
+                Remove-Item -LiteralPath $residue.Residue -Recurse -Force -ErrorAction Stop
+                Write-Host "[OK] Removed: $($residue.Residue) ($($residue.Package))" -ForegroundColor Green
+                $changes++
+            } catch {
+                Write-Host "[WARN] Could not remove $($residue.Residue): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+    if ($changes -gt 0 -and ($entries -join ';') -ne $userPath) {
+        Set-RegistryEnvironmentVariable -Name 'Path' -Value ($entries -join ';') -Scope 'User'
+    }
+    return $changes
+}
+
+# ----------------------------------------------------------------------------
+# --purge: take back what --admin-setenv and --clean-user-scope applied from this
+# host's environment files, as far as the files tell. Names the files set are
+# removed, the entries they add to a list variable (PATH+=, PATH=+) are removed
+# from that list, TMP and TEMP get the Windows defaults instead of nothing (a
+# machine without TEMP breaks installers). The files themselves, bin, etc, logs and
+# every directory outside Scoop's own (tmp, data, devl) stay: a Scoop leftover is
+# harmless, deleted user data is not.
+# ----------------------------------------------------------------------------
+
+$global:WindowsTempDefaults = @{ Machine = '%SystemRoot%\TEMP'; User = '%USERPROFILE%\AppData\Local\Temp' }
+
+function Get-EnvFileRevertPlan {
+    <#
+    .SYNOPSIS
+        What --purge takes back in one scope from this host's environment files: Remove
+        (names the files set), ListEntries (name -> expanded entries the files add),
+        Defaults (TMP/TEMP -> Windows default) and Files (the files read).
+    #>
+    param([string]$Scope)
+    $plan = @{ Scope = $Scope; Remove = @(); ListEntries = @{}; Defaults = @{}; Files = @() }
+    $files = @(Get-EnvironmentFiles | Where-Object { $_.Scope -eq $Scope })
+    if ($files.Count -eq 0) { return $plan }
+    $operations = @()
+    foreach ($file in $files) {
+        $plan.Files += $file.Path
+        $operations += @(Read-EnvironmentFile -FilePath $file.Path)
+    }
+    $global:EnvFileDefinitions = @{}
+    Register-EnvFileDefinitions -Operations $operations
+    foreach ($op in $operations) {
+        if ($op.Type -eq 'ListPrepend' -or $op.Type -eq 'ListAppend') {
+            $entry = Expand-EnvironmentVariables -Value $op.Value
+            if (-not $entry) { continue }
+            if (-not $plan.ListEntries.ContainsKey($op.Name)) { $plan.ListEntries[$op.Name] = @() }
+            if ($plan.ListEntries[$op.Name] -notcontains $entry) { $plan.ListEntries[$op.Name] += $entry }
+        } elseif ($op.Type -eq 'Set') {
+            if ($op.Name -ieq 'Path') { continue }
+            if ($op.Name -ieq 'TMP' -or $op.Name -ieq 'TEMP') {
+                $plan.Defaults[$op.Name.ToUpper()] = $global:WindowsTempDefaults[$Scope]
+            } elseif ($plan.Remove -notcontains $op.Name) {
+                $plan.Remove += $op.Name
+            }
+        }
+    }
+    return $plan
+}
+
+function Invoke-EnvFileRevert {
+    <#
+    .SYNOPSIS
+        Applies a plan of Get-EnvFileRevertPlan to the registry of its scope. Returns the number of changes.
+    #>
+    param([hashtable]$Plan)
+    $scope = $Plan.Scope
+    $changes = 0
+    foreach ($name in $Plan.Remove) {
+        if ($null -eq (Get-RegistryEnvironmentVariable -Name $name -Scope $scope)) { continue }
+        Set-RegistryEnvironmentVariable -Name $name -Value $null -Scope $scope
+        Write-Host "[OK] Removed $scope variable: $name" -ForegroundColor Green
+        $changes++
+    }
+    foreach ($name in @($Plan.ListEntries.Keys)) {
+        $current = [string](Get-RegistryEnvironmentVariable -Name $name -Scope $scope)
+        if (-not $current) { continue }
+        $wanted = @($Plan.ListEntries[$name] | ForEach-Object { $_.TrimEnd('\') })
+        $kept = @($current -split ';' | Where-Object { $_ -ne '' -and ($wanted -notcontains $_.TrimEnd('\')) })
+        $removedCount = @($current -split ';' | Where-Object { $_ -ne '' }).Count - $kept.Count
+        if ($removedCount -eq 0) { continue }
+        if ($name -ieq 'Path' -and $kept.Count -eq 0 -and $scope -eq 'Machine') {
+            # Never leave the machine without a PATH; Windows' own entries are missing here
+            Write-Host "[WARN] Machine PATH consists only of entries of the environment files; left as it is" -ForegroundColor Yellow
+            continue
+        }
+        Set-RegistryEnvironmentVariable -Name $name -Value ($kept -join ';') -Scope $scope
+        Write-Host "[OK] Removed $removedCount entr$(if ($removedCount -eq 1) { 'y' } else { 'ies' }) of the environment files from $scope $name" -ForegroundColor Green
+        $changes += $removedCount
+    }
+    foreach ($name in @($Plan.Defaults.Keys)) {
+        $default = $Plan.Defaults[$name]
+        if ((Get-RegistryEnvironmentVariable -Name $name -Scope $scope) -eq $default) { continue }
+        Set-RegistryEnvironmentVariable -Name $name -Value $default -Scope $scope -Kind 'ExpandString'
+        Write-Host "[OK] $scope $name set to the Windows default: $default" -ForegroundColor Green
+        $changes++
+    }
+    return $changes
+}
+
 function Invoke-ScoopReset {
     <#
     .SYNOPSIS
@@ -5087,7 +5663,8 @@ function Invoke-ScoopReset {
     #>
     param(
         [switch]$Force,
-        [switch]$KeepPersist
+        [switch]$KeepPersist,
+        [switch]$Purge
     )
     # Strict mode version 1 (undefined variables), see Install-ScoopTools. Continue:
     # a directory that cannot be deleted is reported, the rest is still cleaned up.
@@ -5100,6 +5677,12 @@ function Invoke-ScoopReset {
     # Programs that are not Scoop's but have DLLs from a Scoop directory loaded; filled
     # by the deletion routine (a nested function, hence script scope), named at the end
     $script:ScoopBootDllHolders = @()
+    # What could not be taken back outside Scoop's directories (an MSI uninstall that
+    # failed, a registry key that could not be deleted); listed at the end, exit 1
+    $failedOutside = @()
+    # The steps that touch the Windows Installer database, HKCU and %LOCALAPPDATA% run
+    # on Windows only and not in fake mode
+    $realWindows = (Test-WindowsPlatform) -and -not (Test-ScoopBootFake)
 
     # Scoop owns only the subdirectories in $global:ScoopOwnedDirs (Test-ScoopOwnedPath).
     # Everything else under C:\usr (bin, etc, or software the user installed there,
@@ -5110,12 +5693,20 @@ function Invoke-ScoopReset {
     Write-Host ""
     Write-Host "WARNING: This will remove:" -ForegroundColor Yellow
     Write-Host "  - All installed Scoop applications" -ForegroundColor White
+    Write-Host "  - Windows Installer packages that came from Scoop's apps directory (nonportable bucket)" -ForegroundColor White
     Write-Host "  - All environment variables set by Scoop" -ForegroundColor White
     Write-Host "  - All PATH entries related to Scoop" -ForegroundColor White
+    Write-Host "  - Context menus, file types, CLSIDs, Uninstall entries and autostarts in HKCU that point into Scoop's directories" -ForegroundColor White
     if (-not $KeepPersist) {
         Write-Host "  - All application settings in persist folder" -ForegroundColor White
+        Write-Host "  - What those applications keep elsewhere (JetBrains Toolbox under %LOCALAPPDATA%, its User PATH entry)" -ForegroundColor White
     }
     Write-Host "  - Scoop itself" -ForegroundColor White
+    if ($Purge) {
+        Write-Host "  - --purge: the variables and list entries of this host's environment files ($ScoopDir\bin from the PATH too), TMP/TEMP back to the Windows defaults, $ScoopDir\global" -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host "bin, etc, logs and backups under $ScoopDir stay, as does every directory outside Scoop's own (tmp, data, devl)." -ForegroundColor Gray
     Write-Host ""
 
     # The shell running this reset must not live in a Scoop directory: a Windows
@@ -5592,6 +6183,27 @@ function Invoke-ScoopReset {
 
     Write-Host "[OK] Backup created: $BackupDir" -ForegroundColor Green
 
+    # 2b. Windows Installer products from the nonportable bucket (tortoisegit-np): an
+    # MSI installed to Program Files, registered in HKLM; deleting apps\ leaves the
+    # product installed and the next --user-install installs it a second time. Done
+    # before the directories go, while the source directory still exists. Recorded
+    # now as well: the residues outside Scoop's directories whose package is present
+    Write-Host ""
+    Set-ScoopBootTitle -Text "scoop-boot reset msi"
+    Write-Host ">>> Uninstalling Windows Installer packages that came from Scoop's directories..." -ForegroundColor Cyan
+    $residues = @()
+    if (-not $realWindows) {
+        Write-Host "[FAKE] Windows Installer check skipped" -ForegroundColor DarkCyan
+    } else {
+        $msiProducts = @(Get-ScoopMsiInstalls)
+        if ($msiProducts.Count -eq 0) {
+            Write-Host "[OK] No Windows Installer package was installed from a Scoop directory" -ForegroundColor Gray
+        } else {
+            $failedOutside += @(Uninstall-ScoopMsiInstalls -Products $msiProducts)
+        }
+        $residues = @(Get-ScoopAppResidues -ScoopDir $ScoopDir -KeepPersist:$KeepPersist)
+    }
+
     # 3./4. Clean User and Machine environment variables
     # Two criteria: a fixed list of names that scoop-boot or Scoop set without a path
     # value (options, locale), plus every variable whose value points into one of
@@ -5660,6 +6272,26 @@ function Invoke-ScoopReset {
         Write-Host "[OK] Machine PATH cleaned" -ForegroundColor Green
     }
 
+    # 6a. --purge: what the environment files of this host set and added, in both
+    # scopes, taken back by the files' own content (Get-EnvFileRevertPlan); the files
+    # stay for the next --admin-setenv
+    if ($Purge) {
+        Write-Host ""
+        Set-ScoopBootTitle -Text "scoop-boot reset purge"
+        Write-Host ">>> Taking back the environment of this host's files (--purge)..." -ForegroundColor Cyan
+        foreach ($scope in @('Machine', 'User')) {
+            $plan = Get-EnvFileRevertPlan -Scope $scope
+            if ($plan.Files.Count -eq 0) {
+                Write-Host "[INFO] No $scope environment file for this host, nothing to take back" -ForegroundColor Gray
+                continue
+            }
+            $reverted = Invoke-EnvFileRevert -Plan $plan
+            # The names go out of this process as well (step 6b)
+            $removedVariableNames += @($plan.Remove)
+            Write-Host "[OK] $scope scope: $reverted change(s) from $(@($plan.Files | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')" -ForegroundColor Green
+        }
+    }
+
     # 6b. The same for this process: everything the reset starts from here (Explorer
     # after the cleanup, and through it every shell opened from the Start menu)
     # inherits this environment, which until now still carried the removed values
@@ -5694,10 +6326,22 @@ function Invoke-ScoopReset {
     if (-not $KeepPersist) {
         $dirsToRemove += @{ Path = "$ScoopDir\persist"; Desc = "Persist (app data)" }
     }
+    # global (SCOOP_GLOBAL, packages installed with scoop install -g) is Scoop's too;
+    # it is emptied only with --purge, as before
+    if ($Purge) {
+        $dirsToRemove += @{ Path = "$ScoopDir\global"; Desc = "Global (scoop install -g)" }
+    }
 
     foreach ($dir in $dirsToRemove) {
         Set-ScoopBootTitle -Text "scoop-boot reset $(Split-Path -Leaf $dir.Path)"
         $null = Remove-DirectoryAggressively -Path $dir.Path -Description $dir.Desc
+    }
+
+    # 7b. What the applications kept outside Scoop's directories (recorded in 2b)
+    if ($residues.Count -gt 0) {
+        Write-Host ""
+        Write-Host ">>> Removing what Scoop applications kept outside Scoop's directories..." -ForegroundColor Cyan
+        $null = Remove-ScoopAppResidues -Residues $residues
     }
 
     # Explorer and every shell opened from it: a running Explorer keeps the environment
@@ -5726,23 +6370,26 @@ function Invoke-ScoopReset {
     # 8. Clean registry
     Write-Host ""
     Set-ScoopBootTitle -Text "scoop-boot reset registry"
-    Write-Host ">>> Cleaning registry entries..." -ForegroundColor Cyan
-
-    $registryPaths = @{
-        "HKCU:\Software\Classes\*\shell\Scoop" = "Context menu"
-        "HKCU:\Software\Classes\Directory\shell\Scoop" = "Directory context"
-        "HKCU:\Software\Classes\Directory\Background\shell\Scoop" = "Background context"
-    }
-
-    foreach ($regPath in $registryPaths.Keys) {
-        if (Test-Path $regPath -ErrorAction SilentlyContinue) {
-            try {
-                Remove-Item -Path $regPath -Recurse -Force -ErrorAction Stop
-                Write-Host "[OK] Removed: $($registryPaths[$regPath])" -ForegroundColor Green
-            } catch {
-                Write-Host "[INFO] Skipped: $($registryPaths[$regPath])" -ForegroundColor Gray
-            }
+    Write-Host ">>> Cleaning registry entries that point into Scoop's directories..." -ForegroundColor Cyan
+    # The post-install files of Step 4 (install-context.reg of 7-Zip, Notepad++, VS Code,
+    # Git, Windows Terminal, Everything; tortoisesvn-install.reg; install-pep-514.reg)
+    # and the applications themselves (Firefox, the Toolbox) register under HKCU with
+    # paths into apps\ and persist\. Found by value, not by a list per package:
+    # whatever points there is removed with its registration key (Remove-ScoopRegistryReferences)
+    if (-not $realWindows) {
+        Write-Host "[FAKE] Registry check skipped" -ForegroundColor DarkCyan
+    } else {
+        $registryResult = Remove-ScoopRegistryReferences -KeepPersist:$KeepPersist
+        foreach ($entry in $registryResult.Removed) { Write-Host "[OK] Removed: $entry" -ForegroundColor Green }
+        foreach ($entry in $registryResult.Skipped) { Write-Host "[INFO] $entry" -ForegroundColor Gray }
+        foreach ($entry in $registryResult.Failed) { Write-Host "[WARN] Could not remove: $entry" -ForegroundColor Yellow }
+        $registryLeft = $registryResult.Failed.Count + $registryResult.Skipped.Count
+        if ($registryResult.Removed.Count -eq 0 -and $registryLeft -eq 0) {
+            Write-Host "[OK] No registry entry points into Scoop's directories" -ForegroundColor Gray
+        } else {
+            Write-Host "[OK] Registry: $($registryResult.Removed.Count) removed, $registryLeft left" -ForegroundColor Green
         }
+        $failedOutside += @($registryResult.Failed)
     }
 
     # 9. Remove shortcuts
@@ -5811,13 +6458,26 @@ function Invoke-ScoopReset {
         Write-Host "[OK] All directories successfully removed!" -ForegroundColor Green
     }
 
+    if ($failedOutside.Count -gt 0) {
+        Write-Host ""
+        Write-Host "[WARN] Not taken back outside Scoop's directories (see above):" -ForegroundColor Yellow
+        foreach ($entry in $failedOutside) { Write-Host "  - $entry" -ForegroundColor Yellow }
+    }
+
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  1. Check in a new shell (must print nothing; $ScoopDir\bin in PATH is scoop-boot's and stays):" -ForegroundColor White
-    Write-Host "     gci env: | ? { `$_.Value -match '$([regex]::Escape($ScoopDir))\\($($global:ScoopOwnedDirs -join '|'))' }" -ForegroundColor Gray
+    if ($Purge) {
+        Write-Host "  1. Check in a new shell (must print nothing):" -ForegroundColor White
+        Write-Host "     gci env: | ? { `$_.Value -match '$([regex]::Escape($ScoopDir))' }" -ForegroundColor Gray
+        Write-Host "     reg query HKCU\Software\Classes /s /f `"$ScoopDir\`" /d" -ForegroundColor Gray
+    } else {
+        Write-Host "  1. Check in a new shell (must print nothing; $ScoopDir\bin in PATH is scoop-boot's and stays):" -ForegroundColor White
+        Write-Host "     gci env: | ? { `$_.Value -match '$([regex]::Escape($ScoopDir))\\($($global:ScoopOwnedDirs -join '|'))' }" -ForegroundColor Gray
+    }
     Write-Host "  2. Set up again (Administrator): $global:ScoopBootScript --admin-init, then --admin-setenv" -ForegroundColor White
     Write-Host "  3. Normal shell: $global:ScoopBootScript --user-install" -ForegroundColor White
     Write-Host ""
     Write-Host "Backup location: $BackupDir" -ForegroundColor Gray
-    return (New-RunResult -Command 'admin-reset' -Ok ($remainingDirs.Count -eq 0) -Data @{ Remaining = $remainingDirs; Backup = $BackupDir })
+    $ok = ($remainingDirs.Count -eq 0) -and ($failedOutside.Count -eq 0)
+    return (New-RunResult -Command 'admin-reset' -Ok $ok -Data @{ Remaining = $remainingDirs; Backup = $BackupDir; FailedOutside = $failedOutside })
 }

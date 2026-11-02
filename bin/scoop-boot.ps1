@@ -3,11 +3,11 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.25.0 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.26.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
-      --admin-reset to start over
+      --admin-reset to start over (--purge: as before the first --admin-setenv)
     - Environment files per host and user, applied at Machine scope; the User
       scope is cleaned after every Scoop command (scoop wrapper in bin\)
     - List operations (+=, =+, -=) for ALL environment variables, order-independent
@@ -30,9 +30,39 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.25.0
+    Version: 1.26.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.26.0:
+    - --admin-reset uninstalls the Windows Installer packages that came from
+      Scoop's apps directory (nonportable bucket: TortoiseGit): found by their
+      InstallSource in the Uninstall keys, removed with msiexec /x /qn, before
+      the directories go. Deleting apps\ had left the product in Program Files
+      and in the Installer database, and the next --user-install installed it
+      a second time (the AVD, 02.11.)
+    - --admin-reset removes every HKCU registration whose value points into
+      apps\ or persist\ (Software\Classes: context menus, ProgIDs, protocol
+      handlers, Applications, CLSIDs; Uninstall; App Paths; Software\Python;
+      Run values), together with its registration key, then the shell
+      extension handlers and icon overlays that refer to a removed CLSID. Found
+      by value, not by a list per package, so it covers the install-context.reg
+      files of Step 4 as well as what Firefox and the Toolbox register
+      themselves. The former Step 8 removed three keys that nothing writes
+    - --admin-reset removes what the JetBrains Toolbox keeps outside Scoop's
+      directories (%LOCALAPPDATA%\JetBrains\Toolbox, its User PATH entry) when
+      persist\ goes; table $global:ScoopAppResidues
+    - --admin-reset --purge takes back the environment of this host's files
+      (names removed, PATH and other list entries removed, TMP/TEMP to the
+      Windows defaults as REG_EXPAND_SZ) and deletes global\; no directory
+      outside Scoop's own is touched. Exit 1 also when an MSI uninstall or a
+      registry delete failed; the summary names it
+    - Profile desktop-extra (Windows Terminal, Greenshot, KeePass): tools the
+      ENTB AVD image ships; out of desktop and devel, added by hand on a machine
+      without such an image (--profile=devel,desktop-extra)
+    - Self-tests 58 (registration key per rule, Scoop reference by value) and
+      59 (--purge against the simulated registry); tools\test.ps1 runs a second
+      reset with --purge and seeds a Windows-like Machine PATH (65 tests)
 
     Changes in v1.25.0:
     - Post-install steps: TortoiseSVN context menu and overlays
@@ -565,7 +595,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.25.0"
+$global:ScriptVersion = "1.26.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -1072,7 +1102,7 @@ if (-not $script:ModuleLoaded) {
 }
 
 # The command goes into the log context ("scoop-boot.ps1 --user-install (1.16.0)")
-$logMode = @($args | Where-Object { $_ -match '^--' -and $_ -notmatch '^--(quiet|dry-run|force|keep-persist|branch=|distro=|no-claude)' } | Select-Object -First 1)
+$logMode = @($args | Where-Object { $_ -match '^--' -and $_ -notmatch '^--(quiet|dry-run|force|keep-persist|purge|branch=|distro=|no-claude)' } | Select-Object -First 1)
 if ($args -contains '--admin-init') { $logMode = @('--admin-init') }
 Initialize-ScoopBootLog -ScriptName 'scoop-boot.ps1' -Version $global:ScriptVersion -Mode "$logMode" -ScriptPath $PSCommandPath -Arguments $args
 
@@ -1176,7 +1206,7 @@ if ($global:ParsedArgs.WslSetup) {
 }
 
 if ($global:ParsedArgs.AdminReset) {
-    if (Invoke-AdminReset -Force $global:ParsedArgs.Force -KeepPersist $global:ParsedArgs.KeepPersist) { exit 0 } else { exit 1 }
+    if (Invoke-AdminReset -Force $global:ParsedArgs.Force -KeepPersist $global:ParsedArgs.KeepPersist -Purge $global:ParsedArgs.Purge) { exit 0 } else { exit 1 }
 }
 
 # No command: the help is the status page

@@ -1,0 +1,13 @@
+# Desktop tools that a managed image may already ship: the ENTB AVD comes with
+# Greenshot, KeePass and Windows Terminal from the image (Inventx), together with
+# 7-Zip (Scoop needs its own 7-Zip anyway; the image's keeps the Explorer context
+# menu). Installing them from Scoop as well gives two copies, two context menus and
+# two update paths, so they are not part of devel. Add this profile on a machine
+# without such an image: --profile=devel,desktop-extra (the laptop).
+
+# Terminal
+windows-terminal
+
+# Screenshots, passwords
+greenshot
+keepass

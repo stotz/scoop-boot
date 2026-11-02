@@ -162,8 +162,10 @@ C:\usr\bin\scoop-boot.ps1 --profile=java,c++,python --dry-run     # the files th
 C:\usr\bin\scoop-boot.ps1 --profile=devops --force                # replace the host files (the old ones stay as .bak)
 ```
 
-Single profiles: `base`, `desktop` (browsers, editors, Windows Terminal, file and
-screenshot tools), `ide` (JetBrains Toolbox), `cli`, `svn`, `java` (Temurin JDK 25,
+Single profiles: `base`, `desktop` (browsers, editors, file tools, Everything, Postman,
+draw.io), `desktop-extra` (Windows Terminal, Greenshot, KeePass: tools a managed image
+may already ship, as the ENTB AVD does; add it on a machine without such an image, the
+laptop: `--profile=devel,desktop-extra`), `ide` (JetBrains Toolbox), `cli`, `svn`, `java` (Temurin JDK 25,
 Maven, Gradle, Ant, Kotlin), `java8`, `java11`, `java17`, `java21` (one more JDK each,
 reachable as `JAVA_HOME_NN_X64` for toolchains, not on the PATH), `node`, `perl`,
 `python`, `c++` (MSYS2/GCC, make, cmake,
@@ -363,19 +365,47 @@ refuses to run inside one.
 scoop-boot.ps1 --admin-reset                 # full cleanup, asks for confirmation
 scoop-boot.ps1 --admin-reset --force         # no prompts
 scoop-boot.ps1 --admin-reset --keep-persist  # keep C:\usr\persist (app data, settings)
+scoop-boot.ps1 --admin-reset --purge         # also take back the environment of the host's files
 ```
 
 The reset stops the processes that run from or hold Scoop's directories (`apps`, and
 `persist` unless kept: JetBrains Toolbox installs its IDEs there; plus Explorer,
 which holds shell extensions), writes a backup to `C:\usr\backups\<timestamp>` (the last
-five are kept), removes Scoop's variables and PATH entries, the Scoop directories, registry
-entries and shortcuts. `bin`, `etc`, `logs` and everything that is not Scoop's stay, so
-the setup starts again at `--admin-init`. At the end Explorer is told to reload the
-environment from the registry, so a shell opened from the Start menu afterwards sees
-the cleaned environment without logging off. Exit code 1 when a directory could
-not be removed; the output names it, the command to remove it by hand, and the
-programs that still hold it (a shell extension's DLL loaded into a file manager, a
-shell whose working directory is inside): those are not Scoop's and are left to you.
+five are kept), uninstalls the Windows Installer packages that came from Scoop's `apps`
+directory (the nonportable bucket: TortoiseGit lives in Program Files and in the
+Installer database, deleting `apps\` would leave it installed), removes Scoop's
+variables and PATH entries, the Scoop directories, what the applications kept
+elsewhere (the Toolbox's state under `%LOCALAPPDATA%\JetBrains\Toolbox` and its User
+PATH entry, unless `persist` is kept), the HKCU registrations that point into Scoop's
+directories and the shortcuts. `bin`, `etc`, `logs`, `backups` and everything that is not
+Scoop's stay, so the setup starts again at `--admin-init`. At the end Explorer is told
+to reload the environment from the registry, so a shell opened from the Start menu
+afterwards sees the cleaned environment without logging off. Exit code 1 when a
+directory could not be removed, an MSI uninstall failed or a registry key could not be
+deleted; the output names it, the command to run by hand, and the programs that still
+hold a directory (a shell extension's DLL loaded into a file manager, a shell whose
+working directory is inside): those are not Scoop's and are left to you.
+
+The registry part works by value, not by a list per package: every value under
+`HKCU\Software\Classes` (context menus, file types, protocol handlers, CLSIDs of shell
+extensions), the `Uninstall` and `App Paths` keys, `Software\Python` (PEP 514) and the
+`Run` autostarts whose path lies in `apps\` or `persist\` is removed together with its
+registration key, and so are the shell-extension handlers and icon overlays that refer
+to a removed CLSID. That covers what the post-install steps import
+(`install-context.reg`, `tortoisesvn-install.reg`, `install-pep-514.reg`) and what the
+applications register themselves (Firefox's ProgIDs and `http`/`https`/`mailto`, the
+Toolbox's IDE entries in Settings > Apps). Which browser is the default is not touched:
+if the removed one was the default, Windows asks again at the next link.
+
+`--purge` additionally takes back what `--admin-setenv` and `--clean-user-scope`
+applied from this host's environment files, as far as the files say: the names they set
+are removed, the entries they add to `PATH` (and any other list variable) are removed
+from it, `C:\usr\bin` among them, `TMP`/`TEMP` get the Windows defaults
+(`%SystemRoot%\TEMP`, `%USERPROFILE%\AppData\Local\Temp`) instead of nothing, and
+`C:\usr\global` is deleted. The files themselves stay, and so does every directory
+outside Scoop's own (`C:\tmp`, `C:\data`, `C:\devl`): a Scoop leftover is harmless,
+deleted user data is not. This is the state of a machine before the first
+`--admin-setenv`, which is what a test of the whole setup on a used machine needs.
 
 ---
 
@@ -408,7 +438,7 @@ Setup (Administrator shell unless noted)
 --profile=NAMES      With --admin-init: the profiles for this machine (default: PROFILE in etc\scoop-boot.conf, else devel)
 --admin-setenv       2: apply the environment files at Machine scope (Phase 1); --dry-run: net effect, no Administrator needed
 --user-install       3 (normal shell): bootstrap Scoop, install the package list (Phase 2); --force: no question in an elevated shell
---admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist
+--admin-reset        Remove Scoop again; --force skips the prompt, --keep-persist keeps C:\usr\persist, --purge takes the environment of the host's files back too
 
 Maintenance
 --update             Install the current signed release: scripts, scoop wrapper, package lists, profiles, etc\wsl (the files of etc\release.files)
