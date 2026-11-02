@@ -2,7 +2,9 @@
 gnupg
 openssl
 
-# Network tools (nmap: shims nc and netcat -> ncat.exe)
+# Network tools (nmap: shims nc and netcat -> ncat.exe). Port scans and packet
+# capture need the Npcap driver, which no bucket carries: installer from
+# https://npcap.com (Administrator); --user-install reports when it is missing.
 nmap
 wireshark
 putty

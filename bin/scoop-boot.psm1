@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.24.5
+    Version: 1.25.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.24.5"
+$global:ScriptVersion = "1.25.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -2905,6 +2905,78 @@ JAVA_HOME=C:\java
     } catch {}
     $tests += $test
 
+    # Test 52d: Test-ScoopOwnedPath: Scoop's own directories, with either separator; bin, etc and look-alikes are not Scoop's
+    $test = @{Name = "Test-ScoopOwnedPath: apps and friends, separators, look-alike roots"; Result = $false}
+    try {
+        $root = $global:BaseDir
+        $test.Result = (Test-ScoopOwnedPath "$root\apps\git\current") -and (Test-ScoopOwnedPath "$root\shims") -and
+            (Test-ScoopOwnedPath ("$root\persist\x" -replace '\\', '/')) -and
+            -not (Test-ScoopOwnedPath "$root\bin\scoop-boot.ps1") -and -not (Test-ScoopOwnedPath "$root\etc") -and
+            -not (Test-ScoopOwnedPath "${root}x\apps\y") -and -not (Test-ScoopOwnedPath "$root\appsx") -and
+            -not (Test-ScoopOwnedPath '') -and -not (Test-ScoopOwnedPath 'C:\Program Files\x')
+    } catch {}
+    $tests += $test
+
+    # Test 52e: an unresolved $NAME stays in the value as written (and is reported); $$ and defined names still expand
+    $test = @{Name = "Expansion: unresolved name stays as written"; Result = $false}
+    try {
+        $savedDefinitions = $global:EnvFileDefinitions
+        $global:EnvFileDefinitions = @{ KNOWN = 'C:\known' }
+        $value = Expand-EnvironmentVariables -Value '$KNOWN\bin;$SCOOPBOOT_NO_SUCH_NAME_ZZ\lib'
+        $global:EnvFileDefinitions = $savedDefinitions
+        $test.Result = ($value -eq 'C:\known\bin;$SCOOPBOOT_NO_SUCH_NAME_ZZ\lib')
+        if (-not $test.Result) { Write-Host "       got: $value" -ForegroundColor Yellow }
+    } catch { $global:EnvFileDefinitions = $savedDefinitions }
+    $tests += $test
+
+    # Test 52f: the log line: level from the text, ANSI codes and carriage-return progress dropped, appended to the file
+    $test = @{Name = "Log line: level, ANSI and progress noise, file append"; Result = $false}
+    try {
+        $savedLog = $global:ScoopBootLogFile
+        $tempLog = [System.IO.Path]::GetTempFileName()
+        $global:ScoopBootLogFile = $tempLog
+        Write-ScoopBootLogLine -Text "[WARN] something"
+        Write-ScoopBootLogLine -Text "`e[32m[OK] green`e[0m"
+        Write-ScoopBootLogLine -Text "progress 10%`rprogress 100%"
+        Write-ScoopBootLogLine -Text "Download: [#abc 50%]"
+        Write-ScoopBootLogLine -Text "   "
+        $global:ScoopBootLogFile = $savedLog
+        $lines = @(Get-Content $tempLog)
+        Remove-Item $tempLog -Force -ErrorAction SilentlyContinue
+        $test.Result = ($lines.Count -eq 3) -and ($lines[0] -match '\[WARN\] \[WARN\] something$') -and ($lines[1] -match '\[INFO\] \[OK\] green$') -and
+            ($lines[2] -match '\[INFO\] progress 100%$') -and ((Get-ScoopBootLogLevel -Text '[FATAL] x') -eq 'FATAL') -and ((Get-ScoopBootLogLevel -Text 'ERROR x') -eq 'ERROR')
+        if (-not $test.Result) { Write-Host "       lines: $($lines -join ' | ')" -ForegroundColor Yellow }
+    } catch { $global:ScoopBootLogFile = $savedLog }
+    $tests += $test
+
+    # Test 52g: --clean-user-scope against the simulated registry (fake mode in a scratch root):
+    # Scoop's User PATH entries and a User JAVA_HOME the system file also sets go, a foreign User variable stays
+    $test = @{Name = "Clean user scope: Scoop entries removed, foreign variable kept (fake registry)"; Result = $false}
+    $savedRoot = @{ BaseDir = $global:BaseDir; PackagesDir = $global:PackagesDir; EnvDir = $global:EnvDir; ProfilesDir = $global:ProfilesDir; Fake = $env:SCOOPBOOT_FAKE }
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "scoop-boot-clean-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $tempRoot 'etc\environments') -Force | Out-Null
+        $global:BaseDir = $tempRoot; $global:PackagesDir = Join-Path $tempRoot 'etc\packages'; $global:EnvDir = Join-Path $tempRoot 'etc\environments'; $global:ProfilesDir = Join-Path $tempRoot 'etc\profiles'
+        $env:SCOOPBOOT_FAKE = '1'
+        $hostName = Get-Hostname; $userName = Get-Username
+        Set-Content -Path (Join-Path $global:EnvDir "system.$hostName.$userName.env") -Value "JAVA_HOME=$tempRoot\apps\temurin25-jdk\current`nPATH+=`$JAVA_HOME\bin" -Encoding ASCII
+        Set-RegistryEnvironmentVariable -Name 'JAVA_HOME' -Value "$tempRoot\apps\temurin11-jdk\current" -Scope 'User'
+        Set-RegistryEnvironmentVariable -Name 'MY_OWN_VAR' -Value 'keep' -Scope 'User'
+        Set-RegistryEnvironmentVariable -Name 'Path' -Value "$tempRoot\apps\temurin11-jdk\current\bin;$tempRoot\shims;C:\mine\bin" -Scope 'User'
+        $changes = [int](@(Invoke-CleanUserScope 6> $null) | Where-Object { $_ -is [int] } | Select-Object -Last 1)
+        $userPath = Get-RegistryEnvironmentVariable -Name 'Path' -Scope 'User'
+        $test.Result = ($changes -eq 3) -and ($userPath -eq 'C:\mine\bin') -and
+            ($null -eq (Get-RegistryEnvironmentVariable -Name 'JAVA_HOME' -Scope 'User')) -and
+            ((Get-RegistryEnvironmentVariable -Name 'MY_OWN_VAR' -Scope 'User') -eq 'keep')
+        if (-not $test.Result) { Write-Host "       changes=$changes path=$userPath" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    finally {
+        $global:BaseDir = $savedRoot.BaseDir; $global:PackagesDir = $savedRoot.PackagesDir; $global:EnvDir = $savedRoot.EnvDir; $global:ProfilesDir = $savedRoot.ProfilesDir
+        if ($null -eq $savedRoot.Fake) { Remove-Item Env:SCOOPBOOT_FAKE -ErrorAction SilentlyContinue } else { $env:SCOOPBOOT_FAKE = $savedRoot.Fake }
+        Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $tests += $test
+
     # Test 53: profile catalog: profiles.conf parses, base first, every directory and virtual member present
     $test = @{Name = "Profile catalog: profiles.conf, directories, virtual members"; Result = $false}
     try {
@@ -3296,6 +3368,11 @@ $global:PackageHandlers = @(
     @{ Name = 'notepadplusplus';   Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'vscode';            Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'git';               Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'git';               Handler = 'Invoke-GitCredentialHandler'; Description = 'git config --global credential.helper manager' }
+    @{ Name = 'tortoisesvn';       Handler = 'Invoke-RegImportHandler';   Description = 'reg import tortoisesvn-install.reg (context menu, overlays)'; Arguments = @{ File = 'tortoisesvn-install.reg' } }
+    @{ Name = 'windows-terminal';  Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'everything';        Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
+    @{ Name = 'wireshark';         Handler = 'Invoke-NpcapCheckHandler';  Description = 'Npcap driver check (capture needs it; installer from npcap.com, Administrator)' }
     @{ Name = 'python314';         Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-pep-514.reg';  Arguments = @{ File = 'install-pep-514.reg' } }
     @{ Name = 'jetbrains-toolbox'; Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'jetbrains-toolbox.exe'; Process = 'jetbrains-toolbox'; Title = 'JetBrains Toolbox' } }
     @{ Name = 'greenshot';         Handler = 'Invoke-TrayAppHandler';     Description = 'started (tray)';                   Arguments = @{ Exe = 'Greenshot.exe'; Process = 'Greenshot'; Title = 'Greenshot' } }
@@ -3485,6 +3562,48 @@ function Invoke-NcatShimHandler {
                 Write-Host "[WARN] Could not create shim $alias (scoop shim add $alias $ncat)" -ForegroundColor Yellow
             }
         }
+    }
+    return @()
+}
+
+function Invoke-GitCredentialHandler {
+    # Git Credential Manager ships with Git for Windows; the --global setting lives in
+    # the profile and survives Scoop updates (--system would land in apps\git\current)
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $git = "$ScoopDir\apps\git\current\cmd\git.exe"
+    if (-not (Test-Path $git)) { Write-Host "[WARN] git not found, credential helper not set" -ForegroundColor Yellow; return @() }
+    $current = ''
+    try { $current = (& $git config --global credential.helper 2>$null | Out-String).Trim() } catch { }
+    if ($current) {
+        Write-Host "[OK] git credential.helper already set: $current" -ForegroundColor Gray
+        return @()
+    }
+    try {
+        & $git config --global credential.helper manager 2>&1 | Out-Null
+        Write-Host "[OK] git config --global credential.helper manager (Git Credential Manager)" -ForegroundColor Green
+    } catch {
+        Write-Host "[WARN] Could not set git credential.helper: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    return @()
+}
+
+function Test-NpcapInstalled {
+    <#
+    .SYNOPSIS
+        True when the Npcap driver is on the machine (service or System32\Npcap); nmap scans and Wireshark capture need it.
+    #>
+    if (Get-Service -Name npcap -ErrorAction SilentlyContinue) { return $true }
+    return (Test-Path (Join-Path $env:SystemRoot 'System32\Npcap\wpcap.dll'))
+}
+
+function Invoke-NpcapCheckHandler {
+    # Npcap is not in any Scoop bucket (its installer is interactive and needs an
+    # Administrator); nmap and Wireshark run without it but cannot capture or scan
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    if (Test-NpcapInstalled) {
+        Write-Host "[OK] Npcap driver present (nmap scans, Wireshark capture)" -ForegroundColor Gray
+    } else {
+        Write-Host "[INFO] Npcap driver not installed: nmap port scans and Wireshark capture need it. Installer: https://npcap.com/#download (Administrator; 'Install Npcap in WinPcap API-compatible Mode' can stay off)" -ForegroundColor Yellow
     }
     return @()
 }
@@ -3687,6 +3806,29 @@ function Get-WslDistributions {
     return @(ConvertFrom-WslList -Text $raw)
 }
 
+function Invoke-WslCommand {
+    <#
+    .SYNOPSIS
+        Runs wsl.exe with the given arguments, prints its output line by line (wsl.exe writes
+        UTF-16: read as Unicode, NULs and the empty lines in between dropped) and returns the exit code.
+    #>
+    param([string[]]$Arguments)
+    $previousEncoding = [Console]::OutputEncoding
+    $code = 1
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        $raw = (& wsl.exe @Arguments 2>&1 | Out-String) -replace "`0", ''
+        $code = $LASTEXITCODE
+    } catch {
+        $raw = "$($_.Exception.Message)"
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
+    foreach ($line in ($raw -split "`r?`n")) { if ($line.Trim()) { Write-Host "  $($line.TrimEnd())" } }
+    if ($null -eq $code) { $code = 0 }
+    return $code
+}
+
 function Invoke-WslInstall {
     <#
     .SYNOPSIS
@@ -3715,9 +3857,7 @@ function Invoke-WslInstall {
             Write-DryRun "wsl.exe --install -d $Distro --no-launch"
             return $true
         }
-        # Out-Host: inside a function the output would become part of the return value
-        & wsl.exe --install --no-distribution | Out-Host
-        if ($LASTEXITCODE -ne 0) {
+        if ((Invoke-WslCommand -Arguments @('--install', '--no-distribution')) -ne 0) {
             Write-ErrorMsg "wsl --install failed (exit $LASTEXITCODE); on an AVD the VM size must support nested virtualization"
             return $false
         }
@@ -3733,8 +3873,7 @@ function Invoke-WslInstall {
         Write-DryRun "wsl.exe --install -d $Distro --no-launch"
         return $true
     }
-    & wsl.exe --install -d $Distro --no-launch | Out-Host
-    if ($LASTEXITCODE -ne 0) {
+    if ((Invoke-WslCommand -Arguments @('--install', '-d', $Distro, '--no-launch')) -ne 0) {
         Write-ErrorMsg "wsl --install -d $Distro failed (exit $LASTEXITCODE)"
         return $false
     }

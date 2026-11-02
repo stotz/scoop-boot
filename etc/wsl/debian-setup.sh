@@ -105,7 +105,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
         # until the first apt-get update); it is fetched here, which needs root
         # like the installation itself, so that the dry run can answer at all.
         if ! ls /var/lib/apt/lists/*Packages > /dev/null 2>&1; then
-            info "apt package index missing (first run): $SUDO apt-get update"
+            info "apt package index missing (first run): $SUDO apt-get update (quiet, takes a minute)"
             $SUDO apt-get update -qq
         fi
         if ! simulation=$(apt-get -s --no-install-recommends install "${missing[@]}" 2>&1); then
@@ -128,7 +128,9 @@ if [ "${#missing[@]}" -gt 0 ]; then
             read -r -p "Install ${#missing[@]} packages with apt-get? [y/N] " answer < /dev/tty 2> /dev/tty
             [ "$answer" = "y" ] || [ "$answer" = "Y" ] || fail "cancelled"
         fi
+        info "apt-get update (quiet; the index of a fresh distribution takes a minute)"
         $SUDO apt-get update -qq
+        info "apt-get install, ${#missing[@]} package(s) (a few minutes for a long list)"
         # No questions during the install (debconf dialogs, needrestart, changed
         # config files keep the existing version). The variables go through env
         # after sudo: "VAR=x sudo cmd" loses them, sudo resets the environment.

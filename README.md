@@ -29,19 +29,21 @@ step 3 a normal one.
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 New-Item -ItemType Directory -Path C:\usr\bin -Force
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/stotz/scoop-boot/main/bin/scoop-boot.ps1 -OutFile C:\usr\bin\scoop-boot.ps1
+C:\usr\bin\scoop-boot.ps1 --update                        # the signed release: module, wrapper, profiles; check the fingerprint below
 C:\usr\bin\scoop-boot.ps1 --admin-init                    # the developer workplace (profile devel)
 C:\usr\bin\scoop-boot.ps1 --admin-init --profile=devops   # or: infrastructure work
 C:\usr\bin\scoop-boot.ps1 --admin-init --profile=java,c++  # or: pick the parts (see "Profiles")
 ```
 
-`--admin-init` does four things and keeps whatever already exists when run again:
+`--update` fetches everything the script needs (`--admin-init` does it too when the
+module is missing, so a skipped `--update` is not an error). `--admin-init` then does
+four things and keeps whatever already exists when run again:
 
 - creates `C:\usr\etc\environments`, `C:\usr\etc\packages` and the directories listed in
   `C:\usr\etc\scoop-boot.conf` (`DIR=` lines; written with the defaults `C:\tmp`,
   `C:\devl` for repositories and `C:\data` for data and tool caches when the file is
   missing, on the drive of the Scoop root);
-- downloads the current signed release: the library module, the scoop wrapper, the
-  profiles and package lists (see "Releases and `--update`");
+- runs `--update` again (a no-op right after the first one);
 - composes `etc\packages\<host>.txt`, `system.<host>.<user>.env` and
   `user.<host>.<user>.env` from the profiles (`--profile=NAMES`; without it `devel`, or
   what `PROFILE=` in `etc\scoop-boot.conf` says from an earlier run);
@@ -124,15 +126,19 @@ C:\usr\bin\scoop-boot.ps1 --wsl-setup               # normal shell: apt packages
 `--wsl-install` runs `wsl --install --no-distribution` when WSL 2 is missing (restart
 Windows, then run it again) and `wsl --install -d Debian --no-launch` for the
 distribution; `--distro=NAME` takes another one. On an Azure Virtual Desktop WSL 2
-needs a VM size with nested virtualization.
+needs a VM size with nested virtualization (the Entris AVDs have it: Debian 13 installed
+in a minute).
 
 `--wsl-setup` runs `etc\wsl\debian-setup.sh` inside the distribution, reading it and
 the package list from `C:\usr` under `/mnt/c`: the missing packages of
-`etc\packages\debian.txt` with `--no-install-recommends` (sudo asks for the Linux
-password), `fd` and `bat` under their usual names (Debian calls them `fdfind` and
-`batcat`), and Claude Code with the official installer (`https://claude.ai/install.sh`,
-skipped when `claude` exists; `--no-claude` leaves it out). Running it again installs
-only what is missing.
+`etc\packages\<host>.debian.txt` (composed from the profiles; `debian.txt` without a
+host file) with `--no-install-recommends`, `fd` and `bat` under their usual names
+(Debian calls them `fdfind` and `batcat`), and Claude Code with the official installer
+(`https://claude.ai/install.sh`, skipped when `claude` exists; `--no-claude` leaves it
+out). `sudo` asks for the Linux password once; on a fresh distribution the dry run
+fetches the apt index first (quiet, about a minute). The command does not ask again
+before installing, the dry run is the preview. Running it again installs only what is
+missing.
 
 On a WSL someone already uses, `--wsl-setup` only adds: the missing packages, installed
 with `apt-get --no-remove` (apt stops instead of removing a package), no `upgrade`, no
@@ -304,8 +310,13 @@ and are not part of it. A line `# bucket NAME URL` in the list adds a bucket in 
 which is how a private bucket comes in (see [docs/private-bucket.md](docs/private-bucket.md)).
 
 A few packages need more than `scoop install` (the VC++ runtime check, the MSYS2/GCC
-setup, the `nc`/`netcat` shims, registry imports, tray apps). Those steps run only when
-their package is in the list; `--list-packages` marks them.
+setup, the `nc`/`netcat` shims, the context menus of 7-Zip, Notepad++, VS Code, Git,
+TortoiseSVN, Windows Terminal and Everything, Python's PEP 514 registration, Git
+Credential Manager as `credential.helper`, the tray apps, and an Npcap check for
+Wireshark and nmap). Those steps run only when their package is in the list;
+`--list-packages` marks them. Npcap itself is in no bucket: its installer comes from
+`https://npcap.com` and needs an Administrator; without it nmap scans and Wireshark
+capture do not work, everything else does.
 
 ## Caches outside the user profile (optional)
 
@@ -370,11 +381,12 @@ shell whose working directory is inside): those are not Scoop's and are left to 
 
 ## How it works
 
-Two environment files per machine, both in `C:\usr\etc\environments`:
-`system.<host>.<user>.env` is applied at Machine scope by `--admin-setenv` (Administrator) and is
-the source of truth for `JAVA_HOME`, `PATH` order and the rest; `user.<host>.<user>.env`
-is applied at User scope by `--clean-user-scope` (no Administrator) and holds your
-additions. Before the Machine file is applied, every Machine PATH entry inside Scoop's
+Two environment files per machine, both in `C:\usr\etc\environments`, composed from
+the profiles by `--admin-init` (or `--profile`): `system.<host>.<user>.env` is applied
+at Machine scope by `--admin-setenv` (Administrator) and is the source of truth for
+`JAVA_HOME`, `PATH` order and the rest; `user.<host>.<user>.env` is applied at User
+scope by `--clean-user-scope` (no Administrator) and holds your additions. The package
+list of the machine, `etc\packages\<host>.txt`, comes from the same profiles. Before the Machine file is applied, every Machine PATH entry inside Scoop's
 directories is removed, so the file rebuilds the PATH order from scratch.
 `--clean-user-scope` removes Scoop's User-scope entries again (see "Why the scoop
 wrapper"); `--user-install` runs it once as its last step, the wrapper after every

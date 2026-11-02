@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.24.5 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v1.25.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,25 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.24.5
+    Version: 1.25.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v1.25.0:
+    - Post-install steps: TortoiseSVN context menu and overlays
+      (tortoisesvn-install.reg), Windows Terminal and Everything context menus
+      (install-context.reg), git credential.helper manager (--global, once), and
+      an Npcap check for Wireshark and nmap with the installer link when the
+      driver is missing (Npcap is in no bucket; its installer needs an Administrator)
+    - --update names changed files under etc\ with their path and reports the
+      unchanged ones in one line instead of one per profile file
+    - --wsl-install prints wsl.exe's UTF-16 output without the empty lines
+    - debian-setup.sh says what it waits for around apt-get update and install
+      (the quiet index fetch looked like a hang on the AVD, 31.10.)
+    - Self-tests for Test-ScoopOwnedPath, an unresolved $NAME, the log line and
+      --clean-user-scope against the simulated registry (63 tests)
+    - README: the Quick Setup runs --update before --admin-init again, so the
+      fingerprint check is a step one actually types
 
     Changes in v1.24.5:
     - --wsl-setup passes --yes to debian-setup.sh: started through wsl.exe from
@@ -549,7 +565,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.24.5"
+$global:ScriptVersion = "1.25.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
@@ -936,6 +952,7 @@ function Invoke-SelfUpdate {
     # Phase 2: replace what changed, with a backup of the previous version
     $backupDir = Join-Path $global:BaseDir "backups\scripts-$stamp"
     $changed = 0
+    $unchangedQuiet = 0
     foreach ($rel in $files) {
         $name = Split-Path -Leaf $rel
         $target = Join-Path $global:BaseDir ($rel -replace '/', '\')
@@ -945,7 +962,9 @@ function Invoke-SelfUpdate {
         $newVer = (Select-String -Path $download -Pattern 'Version:\s*([0-9.]+)' | Select-Object -First 1)
         $newVer = if ($newVer) { $newVer.Matches[0].Groups[1].Value } else { '' }
         if ($newHash -eq $oldHash) {
-            Write-Host "[OK] $name unchanged ($oldHash$(if ($newVer) { ", $newVer" }))" -ForegroundColor Gray
+            # The scripts are named (they carry the version); the many files under etc\
+            # (profiles, package lists) are counted and reported in one line
+            if ($rel -like 'bin/*') { Write-Host "[OK] $name unchanged ($oldHash$(if ($newVer) { ", $newVer" }))" -ForegroundColor Gray } else { $unchangedQuiet++ }
             continue
         }
         if (Test-Path $target) {
@@ -965,9 +984,12 @@ function Invoke-SelfUpdate {
         if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
         Copy-Item $download $target -Force
         if ($rel -eq 'etc/packages/default.txt') { Set-Content -Path $hashFile -Value $newHash -Encoding ASCII }
-        Write-Success "$name updated: $oldHash -> $newHash$(if ($newVer) { " ($newVer)" })"
+        # Files under etc\ are named with their path: a profile's packages.txt is one of many
+        $shown = if ($rel -like 'bin/*') { $name } else { $rel -replace '/', '\' }
+        Write-Success "$shown updated: $oldHash -> $newHash$(if ($newVer) { " ($newVer)" })"
         $changed++
     }
+    if ($unchangedQuiet -gt 0) { Write-Host "[OK] $unchangedQuiet file(s) under etc\ unchanged (package lists, profiles, wsl)" -ForegroundColor Gray }
     if ($manifest) {
         # The verified manifest stays: --version names the release, --self-test checks the files against it
         Copy-Item (Join-Path $temp 'release.manifest') $localManifest -Force
