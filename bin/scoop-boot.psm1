@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.8
+    Version: 2.0.0
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.8"
+$global:ScriptVersion = "2.0.0"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -4961,6 +4961,7 @@ function Install-ScoopTools {
     # "# bucket NAME URL" lines of the package list (written by --import)
     $failedApps = @()
     $needsAdmin = @()
+    $adminSteps = @()
     $adminCommands = @()
     $installedNow = @()
     $alreadyInstalled = @()
@@ -5048,8 +5049,7 @@ function Install-ScoopTools {
         } elseif (Test-ManifestNeedsAdmin -Text (Get-ManifestText -Package $app)) {
             # The manifest itself insists on an elevated shell (nonportable bucket);
             # nothing this run can do, the command for an Administrator shell comes at the end
-            Write-Host "[ERROR] Not installed: $app (the manifest requires an elevated shell; see the end of the run)" -ForegroundColor Red
-            $failedApps += $app
+            Write-Host "[INFO] Not installed: $app (the manifest requires an elevated shell; see the end of the run)" -ForegroundColor Yellow
             $needsAdmin += $app
         } else {
             Write-Host "[ERROR] Not installed: $app" -ForegroundColor Red
@@ -5060,9 +5060,11 @@ function Install-ScoopTools {
     if ($failedApps.Count -gt 0) {
         Write-Host ""
         Write-Host "[WARN] $($failedApps.Count) package(s) failed: $($failedApps -join ', ')" -ForegroundColor Yellow
-        if (@($failedApps | Where-Object { $needsAdmin -notcontains $_ }).Count -gt 0) {
-            Write-Host "       Retry later with: scoop install <name>; remove leftovers with: scoop uninstall <name>" -ForegroundColor Gray
-        }
+        Write-Host "       Retry later with: scoop install <name>; remove leftovers with: scoop uninstall <name>" -ForegroundColor Gray
+    }
+    if ($needsAdmin.Count -gt 0) {
+        Write-Host ""
+        Write-Host "[INFO] $($needsAdmin.Count) package(s) wait for an elevated shell: $($needsAdmin -join ', ')" -ForegroundColor Yellow
     }
 
     # ============================================================================
@@ -5092,8 +5094,12 @@ function Install-ScoopTools {
             # pacman, scoop) is dropped, as it was when the handlers were inline code
             $typed = @(& $entry.Handler -ScoopDir $ScoopDir -Package $entry.Name -Arguments $arguments |
                 Where-Object { $_ -is [pscustomobject] -and $_.PSObject.TypeNames -contains 'ScoopBoot.Failure' })
-            $handlerFailures = @($typed | ForEach-Object { $_.Text })
-            $adminCommands += @($typed | Where-Object { $_.PSObject.Properties.Name -contains 'AdminCommand' -and $_.AdminCommand } | ForEach-Object { $_.AdminCommand })
+            # A step that only waits for an elevated shell is not a failure of this run:
+            # it goes to the Administrator block at the end, with its command
+            $deferred = @($typed | Where-Object { $_.PSObject.Properties.Name -contains 'AdminCommand' -and $_.AdminCommand })
+            $handlerFailures = @($typed | Where-Object { $deferred -notcontains $_ } | ForEach-Object { $_.Text })
+            $adminSteps += @($deferred | ForEach-Object { $_.Text })
+            $adminCommands += @($deferred | ForEach-Object { $_.AdminCommand })
         } catch {
             Write-Host "[ERROR] Handler for $($entry.Name) failed: $($_.Exception.Message)" -ForegroundColor Red
             $handlerFailures = @("$($entry.Name) (handler)")
@@ -5123,24 +5129,28 @@ function Install-ScoopTools {
     }
 
     Write-Host ""
+    $adminTotal = $needsAdmin.Count + $adminCommands.Count
     if ($failedApps.Count -gt 0) {
         Write-Host "=== Installation Complete with $($failedApps.Count) failure(s) ===" -ForegroundColor Yellow
         Write-Host "Failed: $($failedApps -join ', ')" -ForegroundColor Yellow
-        if ($needsAdmin.Count -gt 0 -or $adminCommands.Count -gt 0) {
-            Write-Host ""
-            Write-Host "$($needsAdmin.Count + $adminCommands.Count) step(s) need an elevated shell (a manifest that checks for Administrator, a .reg file with HKLM keys):" -ForegroundColor Yellow
-            Write-Host "  Open PowerShell as Administrator and run:" -ForegroundColor White
-            foreach ($p in $needsAdmin) { Write-Host "    scoop install $p" -ForegroundColor White }
-            foreach ($c in $adminCommands) { Write-Host "    $c" -ForegroundColor White }
-            Write-Host "  or stay here and let the sudo package ask for elevation (one UAC prompt each):" -ForegroundColor Gray
-            foreach ($p in $needsAdmin) { Write-Host "    sudo scoop install $p" -ForegroundColor Gray }
-            foreach ($c in $adminCommands) { Write-Host "    sudo $c" -ForegroundColor Gray }
-            if ($needsAdmin.Count -gt 0) { Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray }
-        }
+    } elseif ($adminTotal -gt 0) {
+        Write-Host "=== Installation Complete, $adminTotal step(s) left for an Administrator ===" -ForegroundColor Yellow
     } else {
         Write-Host "=== Installation Complete! ===" -ForegroundColor Green
     }
-    Write-Host "Packages: $($installedNow.Count) installed, $($alreadyInstalled.Count) already installed, $($skippedApps.Count) skipped, $($failedApps.Count) failed; User scope: $userScopeChanges change(s)" -ForegroundColor Gray
+    if ($adminTotal -gt 0) {
+        Write-Host ""
+        Write-Host "$adminTotal step(s) need an elevated shell (a manifest that checks for Administrator, a .reg file with HKLM keys):" -ForegroundColor Yellow
+        Write-Host "  Open PowerShell as Administrator and run:" -ForegroundColor White
+        foreach ($p in $needsAdmin) { Write-Host "    scoop install $p" -ForegroundColor White }
+        foreach ($c in $adminCommands) { Write-Host "    $c" -ForegroundColor White }
+        Write-Host "  or stay here and let the sudo package ask for elevation (one UAC prompt each):" -ForegroundColor Gray
+        foreach ($p in $needsAdmin) { Write-Host "    sudo scoop install $p" -ForegroundColor Gray }
+        foreach ($c in $adminCommands) { Write-Host "    sudo $c" -ForegroundColor Gray }
+        if ($needsAdmin.Count -gt 0) { Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray }
+    }
+    $adminSummary = if ($adminTotal -gt 0) { ", $adminTotal for an Administrator" } else { '' }
+    Write-Host "Packages: $($installedNow.Count) installed, $($alreadyInstalled.Count) already installed, $($skippedApps.Count) skipped, $($failedApps.Count) failed$adminSummary; User scope: $userScopeChanges change(s)" -ForegroundColor Gray
     Write-Host ""
     Write-Host "IMPORTANT: Restart your shell!" -ForegroundColor Yellow
     Write-Host ""
@@ -5155,7 +5165,7 @@ function Install-ScoopTools {
         Write-Host "WSL 2 is available: $global:ScoopBootScript --wsl-install (Administrator), then --wsl-setup installs the apt list of your profiles" -ForegroundColor Gray
         Write-Host ""
     }
-    return (New-RunResult -Command 'user-install' -Ok ($failedApps.Count -eq 0) -Data @{ Installed = $installedNow; AlreadyInstalled = $alreadyInstalled; Skipped = $skippedApps; Failed = $failedApps; UserScopeChanges = $userScopeChanges })
+    return (New-RunResult -Command 'user-install' -Ok ($failedApps.Count -eq 0) -Data @{ Installed = $installedNow; AlreadyInstalled = $alreadyInstalled; Skipped = $skippedApps; Failed = $failedApps; NeedsAdmin = ($needsAdmin + $adminSteps); UserScopeChanges = $userScopeChanges })
 }
 
 function Show-PackageList {

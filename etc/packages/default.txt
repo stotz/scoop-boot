@@ -49,16 +49,16 @@ jetbrains-toolbox
 
 # ---- profile cli ----
 # CLI tools
+jid
 jq
 yq
 curl
 ripgrep
 fd
+less
 bat
 fzf
-jid
 btop
-less
 
 # ---- profile svn ----
 # Subversion (TortoiseSVN ships svn.exe and the shell extension)

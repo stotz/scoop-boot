@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v1.26.8 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.0 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,19 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 1.26.8
+    Version: 2.0.0
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.0:
+    - The 2.0 mark: the Quick Setup of a fresh machine (--update, --admin-init
+      --profile=..., --admin-setenv, --user-install, --wsl-install, --wsl-setup)
+      and the reset that takes all of it back (--admin-reset --force --purge)
+      were run back to back on a new AVD on 02.11. with nothing left to do by hand
+    - A package or a .reg import that waits for an elevated shell is no longer a
+      failure of --user-install: "Installation Complete, N step(s) left for an
+      Administrator", the summary line counts them apart, exit 0
+    - cli profile: less before bat and jid before jq (Scoop's "suggests" lines)
 
     Changes in v1.26.8:
     - TortoiseSVN's tortoisesvn-install.reg writes HKCR and HKLM (context menu,
@@ -657,7 +667,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "1.26.8"
+$global:ScriptVersion = "2.0.0"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

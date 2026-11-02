@@ -1,11 +1,11 @@
 # CLI tools
+jid
 jq
 yq
 curl
 ripgrep
 fd
+less
 bat
 fzf
-jid
 btop
-less
