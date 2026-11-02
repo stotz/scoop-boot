@@ -2936,7 +2936,9 @@ JAVA_HOME=C:\java
         $tempLog = [System.IO.Path]::GetTempFileName()
         $global:ScoopBootLogFile = $tempLog
         Write-ScoopBootLogLine -Text "[WARN] something"
-        Write-ScoopBootLogLine -Text "`e[32m[OK] green`e[0m"
+        # [char]27 instead of `e: Windows PowerShell 5.1 has no `e escape (the CI, 02.11.)
+        $esc = [char]27
+        Write-ScoopBootLogLine -Text "$esc[32m[OK] green$esc[0m"
         Write-ScoopBootLogLine -Text "progress 10%`rprogress 100%"
         Write-ScoopBootLogLine -Text "Download: [#abc 50%]"
         Write-ScoopBootLogLine -Text "   "
