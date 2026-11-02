@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.4
+    Version: 1.26.5
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.4"
+$global:ScriptVersion = "1.26.5"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3149,6 +3149,9 @@ JAVA_HOME=C:\java
             @("$classes\Toolbox.Rider.52bccd60\shell\open\command", "$classes\Toolbox.Rider.52bccd60"),
             @("$classes\.py\shell\edit\command", "$classes\.py\shell\edit"),
             @("$classes\SystemFileAssociations\text\shell\npp\command", "$classes\SystemFileAssociations\text\shell\npp"),
+            @("$classes\AppUserModelId\Firefox-45A7E342", "$classes\AppUserModelId\Firefox-45A7E342"),
+            @("$classes\MIME\Database\Content Type\application/x-foo", "$classes\MIME\Database\Content Type\application/x-foo"),
+            @("$classes\AppUserModelId", $null),
             @("$classes\Directory\shell", $null),
             @("Software\Other\x", $null)
         )
@@ -5336,7 +5339,12 @@ $global:RegistryStructuralNames = @(
     'SystemFileAssociations', 'Applications', 'CLSID', 'Interface', 'TypeLib', 'AppID',
     'shell', 'shellex', 'ContextMenuHandlers', 'DragDropHandlers', 'PropertySheetHandlers',
     'CopyHookHandlers', 'ColumnHandlers', 'IconHandler', 'DataHandler', 'DropHandler',
-    'OpenWithProgids', 'OpenWithList', 'DefaultIcon', 'Wow6432Node'
+    'OpenWithProgids', 'OpenWithList', 'DefaultIcon', 'Wow6432Node',
+    # Containers with one child per application or type: the child is the unit, never
+    # the container (AppUserModelId holds the toast registrations of every user-installed
+    # app; the reset on the AVD took the whole key for one Firefox entry, 02.11.)
+    'AppUserModelId', 'MIME', 'Database', 'Content Type', 'Protocols', 'Handler', 'Filter',
+    'Record', 'ActivatableClasses', 'PackagedCom', 'Package'
 )
 # Autostart values (the Toolbox registers itself here) are removed one value at a time
 $global:ScoopRegistryRunKey = 'Software\Microsoft\Windows\CurrentVersion\Run'
@@ -6025,7 +6033,9 @@ function Invoke-ScoopReset {
     if (-not $KeepPersist) { $scanDirs += "$ScoopDir\persist" }
     $scanDirs = @($scanDirs | Where-Object { Test-Path $_ })
     Write-Host ""
-    Write-Host "[INFO] Scanning for ALL processes with open handles to Scoop's directories ($(($scanDirs | ForEach-Object { Split-Path -Leaf $_ }) -join ', '))..." -ForegroundColor Gray
+    $scanNames = @($scanDirs | ForEach-Object { Split-Path -Leaf $_ })
+    if ($scanNames.Count -eq 0) { $scanNames = @('none present') }
+    Write-Host "[INFO] Scanning for ALL processes with open handles to Scoop's directories ($($scanNames -join ', '))..." -ForegroundColor Gray
     Set-ScoopBootTitle -Text "scoop-boot reset processes"
     # A run that removed the junctions but could not delete apps\ leaves
     # sysinternals\current gone; the versioned directory still has handle64.exe
