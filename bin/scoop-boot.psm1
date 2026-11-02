@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.3
+    Version: 1.26.4
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.3"
+$global:ScriptVersion = "1.26.4"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -5445,7 +5445,9 @@ function Find-ScoopRegistryReferences {
             foreach ($child in @($key.GetSubKeyNames())) { $stack.Push("$path\$child") }
         } finally { $key.Close() }
     }
-    return ,$found
+    # Plain return: the array is enumerated into the pipeline and the caller's @()
+    # collects it; ",$found" handed the whole array over as one element
+    return $found
 }
 
 function Get-ScoopRegistryValueTest {
