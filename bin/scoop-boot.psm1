@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 1.26.7
+    Version: 1.26.8
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "1.26.7"
+$global:ScriptVersion = "1.26.8"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3225,6 +3225,32 @@ JAVA_HOME=C:\java
     }
     $tests += $test
 
+    # Test 61: .reg files that need an elevated shell (HKLM/HKCR keys, also deletions)
+    # are told apart from HKCU-only files; the uninstall file of the handler table is
+    # named for every handler whose install file needs one
+    $test = @{Name = "Reg import: HKLM/HKCR files need an elevated shell, HKCU files do not"; Result = $false}
+    try {
+        $regDir = Join-Path ([IO.Path]::GetTempPath()) "scoopboot-reg-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Path $regDir -Force | Out-Null
+        $hkcu = Join-Path $regDir 'user.reg'
+        $hklm = Join-Path $regDir 'machine.reg'
+        $hkcr = Join-Path $regDir 'classes.reg'
+        [IO.File]::WriteAllLines($hkcu, @('Windows Registry Editor Version 5.00', '', '[HKEY_CURRENT_USER\Software\Classes\*\shell\x]', '@="y"'))
+        [IO.File]::WriteAllLines($hklm, @('Windows Registry Editor Version 5.00', '', '[HKEY_CURRENT_USER\Software\x]', '[HKEY_LOCAL_MACHINE\SOFTWARE\x]'))
+        [IO.File]::WriteAllLines($hkcr, @('Windows Registry Editor Version 5.00', '', '[-HKEY_CLASSES_ROOT\*\shellex\ContextMenuHandlers\x]'))
+        $filesOk = (-not (Test-RegFileNeedsAdmin -Path $hkcu)) -and (Test-RegFileNeedsAdmin -Path $hklm) -and (Test-RegFileNeedsAdmin -Path $hkcr) -and
+            -not (Test-RegFileNeedsAdmin -Path (Join-Path $regDir 'missing.reg'))
+        $svn = $global:PackageHandlers | Where-Object { $_.Name -eq 'tortoisesvn' } | Select-Object -First 1
+        $tableOk = ($null -ne $svn) -and $svn.Arguments.ContainsKey('Uninstall') -and ($svn.Arguments.Uninstall -eq 'tortoisesvn-uninstall.reg')
+        $failure = New-HandlerFailure -Text 'x' -AdminCommand 'reg import "C:\x.reg"'
+        $failureOk = ($failure.PSObject.TypeNames -contains 'ScoopBoot.Failure') -and ($failure.AdminCommand -eq 'reg import "C:\x.reg"') -and
+            ((New-HandlerFailure -Text 'y').AdminCommand -eq '')
+        Remove-Item -Path $regDir -Recurse -Force -ErrorAction SilentlyContinue
+        $test.Result = $filesOk -and $tableOk -and $failureOk
+        if (-not $test.Result) { Write-Host "       files=$filesOk table=$tableOk failure=$failureOk" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    $tests += $test
+
     # Test 60: the registry walk of --admin-reset on the real HKCU (read-only), with the
     # same value tests the reset uses. Covers Windows PowerShell 5.1 in CI: a closure
     # there did not see the module's functions, and @() around a Generic.List threw
@@ -3505,7 +3531,7 @@ $global:PackageHandlers = @(
     @{ Name = 'vscode';            Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'git';               Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'git';               Handler = 'Invoke-GitCredentialHandler'; Description = 'git config --global credential.helper manager' }
-    @{ Name = 'tortoisesvn';       Handler = 'Invoke-RegImportHandler';   Description = 'reg import tortoisesvn-install.reg (context menu, overlays)'; Arguments = @{ File = 'tortoisesvn-install.reg' } }
+    @{ Name = 'tortoisesvn';       Handler = 'Invoke-RegImportHandler';   Description = 'reg import tortoisesvn-install.reg (context menu, overlays; HKLM, needs an Administrator)'; Arguments = @{ File = 'tortoisesvn-install.reg'; Uninstall = 'tortoisesvn-uninstall.reg' } }
     @{ Name = 'windows-terminal';  Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' }; Optional = $true }
     @{ Name = 'everything';        Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'wireshark';         Handler = 'Invoke-NpcapCheckHandler';  Description = 'Npcap driver check (capture needs it; installer from npcap.com, Administrator)' }
@@ -3520,8 +3546,25 @@ function New-HandlerFailure {
     .SYNOPSIS
         A failure a handler reports; typed, so that stray pipeline output of the tools it runs (pacman, scoop) is told apart and dropped.
     #>
-    param([string]$Text)
-    return [pscustomobject]@{ PSTypeName = 'ScoopBoot.Failure'; Text = $Text }
+    param([string]$Text, [string]$AdminCommand = '')
+    # AdminCommand: what an elevated shell has to run to finish this step (the
+    # end-of-run summary lists it next to the packages that need an Administrator)
+    return [pscustomobject]@{ PSTypeName = 'ScoopBoot.Failure'; Text = $Text; AdminCommand = $AdminCommand }
+}
+
+function Test-RegFileNeedsAdmin {
+    <#
+    .SYNOPSIS
+        True when a .reg file writes below HKEY_LOCAL_MACHINE or HKEY_CLASSES_ROOT: a
+        normal shell cannot import it (HKCR writes land in HKLM\Software\Classes).
+        TortoiseSVN's install.reg registers its overlays and context menu there.
+    #>
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    foreach ($line in [IO.File]::ReadAllLines($Path)) {
+        if ($line -match '^\[-?(HKEY_LOCAL_MACHINE|HKLM|HKEY_CLASSES_ROOT|HKCR)\\') { return $true }
+    }
+    return $false
 }
 
 function Get-PackageHandler {
@@ -3754,12 +3797,22 @@ function Invoke-RegImportHandler {
         Write-Host "[SKIP] $Package : $($Arguments.SkipIfExists) present, $($Arguments.File) not imported (context menu already registered)" -ForegroundColor DarkGray
         return @()
     }
-    if (Test-Path $regPath) {
-        Start-Process reg -ArgumentList "import `"$regPath`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
-        Write-Host "[OK] Imported: $Package ($($Arguments.File))" -ForegroundColor Green
-    } else {
+    if (-not (Test-Path $regPath)) {
         Write-Host "[SKIP] $Package has no $($Arguments.File)" -ForegroundColor DarkGray
+        return @()
     }
+    # A file with HKLM or HKCR keys fails in a normal shell ("Error accessing the
+    # registry") after writing part of it; it is left to an elevated shell as a whole
+    if ((Test-RegFileNeedsAdmin -Path $regPath) -and -not (Test-AdminRights)) {
+        Write-Host "[INFO] $Package : $($Arguments.File) writes HKLM/HKCR keys, an elevated shell has to import it (see the end of the run)" -ForegroundColor Yellow
+        return (New-HandlerFailure -Text "$Package ($($Arguments.File) needs an elevated shell)" -AdminCommand "reg import `"$regPath`"")
+    }
+    $process = Start-Process reg -ArgumentList "import `"$regPath`"" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+    if ($null -ne $process -and $process.ExitCode -ne 0) {
+        Write-Host "[ERROR] reg import failed for $Package ($($Arguments.File), exit $($process.ExitCode))" -ForegroundColor Red
+        return (New-HandlerFailure -Text "$Package ($($Arguments.File))")
+    }
+    Write-Host "[OK] Imported: $Package ($($Arguments.File))" -ForegroundColor Green
     return @()
 }
 
@@ -4908,6 +4961,7 @@ function Install-ScoopTools {
     # "# bucket NAME URL" lines of the package list (written by --import)
     $failedApps = @()
     $needsAdmin = @()
+    $adminCommands = @()
     $installedNow = @()
     $alreadyInstalled = @()
     $skippedApps = @()
@@ -5036,9 +5090,10 @@ function Install-ScoopTools {
         try {
             # Only typed failures count; other pipeline output of the handler (stdout of
             # pacman, scoop) is dropped, as it was when the handlers were inline code
-            $handlerFailures = @(& $entry.Handler -ScoopDir $ScoopDir -Package $entry.Name -Arguments $arguments |
-                Where-Object { $_ -is [pscustomobject] -and $_.PSObject.TypeNames -contains 'ScoopBoot.Failure' } |
-                ForEach-Object { $_.Text })
+            $typed = @(& $entry.Handler -ScoopDir $ScoopDir -Package $entry.Name -Arguments $arguments |
+                Where-Object { $_ -is [pscustomobject] -and $_.PSObject.TypeNames -contains 'ScoopBoot.Failure' })
+            $handlerFailures = @($typed | ForEach-Object { $_.Text })
+            $adminCommands += @($typed | Where-Object { $_.PSObject.Properties.Name -contains 'AdminCommand' -and $_.AdminCommand } | ForEach-Object { $_.AdminCommand })
         } catch {
             Write-Host "[ERROR] Handler for $($entry.Name) failed: $($_.Exception.Message)" -ForegroundColor Red
             $handlerFailures = @("$($entry.Name) (handler)")
@@ -5071,14 +5126,16 @@ function Install-ScoopTools {
     if ($failedApps.Count -gt 0) {
         Write-Host "=== Installation Complete with $($failedApps.Count) failure(s) ===" -ForegroundColor Yellow
         Write-Host "Failed: $($failedApps -join ', ')" -ForegroundColor Yellow
-        if ($needsAdmin.Count -gt 0) {
+        if ($needsAdmin.Count -gt 0 -or $adminCommands.Count -gt 0) {
             Write-Host ""
-            Write-Host "$($needsAdmin.Count) package(s) need an elevated shell (their manifest checks for Administrator before installing):" -ForegroundColor Yellow
+            Write-Host "$($needsAdmin.Count + $adminCommands.Count) step(s) need an elevated shell (a manifest that checks for Administrator, a .reg file with HKLM keys):" -ForegroundColor Yellow
             Write-Host "  Open PowerShell as Administrator and run:" -ForegroundColor White
             foreach ($p in $needsAdmin) { Write-Host "    scoop install $p" -ForegroundColor White }
+            foreach ($c in $adminCommands) { Write-Host "    $c" -ForegroundColor White }
             Write-Host "  or stay here and let the sudo package ask for elevation (one UAC prompt each):" -ForegroundColor Gray
             foreach ($p in $needsAdmin) { Write-Host "    sudo scoop install $p" -ForegroundColor Gray }
-            Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray
+            foreach ($c in $adminCommands) { Write-Host "    sudo $c" -ForegroundColor Gray }
+            if ($needsAdmin.Count -gt 0) { Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray }
         }
     } else {
         Write-Host "=== Installation Complete! ===" -ForegroundColor Green
@@ -6282,6 +6339,31 @@ function Invoke-ScoopReset {
             $failedOutside += @(Uninstall-ScoopMsiInstalls -Products $msiProducts)
         }
         $residues = @(Get-ScoopAppResidues -ScoopDir $ScoopDir -KeepPersist:$KeepPersist)
+    }
+
+    # 2c. Registry entries that a handler imported with an elevated shell (TortoiseSVN:
+    # overlays and context menu under HKLM/HKCR, outside the HKCU walk of step 8):
+    # the package ships an uninstall .reg, imported here while the file still exists
+    Write-Host ""
+    Write-Host ">>> Importing the uninstall .reg files of the packages (HKLM/HKCR entries of Step 4)..." -ForegroundColor Cyan
+    $uninstallRegs = @($global:PackageHandlers | Where-Object { $_.ContainsKey('Arguments') -and $_.Arguments.ContainsKey('Uninstall') } |
+        ForEach-Object { @{ Package = $_.Name; Path = "$ScoopDir\apps\$($_.Name)\current\$($_.Arguments.Uninstall)" } } |
+        Where-Object { Test-Path -LiteralPath $_.Path })
+    if ($uninstallRegs.Count -eq 0) {
+        Write-Host "[OK] No uninstall .reg file present" -ForegroundColor Gray
+    } elseif (-not $realWindows) {
+        Write-Host "[FAKE] reg import skipped: $(($uninstallRegs | ForEach-Object { $_.Package }) -join ', ')" -ForegroundColor DarkCyan
+    } else {
+        foreach ($reg in $uninstallRegs) {
+            $process = Start-Process reg -ArgumentList "import `"$($reg.Path)`"" -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+            if ($null -ne $process -and $process.ExitCode -eq 0) {
+                Write-Host "[OK] Imported: $($reg.Package) ($(Split-Path -Leaf $reg.Path))" -ForegroundColor Green
+            } else {
+                $code = if ($null -ne $process) { $process.ExitCode } else { '?' }
+                Write-Host "[WARN] reg import failed for $($reg.Package) ($(Split-Path -Leaf $reg.Path), exit $code)" -ForegroundColor Yellow
+                $failedOutside += "$($reg.Package): reg import `"$($reg.Path)`""
+            }
+        }
     }
 
     # 3./4. Clean User and Machine environment variables

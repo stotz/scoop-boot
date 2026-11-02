@@ -317,7 +317,10 @@ TortoiseSVN, Windows Terminal and Everything, Python's PEP 514 registration, Git
 Credential Manager as `credential.helper`, the tray apps, and an Npcap check for
 Wireshark and nmap). Those steps run only when their package is in the list;
 `--list-packages` marks them. The 7-Zip context menu is left alone when 7-Zip is
-installed in `Program Files` (the image's copy already owns it). Npcap itself is in no bucket: its installer comes from
+installed in `Program Files` (the image's copy already owns it). TortoiseSVN's
+context menu and icon overlays live under HKLM, so that import needs an Administrator:
+`--user-install` lists the `reg import` command at the end (or `sudo reg import ...`
+from the normal shell), and `--admin-reset` imports the package's uninstall file. Npcap itself is in no bucket: its installer comes from
 `https://npcap.com` and needs an Administrator; without it nmap scans and Wireshark
 capture do not work, everything else does.
 
