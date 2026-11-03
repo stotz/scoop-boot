@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.1 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.2 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,15 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.1
+    Version: 2.0.2
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.2:
+    - base profile: PSModulePath+=$USR\modules (Machine). 2.0.1 sweeps Scoop's
+      modules entry out of the User scope like every other Scoop entry, which
+      left gsudoModule unreachable; the system file is the source for it now,
+      as for the PATH entries (--profile=... --force, then --admin-setenv)
 
     Changes in v2.0.1:
     - Bootstrap installs gsudo instead of the sudo package (sudo.ps1 of 2020):
@@ -676,7 +682,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.1"
+$global:ScriptVersion = "2.0.2"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
