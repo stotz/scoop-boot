@@ -3,7 +3,7 @@
 # per line in install order; "#" starts a comment; "bucket/name" is passed to Scoop as
 # written. --admin-init and --profile compose etc\packages\<hostname>.txt from the
 # profiles under etc\profiles (lower case host name): it replaces this file completely
-# and is never touched by --update. Bootstrap packages (7zip, git, aria2, sudo,
+# and is never touched by --update. Bootstrap packages (7zip, git, aria2, gsudo,
 # innounp, dark, lessmsi, wget, cacert) are installed before this list and are not
 # listed here. A line "# bucket NAME URL" adds a bucket in Step 2 before the packages
 # (--import writes such lines). Packages with a post-install step (Step 4):

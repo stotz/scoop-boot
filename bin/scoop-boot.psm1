@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 2.0.0
+    Version: 2.0.1
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "2.0.0"
+$global:ScriptVersion = "2.0.1"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -45,7 +45,7 @@ $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 # Subdirectories of the base directory that belong to Scoop. Only these are
 # cleaned up, swept from PATH or deleted; everything else under the base
 # directory (bin, etc, or whatever the user installs there) is not Scoop's.
-$global:ScoopOwnedDirs = @('apps', 'buckets', 'cache', 'persist', 'shims', 'global')
+$global:ScoopOwnedDirs = @('apps', 'buckets', 'cache', 'persist', 'shims', 'global', 'modules')
 
 # ============================================================================
 # LOGGING
@@ -1145,9 +1145,16 @@ function Invoke-Bootstrap {
 
     # Install recommended tools
     Write-Info "Installing recommended tools for optimal performance..."
+    # gsudo replaces the sudo.ps1 of the sudo package (2020): same "sudo" command (shim
+    # alias), plus a credentials cache and elevation of a whole command line. Both ship
+    # a "sudo" shim, so the old package goes first on a machine that still has it.
+    if ((Test-Path (Join-Path $global:BaseDir 'apps\sudo')) -and -not (Test-Path (Join-Path $global:BaseDir 'apps\gsudo\current'))) {
+        Write-Info "Replacing the sudo package (sudo.ps1) with gsudo..."
+        & scoop uninstall sudo 2>&1 | Out-Null
+    }
     $recommendedTools = @(
         @{Name = 'aria2'; Desc = '5x faster downloads'},
-        @{Name = 'sudo'; Desc = 'admin operations'},
+        @{Name = 'gsudo'; Desc = 'elevation with a sudo alias and a credentials cache'},
         @{Name = 'innounp'; Desc = 'Inno Setup support'},
         @{Name = 'dark'; Desc = 'WiX Toolset support'},
         @{Name = 'lessmsi'; Desc = 'MSI extraction'},
@@ -1432,19 +1439,24 @@ function Remove-ScoopPathEntries {
         subdirectories (other software installed under the base directory) are
         never touched.
     #>
-    param([string]$Scope, [bool]$DryRun = $false)
+    param([string]$Scope, [bool]$DryRun = $false, [string]$Name = 'Path')
 
-    $current = Get-EnvValue -Name 'Path' -Scope $Scope
+    # -Name PSModulePath: Scoop prepends <root>\modules for a manifest with "psmodule"
+    # (gsudo) the same way, into the User scope
+    $current = Get-EnvValue -Name $Name -Scope $Scope
     if (-not $current) { return 0 }
     $parts = @($current -split ';' | Where-Object { $_ })
     $keep = @($parts | Where-Object { -not (Test-ScoopOwnedPath $_) })
     $removed = @($parts | Where-Object { Test-ScoopOwnedPath $_ })
+    $label = if ($Name -ieq 'Path') { 'PATH' } else { $Name }
     foreach ($entry in $removed) {
-        if ($DryRun) { Write-DryRun "Remove from PATH: $entry [$Scope]" }
-        else { Write-Success "Removed from PATH: $entry [$Scope]" }
+        if ($DryRun) { Write-DryRun "Remove from ${label}: $entry [$Scope]" }
+        else { Write-Success "Removed from ${label}: $entry [$Scope]" }
     }
     if ($removed.Count -gt 0) {
-        Set-EnvValue -Name 'Path' -Value ($keep -join ';') -Scope $Scope -DryRun $DryRun
+        if ($keep.Count -gt 0) { Set-EnvValue -Name $Name -Value ($keep -join ';') -Scope $Scope -DryRun $DryRun }
+        elseif ($Name -ieq 'Path') { Set-EnvValue -Name $Name -Value '' -Scope $Scope -DryRun $DryRun }
+        else { Set-EnvValue -Name $Name -Value $null -Scope $Scope -DryRun $DryRun }
     }
     return $removed.Count
 }
@@ -1489,6 +1501,7 @@ function Invoke-CleanUserScope {
 
     $changes = 0
     $changes += Remove-ScoopPathEntries -Scope 'User' -DryRun $DryRun
+    $changes += Remove-ScoopPathEntries -Scope 'User' -DryRun $DryRun -Name 'PSModulePath'
 
     $managed = Get-SystemManagedVariableNames
     foreach ($name in $managed) {
@@ -2922,7 +2935,7 @@ JAVA_HOME=C:\java
     $test = @{Name = "Test-ScoopOwnedPath: apps and friends, separators, look-alike roots"; Result = $false}
     try {
         $root = $global:BaseDir
-        $test.Result = (Test-ScoopOwnedPath "$root\apps\git\current") -and (Test-ScoopOwnedPath "$root\shims") -and
+        $test.Result = (Test-ScoopOwnedPath "$root\apps\git\current") -and (Test-ScoopOwnedPath "$root\shims") -and (Test-ScoopOwnedPath "$root\modules") -and
             (Test-ScoopOwnedPath ("$root\persist\x" -replace '\\', '/')) -and
             -not (Test-ScoopOwnedPath "$root\bin\scoop-boot.ps1") -and -not (Test-ScoopOwnedPath "$root\etc") -and
             -not (Test-ScoopOwnedPath "${root}x\apps\y") -and -not (Test-ScoopOwnedPath "$root\appsx") -and
@@ -3225,6 +3238,26 @@ JAVA_HOME=C:\java
     }
     $tests += $test
 
+    # Test 62: the User sweep also takes Scoop's modules entry out of PSModulePath (gsudo's
+    # psmodule), keeps foreign entries and removes the variable when nothing is left
+    $test = @{Name = "Clean user scope: PSModulePath entries of Scoop's modules directory"; Result = $false}
+    if (-not (Test-ScoopBootFake)) {
+        $test.Result = $true; $test.Name += " (skipped: not in fake mode)"
+    } else {
+        try {
+            $root = $global:BaseDir -replace '/', '\'
+            Set-RegistryEnvironmentVariable -Name 'PSModulePath' -Value "$root\modules;C:\mods" -Scope 'User'
+            $first = Remove-ScoopPathEntries -Scope 'User' -Name 'PSModulePath' 6> $null
+            $afterFirst = Get-RegistryEnvironmentVariable -Name 'PSModulePath' -Scope 'User'
+            Set-RegistryEnvironmentVariable -Name 'PSModulePath' -Value "$root\modules" -Scope 'User'
+            $second = Remove-ScoopPathEntries -Scope 'User' -Name 'PSModulePath' 6> $null
+            $afterSecond = Get-RegistryEnvironmentVariable -Name 'PSModulePath' -Scope 'User'
+            $test.Result = ($first -eq 1) -and ($afterFirst -eq 'C:\mods') -and ($second -eq 1) -and [string]::IsNullOrEmpty($afterSecond)
+            if (-not $test.Result) { Write-Host "       first=$first [$afterFirst] second=$second [$afterSecond]" -ForegroundColor Yellow }
+        } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    $tests += $test
+
     # Test 61: .reg files that need an elevated shell (HKLM/HKCR keys, also deletions)
     # are told apart from HKCU-only files; the uninstall file of the handler table is
     # named for every handler whose install file needs one
@@ -3511,7 +3544,7 @@ function Invoke-Import {
 # those packages so that -ListPackages can show them and the self-check can warn
 # about a handler whose package is missing from the list.
 # Installed by the bootstrap (Step 1) before any list is read; never listed in a package file
-$global:BootstrapPackages = @('7zip', 'git', 'aria2', 'sudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
+$global:BootstrapPackages = @('7zip', 'git', 'aria2', 'gsudo', 'innounp', 'dark', 'lessmsi', 'wget', 'cacert')
 
 # ----------------------------------------------------------------------------
 # Post-install handlers: one entry per package that needs more than "scoop install".
@@ -4996,7 +5029,7 @@ function Install-ScoopTools {
     Write-Host "This will take 15-30 minutes depending on internet speed." -ForegroundColor Gray
     Write-Host ""
 
-    # Bootstrap (Step 1) installed 7zip, git, aria2, sudo, innounp, dark, lessmsi, wget,
+    # Bootstrap (Step 1) installed 7zip, git, aria2, gsudo, innounp, dark, lessmsi, wget,
     # cacert and the main and extras buckets. Everything else comes from the package list.
     $packageFile = Get-PackageListFile
     if (-not $packageFile) {
@@ -5144,7 +5177,7 @@ function Install-ScoopTools {
         Write-Host "  Open PowerShell as Administrator and run:" -ForegroundColor White
         foreach ($p in $needsAdmin) { Write-Host "    scoop install $p" -ForegroundColor White }
         foreach ($c in $adminCommands) { Write-Host "    $c" -ForegroundColor White }
-        Write-Host "  or stay here and let the sudo package ask for elevation (one UAC prompt each):" -ForegroundColor Gray
+        Write-Host "  or stay here and let gsudo ask for elevation (UAC prompt, cached for a while):" -ForegroundColor Gray
         foreach ($p in $needsAdmin) { Write-Host "    sudo scoop install $p" -ForegroundColor Gray }
         foreach ($c in $adminCommands) { Write-Host "    sudo $c" -ForegroundColor Gray }
         if ($needsAdmin.Count -gt 0) { Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray }
@@ -5184,7 +5217,7 @@ function Show-PackageList {
     Write-Host "Package list: $packageFile" -ForegroundColor Cyan
     $profileNames = (Get-ScoopBootConfig).Profile
     if ($profileNames) { Write-Host "Profiles: $profileNames (PROFILE in etc\scoop-boot.conf)" -ForegroundColor Gray }
-    Write-Host "Bootstrap (always, Step 1): 7zip git aria2 sudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
+    Write-Host "Bootstrap (always, Step 1): 7zip git aria2 gsudo innounp dark lessmsi wget cacert; buckets main extras" -ForegroundColor Gray
     Write-Host "Buckets added in Step 2: java versions$(@(Read-PackageListBuckets -Path $packageFile | ForEach-Object { ' ' + $_.Name }) -join '')" -ForegroundColor Gray
     Write-Host ""
     $n = 0
@@ -6492,7 +6525,8 @@ function Invoke-ScoopReset {
         @{ Path = "$ScoopDir\apps"; Desc = "Applications" },
         @{ Path = "$ScoopDir\buckets"; Desc = "Buckets" },
         @{ Path = "$ScoopDir\cache"; Desc = "Cache" },
-        @{ Path = "$ScoopDir\shims"; Desc = "Shims" }
+        @{ Path = "$ScoopDir\shims"; Desc = "Shims" },
+        @{ Path = "$ScoopDir\modules"; Desc = "Modules (PowerShell modules of manifests, gsudo)" }
     )
 
     if (-not $KeepPersist) {

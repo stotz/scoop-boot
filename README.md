@@ -307,8 +307,9 @@ the rule and exclusion lists; `--asr-report` still works as an alias.
 comments, `bucket/name` allowed. The host file replaces `default.txt` completely and is
 never touched by `--update`; `--profile` and `--import` write it, editing it by hand
 works the same way. The
-bootstrap packages (7-Zip, Git, aria2 and the extractors) are installed before the list
-and are not part of it. A line `# bucket NAME URL` in the list adds a bucket in Step 2,
+bootstrap packages (7-Zip, Git, aria2, gsudo and the extractors) are installed before
+the list and are not part of it. gsudo provides the `sudo` command used below, with a
+credentials cache, so a handful of elevated commands in a row need one UAC prompt. A line `# bucket NAME URL` in the list adds a bucket in Step 2,
 which is how a private bucket comes in (see [docs/private-bucket.md](docs/private-bucket.md)).
 
 A few packages need more than `scoop install` (the VC++ runtime check, the MSYS2/GCC
