@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 2.0.2
+    Version: 2.0.3
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "2.0.2"
+$global:ScriptVersion = "2.0.3"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -3559,6 +3559,7 @@ $global:PackageHandlers = @(
     @{ Name = 'vcredist2022';      Handler = 'Invoke-VcRuntimeHandler';   Description = 'skipped when the VC++ runtime is present; runtime verified' }
     @{ Name = 'msys2';             Handler = 'Invoke-GccHandler';         Description = 'pacman -Syu, GCC (UCRT64), compile-and-run smoke test' }
     @{ Name = 'nmap';              Handler = 'Invoke-NcatShimHandler';    Description = 'shims nc and netcat -> ncat.exe' }
+    @{ Name = 'gsudo';             Handler = 'Invoke-ShimHandler';        Description = 'shim gsudo -> gsudo.exe (the manifest shims only the sudo alias)'; Arguments = @{ Shim = 'gsudo'; Exe = 'apps\gsudo\current\gsudo.exe' } }
     @{ Name = '7zip';              Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg (skipped when 7-Zip is installed in Program Files)'; Arguments = @{ File = 'install-context.reg'; SkipIfExists = 'C:\Program Files\7-Zip\7zFM.exe' } }
     @{ Name = 'notepadplusplus';   Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
     @{ Name = 'vscode';            Handler = 'Invoke-RegImportHandler';   Description = 'reg import install-context.reg';  Arguments = @{ File = 'install-context.reg' } }
@@ -3751,6 +3752,30 @@ function Invoke-GccHandler {
         Write-Host "NOTE: Use ucrt64.exe (modern), NOT msys2.exe (legacy)" -ForegroundColor Yellow
     }
     return $failed
+}
+
+function Invoke-ShimHandler {
+    # A shim for an executable the manifest does not shim (gsudo: bin has only the
+    # sudo alias, gsudo.exe is reached through env_add_path, which Step 5 sweeps).
+    # Arguments: Shim (name), Exe (path below the Scoop root)
+    param([string]$ScoopDir, [string]$Package, [hashtable]$Arguments)
+    $exe = Join-Path $ScoopDir $Arguments.Exe
+    $shim = $Arguments.Shim
+    if (-not (Test-Path $exe)) {
+        Write-Host "[WARN] $Package : $exe not found, skipping the $shim shim" -ForegroundColor Yellow
+        return @()
+    }
+    if (Test-Path "$ScoopDir\shims\$shim.exe") {
+        Write-Host "[OK] Shim already present: $shim -> $(Split-Path -Leaf $exe)" -ForegroundColor Gray
+        return @()
+    }
+    scoop shim add $shim $exe 2>&1 | Out-Null
+    if (Test-Path "$ScoopDir\shims\$shim.exe") {
+        Write-Host "[OK] Shim created: $shim -> $(Split-Path -Leaf $exe)" -ForegroundColor Green
+        return @()
+    }
+    Write-Host "[WARN] Could not create shim $shim (scoop shim add $shim $exe)" -ForegroundColor Yellow
+    return (New-HandlerFailure -Text "$Package ($shim shim)")
 }
 
 function Invoke-NcatShimHandler {
