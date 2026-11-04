@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 2.0.3
+    Version: 2.0.4
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "2.0.3"
+$global:ScriptVersion = "2.0.4"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -5202,7 +5202,7 @@ function Install-ScoopTools {
         Write-Host "  Open PowerShell as Administrator and run:" -ForegroundColor White
         foreach ($p in $needsAdmin) { Write-Host "    scoop install $p" -ForegroundColor White }
         foreach ($c in $adminCommands) { Write-Host "    $c" -ForegroundColor White }
-        Write-Host "  or stay here and let gsudo ask for elevation (UAC prompt, cached for a while):" -ForegroundColor Gray
+        Write-Host "  or stay here and let gsudo ask for elevation (one UAC prompt each; gsudo cache on = one for the session):" -ForegroundColor Gray
         foreach ($p in $needsAdmin) { Write-Host "    sudo scoop install $p" -ForegroundColor Gray }
         foreach ($c in $adminCommands) { Write-Host "    sudo $c" -ForegroundColor Gray }
         if ($needsAdmin.Count -gt 0) { Write-Host "  The scoop wrapper cleans the User scope afterwards either way." -ForegroundColor Gray }

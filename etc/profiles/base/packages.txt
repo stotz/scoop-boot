@@ -5,3 +5,6 @@ vcredist2022
 openssh
 gh
 lazygit
+
+# PowerShell 7 (Windows PowerShell 5.1 stays the shell of the setup itself)
+pwsh

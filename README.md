@@ -174,7 +174,7 @@ whose manifest refuses a normal shell: `--user-install` lists it at the end with
 `scoop install` command for an Administrator shell or `sudo scoop install`), `docs`,
 `network`, `netdiag`, `db`,
 `dbclients`, `server`, `azure`,
-`azure-tools`, `iac` (Terraform), `pwsh`, `automation`, `media`. Two virtual profiles
+`azure-tools`, `iac` (Terraform), `automation`, `media`. Two virtual profiles
 bundle them: `devel`, the developer workplace this project was written for (and the
 content of `default.txt`), and `devops` for infrastructure work (Azure CLI, AzCopy,
 Service Bus and Storage Explorer, Terraform with tflint, terraform-docs and trivy,

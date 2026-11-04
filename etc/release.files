@@ -51,7 +51,6 @@ etc/profiles/node/packages.txt
 etc/profiles/node/system.env
 etc/profiles/perl/packages.txt
 etc/profiles/perl/system.env
-etc/profiles/pwsh/packages.txt
 etc/profiles/python/debian.txt
 etc/profiles/python/packages.txt
 etc/profiles/python/system.env

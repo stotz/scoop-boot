@@ -208,14 +208,14 @@ try {
             if (-not (Test-Path (Join-Path $fakeRoot "apps/$app/current"))) { return "apps\$app\current missing" }
         }
         if (Test-Path (Join-Path $fakeRoot 'apps/msys2')) { return 'msys2 installed although c++ is not in the profile' }
-        if (-not ($o -match 'Packages: 10 installed, 0 already installed, 0 skipped, 0 failed')) { return 'summary line not as expected' }
+        if (-not ($o -match 'Packages: 11 installed, 0 already installed, 0 skipped, 0 failed')) { return 'summary line not as expected' }
         $store = Read-FakeStore
         if ($store.User.PSObject.Properties.Name -contains 'JAVA_HOME') { return 'User JAVA_HOME survived the cleanup' }
         if ("$($store.User.Path)" -match 'apps') { return "User PATH still has Scoop entries: $($store.User.Path)" }
     }
     Invoke-FakeStep -Name '--user-install (second run)' -Arguments @('--user-install') -Check {
         param($o)
-        if (-not ($o -match 'Packages: 0 installed, 10 already installed, 0 skipped, 0 failed')) { return 'second run did not find everything installed' }
+        if (-not ($o -match 'Packages: 0 installed, 11 already installed, 0 skipped, 0 failed')) { return 'second run did not find everything installed' }
     }
     Invoke-FakeStep -Name '--profile=java,python,tortoisegit --force' -Arguments @('--profile=java,python,tortoisegit', '--force') -Check {
         param($o)
@@ -229,7 +229,7 @@ try {
         if (-not ($o -match 'Open PowerShell as Administrator and run:')) { return 'no elevated-shell hint' }
         if (-not ($o -match '^\s+scoop install nonportable/tortoisegit-np$')) { return 'no scoop install command in the hint' }
         if (-not ($o -match 'Installation Complete, 1 step\(s\) left for an Administrator')) { return 'no Administrator summary' }
-        if (-not ($o -match 'Packages: 0 installed, 10 already installed, 0 skipped, 0 failed, 1 for an Administrator')) { return 'summary line not as expected' }
+        if (-not ($o -match 'Packages: 0 installed, 11 already installed, 0 skipped, 0 failed, 1 for an Administrator')) { return 'summary line not as expected' }
     }
     $wrapper = Join-Path $fakeRoot 'bin/scoop.ps1'
     $output = & $wrapper install extras/hxd *>&1 | ForEach-Object { "$_" }
