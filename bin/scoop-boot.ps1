@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.8 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.9 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,16 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.8
+    Version: 2.0.9
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.9:
+    - GRADLE_USER_HOME and M2_REPO are not set at all any more (Urs): Gradle's
+      default is ~\.gradle of whoever runs it, Maven never read M2_REPO. The
+      java profile removes both in the system file (Machine) and in the user
+      file (User, against Scoop's env_set after every Scoop command). The
+      cache section of the system file is the one place to set GRADLE_USER_HOME
 
     Changes in v2.0.8:
     - java profile: -GRADLE_USER_HOME and -M2_REPO in the system file remove
@@ -738,7 +745,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.8"
+$global:ScriptVersion = "2.0.9"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
