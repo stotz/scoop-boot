@@ -18,6 +18,7 @@
 #   FINGERPRINT_FILE file that must name the signing key's fingerprint  [README.md]
 #   RELEASE_DIR      directory of release.files, release.manifest, LATEST, allowed_signers [etc]
 #   MAIN_BRANCH      branch releases are cut on                         [main]
+#   KEY              private key that signs the manifest; the environment wins [~/.ssh/id_ed25519]
 #
 # Steps, each checked before the next:
 #   1. inside a repository, on MAIN_BRANCH, clean working tree, tag matches and is
@@ -87,6 +88,7 @@ done
 
 top=$(git rev-parse --show-toplevel 2>/dev/null) || fail "not inside a Git repository"
 cd "$top"
+env_key="${KEY:-}"
 RELEASE_DIR="${RELEASE_DIR:-etc}"
 NAMESPACE="${NAMESPACE:-$(basename "$top")}"
 TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
@@ -101,7 +103,7 @@ if [ -f "$RELEASE_DIR/release.conf" ]; then
 else
     ok "no $RELEASE_DIR/release.conf, defaults (namespace $NAMESPACE, tags vX.Y.Z)"
 fi
-KEY="${KEY:-$HOME/.ssh/id_ed25519}"
+KEY="${env_key:-${KEY:-$HOME/.ssh/id_ed25519}}"
 files="$RELEASE_DIR/release.files"
 manifest="$RELEASE_DIR/release.manifest"
 allowed="$RELEASE_DIR/allowed_signers"
