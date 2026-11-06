@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.7 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.8 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,15 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.7
+    Version: 2.0.8
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.8:
+    - java profile: -GRADLE_USER_HOME and -M2_REPO in the system file remove
+      the Machine values an older version of the file set (both are User
+      scope since 2.0.6), so --profile=... --force and --admin-setenv correct
+      a machine without a reset
 
     Changes in v2.0.7:
     - release.sh reads KEY from etc/release.conf as well (the environment
@@ -732,7 +738,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.7"
+$global:ScriptVersion = "2.0.8"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
