@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.4 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.6 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,38 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.4
+    Version: 2.0.6
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.6 (findings of the entb-devl-env work, 05./06.11.):
+    - java profile: GRADLE_USER_HOME and M2_REPO move to the user file (User
+      scope). At Machine scope $USERPROFILE was expanded once, to the account
+      that ran --admin-setenv; now every session, elevated ones included, gets
+      its own profile path, and --clean-user-scope replaces Scoop's
+      GRADLE_USER_HOME (apps\gradle\current\.gradle) with it
+    - bin/release.sh, delivered to C:\usr\bin: the release script, generic
+      (etc/release.conf: NAMESPACE, TAG_PATTERN, VERSION_FILE, VERSION_REGEX,
+      FINGERPRINT_FILE, RELEASE_DIR, MAIN_BRANCH; defaults from the directory
+      name and vX.Y.Z tags). Fixes: EXIT trap (fail() never reached the ERR
+      trap), the manifest counts as written before the block that writes it,
+      a first release leaves no half manifest behind, HEAD must be
+      origin/main (push first, CI runs on that commit), signed annotated tag
+      (--no-sign), git rev-parse --show-toplevel. tools/release.sh calls it
+    - README: how .ps1 shims pick their engine (5.1 from Windows PowerShell,
+      pwsh from cmd and Git Bash); scripts that need 7 restart under pwsh
+
+    Changes in v2.0.5:
+    - PSModulePath+= on the Machine scope keeps the Windows defaults (Program
+      Files and system32 module directories) at the end of the value. Once the
+      Machine variable exists, Windows PowerShell 5.1 adds nothing of its own:
+      on the laptop (05.11.) the value lost system32, where
+      Microsoft.PowerShell.Archive lives on current builds, and Scoop's
+      installer failed on Expand-Archive. Repair on a machine that already has
+      the short value: --admin-setenv again
+    - --admin-reset cleans PSModulePath entry by entry in both scopes (as the
+      PATH) instead of deleting the whole variable once an entry points into
+      C:\usr; self-test 63
 
     Changes in v2.0.4:
     - pwsh (PowerShell 7) moves from its own profile into base: entb-devl-env
@@ -697,7 +726,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.4"
+$global:ScriptVersion = "2.0.6"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

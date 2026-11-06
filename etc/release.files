@@ -6,6 +6,7 @@ bin/scoop-boot.psm1
 bin/scoop.ps1
 bin/scoop.cmd
 bin/scoop
+bin/release.sh
 etc/packages/default.txt
 etc/packages/debian.txt
 etc/wsl/debian-setup.sh
@@ -34,6 +35,7 @@ etc/profiles/ide/packages.txt
 etc/profiles/java/debian.txt
 etc/profiles/java/packages.txt
 etc/profiles/java/system.env
+etc/profiles/java/user.env
 etc/profiles/java11/packages.txt
 etc/profiles/java11/system.env
 etc/profiles/java17/packages.txt

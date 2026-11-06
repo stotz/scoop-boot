@@ -431,6 +431,14 @@ Everything a command prints goes to the daily log, with the command, mode and ve
 in front of each line, so that a question about a machine can be answered from the log
 rather than from memory.
 
+Shims: `C:\usr\shims` holds one launcher per command, in front of everything else on
+the PATH. For an `.exe` the shim is an `.exe`; for a `.ps1` target (`scoop shim add
+name C:\path\tool.ps1`) Scoop writes `name.ps1` and `name.cmd`, and which engine runs
+the script depends on the caller: Windows PowerShell picks `name.ps1` and runs it under
+5.1, cmd and Git Bash pick `name.cmd`, which starts `pwsh` when it is installed. A
+script that needs PowerShell 7 has to check `$PSVersionTable.PSVersion` and restart
+itself under `pwsh`; scoop-boot itself stays on 5.1 on purpose.
+
 Environment file syntax, load order and version pinning: [docs/environment-files.md](docs/environment-files.md).
 
 ## Commands
@@ -512,12 +520,16 @@ committed file. From Git Bash, call `powershell -File tools/test.ps1` with the P
 path; a Windows path with backslashes is eaten by the shell.
 
 To test a branch on one machine: `scoop-boot.ps1 --update --branch=NAME`, and
-`--update --branch=main` when done. Releases are cut on `main` with
-`tools/release.sh vNNNN` (Git Bash): manifest from the committed blobs, SSH signature,
-`etc/LATEST`, commit, tag, push. The signing key's fingerprint must appear in this
-README (above); a new key is a new trust anchor and is changed on purpose. A run that
-fails after the manifest was written (a mistyped passphrase) restores the manifest and
-the previous signature, so the next run starts from a clean tree.
+`--update --branch=main` when done. Releases are cut on `main`, pushed, with
+`tools/release.sh vNNNN` (Git Bash; the script is `bin/release.sh`, delivered to
+`C:\usr\bin` so that other repositories can use it): manifest from the committed
+blobs, SSH signature, `etc/LATEST`, commit, signed annotated tag (git's SSH signing,
+`--no-sign` for a plain one), push of branch and tag. The repository is read from
+`etc/release.conf` (namespace, tag pattern, version file; defaults: the directory
+name and `vX.Y.Z` tags). The signing key's fingerprint must appear in this README
+(above); a new key is a new trust anchor and is changed on purpose. A run that fails
+after the manifest was written (a mistyped passphrase) restores the manifest and the
+previous signature, so the next run starts from a clean tree.
 
 ## Documents
 

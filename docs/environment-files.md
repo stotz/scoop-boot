@@ -133,7 +133,7 @@ C:\usr\
   etc\profiles\              profiles.conf, system.footer.env, one directory per profile (delivered)
   etc\wsl\                   debian-setup.sh for --wsl-setup (delivered)
   etc\exports\               package exports (--export), input for --import
-  etc\release.files          the files --update delivers (read by --update --branch and tools/release.sh)
+  etc\release.files          the files --update delivers (read by --update --branch and bin/release.sh)
   etc\scoop-boot.conf        DIR= lines: the directories --admin-init creates; PROFILE= of this machine
   etc\allowed_signers        the release signing key (first --update, trust on first use)
   etc\release.manifest(.sig) hashes and signature of the installed release

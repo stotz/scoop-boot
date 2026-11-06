@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 2.0.4
+    Version: 2.0.6
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "2.0.4"
+$global:ScriptVersion = "2.0.6"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -423,6 +423,33 @@ if (-not (Test-Path variable:global:EnvFileDefinitions)) { $global:EnvFileDefini
 # here first, so that a prepend after a sweep sees the swept PATH and the net
 # effect can be compared with the registry at the end. $null = no dry run active.
 if (-not (Test-Path variable:global:EnvDryRunState)) { $global:EnvDryRunState = $null }
+
+function Get-PSModulePathDefaults {
+    <#
+    .SYNOPSIS
+        The two module directories Windows PowerShell relies on. As long as the Machine
+        PSModulePath does not exist, PowerShell computes them itself; once the variable
+        exists, 5.1 takes it as the list and adds nothing (the laptop, 05.11.: a Machine
+        value of modules;Program Files lost system32, where Microsoft.PowerShell.Archive
+        lives on current builds, and Scoop's installer failed on Expand-Archive). Every
+        write to the Machine PSModulePath keeps them at the end. Empty outside Windows.
+    #>
+    $defaults = @()
+    if ($env:ProgramFiles) { $defaults += "$env:ProgramFiles\WindowsPowerShell\Modules" }
+    if ($env:SystemRoot) { $defaults += "$env:SystemRoot\system32\WindowsPowerShell\v1.0\Modules" }
+    return $defaults
+}
+
+function Add-PSModulePathDefaults {
+    # Appends the missing Windows defaults to a Machine PSModulePath value
+    param([string]$Name, [string]$Scope, [string]$Value)
+    if ($Name -ine 'PSModulePath' -or $Scope -ne 'Machine') { return $Value }
+    $parts = @($Value -split ';' | Where-Object { $_ })
+    foreach ($default in (Get-PSModulePathDefaults)) {
+        if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $default })) { $parts += $default }
+    }
+    return ($parts -join ';')
+}
 
 function Get-EnvValue {
     <#
@@ -1363,6 +1390,7 @@ function Apply-EnvironmentOperations {
                 } else {
                     $newValue = $expandedValue
                 }
+                $newValue = Add-PSModulePathDefaults -Name $op.Name -Scope $Scope -Value $newValue
 
                 Set-EnvValue -Name $op.Name -Value $newValue -Scope $Scope -DryRun $DryRun
                 if ($DryRun) { Write-DryRun "Prepend to $($op.Name): $expandedValue [$Scope from $fileName]" }
@@ -1379,6 +1407,7 @@ function Apply-EnvironmentOperations {
                 } else {
                     $newValue = $expandedValue
                 }
+                $newValue = Add-PSModulePathDefaults -Name $op.Name -Scope $Scope -Value $newValue
 
                 Set-EnvValue -Name $op.Name -Value $newValue -Scope $Scope -DryRun $DryRun
                 if ($DryRun) { Write-DryRun "Append to $($op.Name): $expandedValue [$Scope from $fileName]" }
@@ -3236,6 +3265,26 @@ JAVA_HOME=C:\java
         if ($null -eq $savedRoot.Fake) { Remove-Item Env:SCOOPBOOT_FAKE -ErrorAction SilentlyContinue } else { $env:SCOOPBOOT_FAKE = $savedRoot.Fake }
         Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    $tests += $test
+
+    # Test 63: a write to the Machine PSModulePath keeps the Windows defaults (Program
+    # Files and system32 modules), whether the variable existed before or not
+    $test = @{Name = "PSModulePath (Machine): Windows defaults kept on prepend"; Result = $false}
+    try {
+        $savedPF = $env:ProgramFiles; $savedSR = $env:SystemRoot
+        $env:ProgramFiles = 'C:\Program Files'; $env:SystemRoot = 'C:\Windows'
+        $pf = 'C:\Program Files\WindowsPowerShell\Modules'
+        $sys = 'C:\Windows\system32\WindowsPowerShell\v1.0\Modules'
+        $fresh = Add-PSModulePathDefaults -Name 'PSModulePath' -Scope 'Machine' -Value 'C:\usr\modules'
+        $partial = Add-PSModulePathDefaults -Name 'PSModulePath' -Scope 'Machine' -Value "C:\usr\modules;$pf"
+        $complete = Add-PSModulePathDefaults -Name 'PSModulePath' -Scope 'Machine' -Value "C:\usr\modules;$pf\;$sys"
+        $user = Add-PSModulePathDefaults -Name 'PSModulePath' -Scope 'User' -Value 'C:\usr\modules'
+        $path = Add-PSModulePathDefaults -Name 'Path' -Scope 'Machine' -Value 'C:\usr\bin'
+        $env:ProgramFiles = $savedPF; $env:SystemRoot = $savedSR
+        $test.Result = ($fresh -eq "C:\usr\modules;$pf;$sys") -and ($partial -eq "C:\usr\modules;$pf;$sys") -and
+            ($complete -eq "C:\usr\modules;$pf\;$sys") -and ($user -eq 'C:\usr\modules') -and ($path -eq 'C:\usr\bin')
+        if (-not $test.Result) { Write-Host "       fresh=$fresh partial=$partial complete=$complete user=$user path=$path" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
     $tests += $test
 
     # Test 62: the User sweep also takes Scoop's modules entry out of PSModulePath (gsudo's
@@ -6447,7 +6496,8 @@ function Invoke-ScoopReset {
         'GRADLE_USER_HOME', 'M2_REPO',
         'LANG', 'LC_ALL', 'LANGUAGE'
     )
-    $varsToKeep = @('Path', 'TMP', 'TEMP')
+    # Path and PSModulePath are lists: cleaned entry by entry below, never as a whole
+    $varsToKeep = @('Path', 'PSModulePath', 'TMP', 'TEMP')
 
     function Remove-ScoopEnvironmentVariables {
         param([string]$Scope)
@@ -6490,6 +6540,14 @@ function Invoke-ScoopReset {
         Set-RegistryEnvironmentVariable -Name 'Path' -Value $newPath -Scope 'User'
         Write-Host "[OK] User PATH cleaned" -ForegroundColor Green
     }
+
+    # 5b. PSModulePath, both scopes (Scoop's modules directory, psmodule of gsudo)
+    Write-Host ""
+    Write-Host ">>> Cleaning PSModulePath..." -ForegroundColor Cyan
+    $moduleEntries = 0
+    $moduleEntries += Remove-ScoopPathEntries -Scope 'User' -Name 'PSModulePath'
+    $moduleEntries += Remove-ScoopPathEntries -Scope 'Machine' -Name 'PSModulePath'
+    if ($moduleEntries -eq 0) { Write-Host "[OK] No Scoop entries in PSModulePath" -ForegroundColor Gray }
 
     # 6. Clean Machine PATH
     Write-Host ""

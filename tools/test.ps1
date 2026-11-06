@@ -171,7 +171,7 @@ try {
     # A Machine PATH as Windows has it before the setup: --purge must leave these entries
     # and never empty the PATH
     New-Item -ItemType Directory -Path (Split-Path -Parent $registry) -Force | Out-Null
-    [IO.File]::WriteAllText($registry, "{`n  `"Machine`": { `"Path`": `"C:\\Windows\\system32;C:\\Windows`" },`n  `"User`": {}`n}`n", (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($registry, "{`n  `"Machine`": { `"Path`": `"C:\\Windows\\system32;C:\\Windows`", `"PSModulePath`": `"C:\\Program Files\\WindowsPowerShell\\Modules`" },`n  `"User`": {}`n}`n", (New-Object Text.UTF8Encoding($false)))
     function Read-FakeStore { if (Test-Path $registry) { Get-Content $registry -Raw | ConvertFrom-Json } else { $null } }
     function Invoke-FakeStep {
         param([string]$Name, [string[]]$Arguments, [scriptblock]$Check, [int]$ExpectedExit = 0)
@@ -201,6 +201,7 @@ try {
         if ($store.Machine.JAVA_HOME -ne "$fakeRoot\apps\temurin25-jdk\current") { return "Machine JAVA_HOME is '$($store.Machine.JAVA_HOME)'" }
         if ($store.Machine.PSObject.Properties.Name -contains 'MSYS2_HOME') { return 'MSYS2_HOME set although c++ is not in the profile' }
         if (-not ("$($store.Machine.Path)" -like "$fakeRoot\bin;$fakeRoot\shims;*")) { return "Machine PATH does not start with bin;shims: $($store.Machine.Path)" }
+        if (-not ("$($store.Machine.PSModulePath)" -like "$fakeRoot\modules;C:\Program Files\WindowsPowerShell\Modules*")) { return "Machine PSModulePath lost the Windows entry: $($store.Machine.PSModulePath)" }
     }
     Invoke-FakeStep -Name '--user-install' -Arguments @('--user-install') -Check {
         param($o)
@@ -267,6 +268,8 @@ try {
         if ("$($store.Machine.Path)" -match 'apps|shims') { return "Machine PATH still has Scoop entries: $($store.Machine.Path)" }
         if ($store.Machine.TMP -ne 'C:\tmp') { return 'TMP (not Scoop''s) was removed' }
         if (-not ("$($store.Machine.Path)" -match 'bin')) { return 'bin left the Machine PATH without --purge' }
+        if ("$($store.Machine.PSModulePath)" -match [regex]::Escape($fakeRoot)) { return "Machine PSModulePath still has Scoop's modules: $($store.Machine.PSModulePath)" }
+        if (-not ("$($store.Machine.PSModulePath)" -match 'Program Files')) { return "Machine PSModulePath lost the Windows entry in the reset: $($store.Machine.PSModulePath)" }
     }
     Invoke-FakeStep -Name '--admin-reset --force --purge' -Arguments @('--admin-reset', '--force', '--purge') -Check {
         param($o)
