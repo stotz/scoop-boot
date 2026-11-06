@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 2.0.9
+    Version: 2.0.10
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "2.0.9"
+$global:ScriptVersion = "2.0.10"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -1456,6 +1456,13 @@ function Test-ScoopOwnedPath {
     return $false
 }
 
+function Test-PSModulePathUserDefault {
+    # True for PowerShell's own per-user module directories (5.1 and 7), the entries
+    # Scoop seeds into the User PSModulePath; PowerShell finds them without the variable
+    param([string]$Entry)
+    return ($Entry.TrimEnd('\') -imatch '\\Documents\\(Windows)?PowerShell\\Modules$')
+}
+
 function Remove-ScoopPathEntries {
     <#
     .SYNOPSIS
@@ -1477,6 +1484,16 @@ function Remove-ScoopPathEntries {
     $parts = @($current -split ';' | Where-Object { $_ })
     $keep = @($parts | Where-Object { -not (Test-ScoopOwnedPath $_) })
     $removed = @($parts | Where-Object { Test-ScoopOwnedPath $_ })
+    if ($Name -ieq 'PSModulePath' -and $Scope -eq 'User') {
+        # Scoop seeds a missing User PSModulePath with Documents\WindowsPowerShell\Modules
+        # before it prepends <root>\modules (ensure_in_psmodulepath). PowerShell adds its
+        # per-user directory by itself, and a User value hides the Machine value in cmd
+        # and every other non-PowerShell process (User wins over Machine), so the seed
+        # goes as well and the variable disappears when nothing else is left
+        $seeded = @($keep | Where-Object { Test-PSModulePathUserDefault $_ })
+        $keep = @($keep | Where-Object { -not (Test-PSModulePathUserDefault $_) })
+        $removed += $seeded
+    }
     $label = if ($Name -ieq 'Path') { 'PATH' } else { $Name }
     foreach ($entry in $removed) {
         if ($DryRun) { Write-DryRun "Remove from ${label}: $entry [$Scope]" }
@@ -3301,8 +3318,17 @@ JAVA_HOME=C:\java
             Set-RegistryEnvironmentVariable -Name 'PSModulePath' -Value "$root\modules" -Scope 'User'
             $second = Remove-ScoopPathEntries -Scope 'User' -Name 'PSModulePath' 6> $null
             $afterSecond = Get-RegistryEnvironmentVariable -Name 'PSModulePath' -Scope 'User'
-            $test.Result = ($first -eq 1) -and ($afterFirst -eq 'C:\mods') -and ($second -eq 1) -and [string]::IsNullOrEmpty($afterSecond)
-            if (-not $test.Result) { Write-Host "       first=$first [$afterFirst] second=$second [$afterSecond]" -ForegroundColor Yellow }
+            # Scoop's seed (Documents\WindowsPowerShell\Modules) goes with the modules entry,
+            # a foreign entry next to it stays
+            Set-RegistryEnvironmentVariable -Name 'PSModulePath' -Value "$root\modules;C:\Users\x\Documents\WindowsPowerShell\Modules" -Scope 'User'
+            $third = Remove-ScoopPathEntries -Scope 'User' -Name 'PSModulePath' 6> $null
+            $afterThird = Get-RegistryEnvironmentVariable -Name 'PSModulePath' -Scope 'User'
+            Set-RegistryEnvironmentVariable -Name 'PSModulePath' -Value "C:\Users\x\Documents\PowerShell\Modules\;C:\mods" -Scope 'User'
+            $fourth = Remove-ScoopPathEntries -Scope 'User' -Name 'PSModulePath' 6> $null
+            $afterFourth = Get-RegistryEnvironmentVariable -Name 'PSModulePath' -Scope 'User'
+            $test.Result = ($first -eq 1) -and ($afterFirst -eq 'C:\mods') -and ($second -eq 1) -and [string]::IsNullOrEmpty($afterSecond) -and
+                ($third -eq 2) -and [string]::IsNullOrEmpty($afterThird) -and ($fourth -eq 1) -and ($afterFourth -eq 'C:\mods')
+            if (-not $test.Result) { Write-Host "       first=$first [$afterFirst] second=$second [$afterSecond] third=$third [$afterThird] fourth=$fourth [$afterFourth]" -ForegroundColor Yellow }
         } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     $tests += $test
