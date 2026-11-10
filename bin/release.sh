@@ -36,8 +36,8 @@
 #      manifest and the old signature from HEAD
 #   5. verified with ssh-keygen -Y verify, the manifest bytes on standard input, as
 #      scoop-boot.ps1 --update does it
-#   6. RELEASE_DIR/LATEST = tag; commit "release <tag>"; tag -s (git's SSH signing:
-#      gpg.format ssh and user.signingkey) or -a with --no-sign; push branch and tag
+#   6. RELEASE_DIR/LATEST = tag; commit "release <tag>"; tag -s (git's own signing
+#      configuration, SSH or OpenPGP) or -a with --no-sign; push branch and tag
 #
 # scoop-boot.ps1 --update on every machine then reads LATEST, verifies the manifest
 # with the key in its local etc/allowed_signers and compares every file with the
@@ -136,8 +136,11 @@ command -v ssh-keygen >/dev/null || fail "ssh-keygen not found"
 read -r key_type key_blob _ < "$KEY.pub" || true
 [ -n "$key_type" ] && [ -n "$key_blob" ] || fail "public key file is not in OpenSSH format: $KEY.pub"
 if [ -z "$NO_SIGN" ]; then
-    [ "$(git config --get gpg.format || true)" = "ssh" ] && [ -n "$(git config --get user.signingkey || true)" ] ||
-        fail "git tag -s needs gpg.format=ssh and user.signingkey (git config --global gpg.format ssh; git config --global user.signingkey $KEY.pub), or use --no-sign"
+    # git tag -s signs with whatever git is configured for in this repository (SSH or
+    # OpenPGP, includeIf rules included); it only has to be configured at all
+    [ -n "$(git config --get user.signingkey || true)" ] ||
+        fail "git tag -s needs user.signingkey in the git configuration of this repository (SSH: gpg.format ssh and the .pub file; OpenPGP: the key id), or use --no-sign"
+    ok "tag signing: $(git config --get gpg.format || echo openpgp) key $(git config --get user.signingkey)"
 fi
 
 # 2. allowed_signers and the fingerprint

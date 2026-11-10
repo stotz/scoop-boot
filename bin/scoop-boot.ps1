@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.14 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.15 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,14 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.14
+    Version: 2.0.15
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.15:
+    - release.sh accepts any tag-signing configuration git has for the
+      repository (SSH or OpenPGP), it only insists on user.signingkey; 2.0.6
+      demanded gpg.format=ssh and refused a repository signed with GPG
 
     Changes in v2.0.14:
     - Environment files in UTF-16 (BOM FF FE or FE FF: Out-File of Windows
@@ -777,7 +782,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.14"
+$global:ScriptVersion = "2.0.15"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

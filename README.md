@@ -523,8 +523,8 @@ To test a branch on one machine: `scoop-boot.ps1 --update --branch=NAME`, and
 `--update --branch=main` when done. Releases are cut on `main`, pushed, with
 `tools/release.sh vNNNN` (Git Bash; the script is `bin/release.sh`, delivered to
 `C:\usr\bin` so that other repositories can use it): manifest from the committed
-blobs, SSH signature, `etc/LATEST`, commit, signed annotated tag (git's SSH signing,
-`--no-sign` for a plain one), push of branch and tag. The repository is read from
+blobs, SSH signature, `etc/LATEST`, commit, signed annotated tag (git's own signing
+configuration, SSH or OpenPGP; `--no-sign` for a plain one), push of branch and tag. The repository is read from
 `etc/release.conf` (namespace, tag pattern, version file; defaults: the directory
 name and `vX.Y.Z` tags). The signing key's fingerprint must appear in this README
 (above); a new key is a new trust anchor and is changed on purpose. A run that fails
