@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.10 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.11 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,19 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.10
+    Version: 2.0.11
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.11:
+    - Environment files are read as UTF-8 when their bytes are valid UTF-8
+      (BOM or not) and as the Windows ANSI code page otherwise. Windows
+      PowerShell read a UTF-8 file without BOM as ANSI, so a name with an
+      umlaut written by pwsh or an editor arrived garbled in the registry
+      (ENTB_USER_NAME on an ENTB AVD, 06.11.); files saved as ANSI keep
+      working. Self-test 64
+    - base profile: DOWNLOADS=$DATA\Downloads (the line Urs added by hand on
+      every machine; --profile --force dropped it)
 
     Changes in v2.0.10:
     - The User sweep also removes Scoop's seed from the User PSModulePath
@@ -753,7 +763,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.10"
+$global:ScriptVersion = "2.0.11"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }

@@ -16,7 +16,7 @@
     broken module can always be replaced with --update.
 
 .NOTES
-    Version: 2.0.10
+    Version: 2.0.11
     Same version as scoop-boot.ps1; the changelog is in scoop-boot.ps1.
 #>
 
@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # GLOBAL VARIABLES
 # ============================================================================
 
-$global:ScriptVersion = "2.0.10"
+$global:ScriptVersion = "2.0.11"
 $global:ScriptRoot = $PSScriptRoot
 $global:BaseDir = Split-Path -Parent $global:ScriptRoot
 $global:EnvDir = Join-Path $global:BaseDir "etc\environments"
@@ -1323,6 +1323,30 @@ function Get-EnvironmentFiles {
     return $files
 }
 
+function Get-TextFileLines {
+    <#
+    .SYNOPSIS
+        Lines of a text file, decoded as UTF-8 when the bytes are valid UTF-8 (with or
+        without BOM), as the Windows ANSI code page otherwise.
+    .DESCRIPTION
+        Windows PowerShell's Get-Content reads a file without BOM as ANSI, so a UTF-8
+        file written by pwsh, an editor or entb_setup turns "Künzle" into "KÃ¼nzle"
+        (the ENTB AVD, 06.11.); a file saved as ANSI must still work. Valid UTF-8 is
+        unambiguous, so it is tried first.
+    #>
+    param([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    try {
+        $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
+    } catch {
+        $ansi = try { [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage) } catch { $null }
+        if ($null -eq $ansi) { $ansi = try { [Text.Encoding]::GetEncoding(1252) } catch { [Text.Encoding]::GetEncoding(28591) } }
+        $text = $ansi.GetString($bytes)
+    }
+    $text = $text.TrimStart([char]0xFEFF)
+    return @(($text -replace "`r`n", "`n") -split "`n")
+}
+
 function Read-EnvironmentFile {
     param([string]$FilePath)
 
@@ -1332,7 +1356,7 @@ function Read-EnvironmentFile {
         return $operations
     }
 
-    $lines = Get-Content $FilePath
+    $lines = Get-TextFileLines -Path $FilePath
     foreach ($line in $lines) {
         $parsed = Parse-EnvironmentLine -Line $line
         if ($parsed) {
@@ -3282,6 +3306,28 @@ JAVA_HOME=C:\java
         if ($null -eq $savedRoot.Fake) { Remove-Item Env:SCOOPBOOT_FAKE -ErrorAction SilentlyContinue } else { $env:SCOOPBOOT_FAKE = $savedRoot.Fake }
         Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    $tests += $test
+
+    # Test 64: environment files in UTF-8 (with and without BOM) and in ANSI all yield
+    # the same non-ASCII value; Windows PowerShell's default would read UTF-8 as ANSI
+    $test = @{Name = "Env file encoding: UTF-8, UTF-8 BOM and ANSI read alike"; Result = $false}
+    try {
+        $encDir = Join-Path ([IO.Path]::GetTempPath()) "scoopboot-enc-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        New-Item -ItemType Directory -Path $encDir -Force | Out-Null
+        $expected = 'Cyril K' + [char]0xFC + 'nzle'
+        $line = "ENTB_USER_NAME=$expected`n"
+        $utf8 = Join-Path $encDir 'utf8.env'; $bom = Join-Path $encDir 'bom.env'; $ansi = Join-Path $encDir 'ansi.env'
+        [IO.File]::WriteAllText($utf8, $line, (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText($bom, $line, (New-Object Text.UTF8Encoding($true)))
+        [IO.File]::WriteAllBytes($ansi, [Text.Encoding]::GetEncoding(1252).GetBytes($line))
+        $values = foreach ($f in @($utf8, $bom, $ansi)) {
+            $ops = @(Read-EnvironmentFile -FilePath $f | Where-Object { $_.Name -eq 'ENTB_USER_NAME' })
+            if ($ops.Count -eq 1) { $ops[0].Value } else { "(none in $(Split-Path -Leaf $f))" }
+        }
+        Remove-Item -Path $encDir -Recurse -Force -ErrorAction SilentlyContinue
+        $test.Result = @($values | Where-Object { $_ -ceq $expected }).Count -eq 3
+        if (-not $test.Result) { Write-Host "       values: $($values -join ' | ')" -ForegroundColor Yellow }
+    } catch { Write-Host "       $($_.Exception.Message)" -ForegroundColor Yellow }
     $tests += $test
 
     # Test 63: a write to the Machine PSModulePath keeps the Windows defaults (Program
