@@ -3,7 +3,7 @@
     Bootstrap script for portable Windows development environments using Scoop package manager.
 
 .DESCRIPTION
-    scoop-boot.ps1 v2.0.11 - Portable Windows Development Environment Bootstrap
+    scoop-boot.ps1 v2.0.14 - Portable Windows Development Environment Bootstrap
 
     Features:
     - Setup in three commands: --admin-init, --admin-setenv, --user-install;
@@ -30,9 +30,23 @@
     All parameters can be specified in any order.
 
 .NOTES
-    Version: 2.0.11
+    Version: 2.0.14
     Author: System Administrator
     Requires: PowerShell 5.1 or higher
+
+    Changes in v2.0.14:
+    - Environment files in UTF-16 (BOM FF FE or FE FF: Out-File of Windows
+      PowerShell, Notepad's "Unicode") are decoded as such; 2.0.11 fell
+      through to ANSI for them and self-test 23 failed on Windows. Test 64
+      covers UTF-16 as well
+
+    Changes in v2.0.13:
+    - The comment of 2.0.11 carried an umlaut; scoop-boot.psm1 is ASCII again
+      (lint: PSUseBOMForUnicodeEncodedFile, and Windows PowerShell reads the
+      module as ANSI). No functional change
+
+    Changes in v2.0.12:
+    - devops profile includes media (ffmpeg, IrfanView, Krita), as devel does
 
     Changes in v2.0.11:
     - Environment files are read as UTF-8 when their bytes are valid UTF-8
@@ -763,7 +777,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5 -or
 # module could never be replaced. The few things --update needs are defined here
 # as fallbacks when the import fails; the module's versions win when it loads.
 
-$global:ScriptVersion = "2.0.11"
+$global:ScriptVersion = "2.0.14"
 $global:BaseDir = Split-Path -Parent $PSScriptRoot
 $global:BranchFile = Join-Path $global:BaseDir "etc\scoop-boot.branch"
 if (-not (Test-Path variable:global:ScoopBootQuiet)) { $global:ScoopBootQuiet = $false }
